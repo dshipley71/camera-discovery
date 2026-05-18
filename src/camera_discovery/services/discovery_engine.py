@@ -22,8 +22,8 @@ COORD_RE = re.compile(r"(?<!\d)([-+]?\d{1,2}\.\d{3,})\s*,\s*([-+]?\d{1,3}\.\d{3,
 JSON_FEED_HINT_RE = re.compile(r"(?:\.json(?:\?|$)|/api/|/feed|/feeds|/layer|/layers|camera|cameras|mapserver|featureserver)", re.I)
 URL_KEYS = {"url", "stream", "stream_url", "streamurl", "hls", "hls_url", "hlsurl", "video", "video_url", "src"}
 IMAGE_KEYS = {"image", "image_url", "imageurl", "snapshot", "snapshot_url", "snapshoturl", "thumbnail", "thumbnail_url", "thumbnailurl", "preview", "preview_url", "poster", "poster_url"}
-LAT_KEYS = {"lat", "latitude", "y"}
-LON_KEYS = {"lon", "lng", "long", "longitude", "x"}
+LAT_KEYS = {"lat", "latitude", "y", "data_lat", "data_latitude"}
+LON_KEYS = {"lon", "lng", "long", "longitude", "x", "data_lon", "data_lng", "data_longitude"}
 TITLE_KEYS = {"name", "title", "label", "description", "camera", "id"}
 
 
@@ -211,6 +211,10 @@ class CandidateDiscoveryEngine:
             data = self._parse_json_text(text)
             if data is not None:
                 return self._extract_from_json_data(data, url, row, "json_endpoint")
+        if "html" in content_type.casefold() or "<html" in text[:1000].casefold():
+            html_rows = self._extract_from_html(url, row, text)
+            text_rows = self._extract_from_text(url, row, text)
+            return self._dedupe(html_rows + text_rows)
         return self._extract_from_text(url, row, text)
 
     def _extract_from_text(self, url: str, row: dict[str, str], text: str) -> list[CameraCandidate]:
@@ -220,6 +224,48 @@ class CandidateDiscoveryEngine:
         out.extend(self._extract_images_from_text(url, row, text, coords, "image_snapshot_regex"))
         for blob in self._extract_json_blobs(text):
             out.extend(self._extract_from_json_data(blob, url, row, "javascript_config"))
+        return self._dedupe(out)
+
+    def _extract_from_html(self, url: str, row: dict[str, str], html: str) -> list[CameraCandidate]:
+        """Extract camera candidates from structured HTML image/source tags.
+
+        This captures alt/title/data attributes and nearby text that plain regex
+        extraction loses. It also filters obvious site assets such as logos,
+        OpenGraph images, and map tiles so they do not become camera candidates.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        out: list[CameraCandidate] = []
+        for tag in soup.select("img, source, video"):
+            urls = _media_urls_from_html_tag(tag, url)
+            if not urls:
+                continue
+            metadata = _metadata_from_html_tag(tag)
+            parent_text = _nearby_text(tag)
+            coords = _record_lat_lon(metadata) or _record_lat_lon(_metadata_from_html_tag(tag.parent)) if getattr(tag, "parent", None) is not None else None
+            title = _first_nonempty(metadata.get("alt"), metadata.get("title"), metadata.get("aria_label"), metadata.get("data_title"), _humanize_camera_slug_from_url(urls[0][0]))
+            location_text = _first_nonempty(
+                metadata.get("location"),
+                metadata.get("data_location"),
+                metadata.get("data_title"),
+                metadata.get("alt"),
+                metadata.get("title"),
+                parent_text,
+                _humanize_camera_slug_from_url(urls[0][0]),
+            )
+            for media_url, media_type in urls:
+                if self.source_policy.is_blocked(media_url) or _looks_like_non_camera_asset(media_url):
+                    continue
+                candidate = self._candidate_from_stream(media_url, url, row, "html_media_tag")
+                candidate.title = title or candidate.title
+                candidate.location_text = location_text
+                candidate.source_metadata.update(_simple_metadata(metadata))
+                candidate.source_metadata["media_type"] = media_type
+                if media_type == "image_snapshot":
+                    candidate.source_metadata["snapshot_url"] = media_url
+                if coords:
+                    candidate.lat, candidate.lon = coords
+                    candidate.coordinate_source = "html_media_tag_attribute"
+                out.append(candidate)
         return self._dedupe(out)
 
     def _extract_from_linked_feeds(self, url: str, row: dict[str, str], html: str, client: httpx.Client) -> list[CameraCandidate]:
@@ -260,8 +306,13 @@ class CandidateDiscoveryEngine:
         for match in IMAGE_RE.finditer(text):
             raw = match.group(0).strip("'\"") if match.group(0).startswith("http") else (match.group(1) or "").strip("'\"")
             image_url = urljoin(source_url, raw)
-            if not self.source_policy.is_blocked(image_url):
+            if not self.source_policy.is_blocked(image_url) and not _looks_like_non_camera_asset(image_url):
                 candidate = self._candidate_from_stream(image_url, source_url, row, method)
+                slug_location = _humanize_camera_slug_from_url(image_url)
+                if slug_location:
+                    candidate.title = slug_location
+                    candidate.location_text = slug_location
+                    candidate.source_metadata["camera_id"] = _camera_id_from_url(image_url) or slug_location
                 candidate.source_metadata["media_type"] = "image_snapshot"
                 candidate.source_metadata["snapshot_url"] = image_url
                 if coords:
@@ -479,11 +530,11 @@ class CandidateDiscoveryEngine:
     def _candidate_geocode_query(self, candidate: CameraCandidate, target: TargetContext) -> str | None:
         parts: list[str] = []
         for value in (candidate.location_text, candidate.title):
-            if isinstance(value, str) and _specific_location_text(value):
+            if isinstance(value, str) and _specific_candidate_location_text(value, target):
                 parts.append(value.strip())
-        for key in ("city", "county", "route", "road", "cross_street", "direction", "source_name"):
+        for key in ("city", "county", "route", "road", "cross_street", "intersection", "direction", "camera_id", "source_name"):
             value = candidate.source_metadata.get(key)
-            if isinstance(value, str) and _specific_location_text(value):
+            if isinstance(value, str) and _specific_candidate_location_text(value, target):
                 parts.append(value.strip())
         parts = _dedupe_strings(parts)
         if not parts:
@@ -762,6 +813,107 @@ def _simple_metadata(record: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
+def _media_urls_from_html_tag(tag: Any, base_url: str) -> list[tuple[str, str]]:
+    urls: list[tuple[str, str]] = []
+    for attr in ("src", "data-src", "data-original", "data-image", "data-url", "poster"):
+        value = tag.get(attr) if hasattr(tag, "get") else None
+        if isinstance(value, str) and value.strip():
+            urls.extend(_media_urls_from_attribute(value, base_url))
+    srcset = tag.get("srcset") if hasattr(tag, "get") else None
+    if isinstance(srcset, str):
+        for part in srcset.split(","):
+            candidate = part.strip().split(" ", 1)[0]
+            urls.extend(_media_urls_from_attribute(candidate, base_url))
+    return _dedupe_media_urls(urls)
+
+
+def _media_urls_from_attribute(value: str, base_url: str) -> list[tuple[str, str]]:
+    absolute = urljoin(base_url, value.strip())
+    if _looks_like_hls(absolute):
+        return [(absolute, "hls")]
+    if _looks_like_image(absolute):
+        return [(absolute, "image_snapshot")]
+    return []
+
+
+def _metadata_from_html_tag(tag: Any) -> dict[str, Any]:
+    if tag is None or not hasattr(tag, "attrs"):
+        return {}
+    out: dict[str, Any] = {}
+    for raw_key, raw_value in dict(tag.attrs).items():
+        key = str(raw_key).replace("-", "_").casefold()
+        if isinstance(raw_value, list):
+            value: Any = " ".join(str(part) for part in raw_value)
+        else:
+            value = raw_value
+        if isinstance(value, (str, int, float, bool)):
+            out[key] = value
+    return out
+
+
+def _nearby_text(tag: Any) -> str | None:
+    parent = getattr(tag, "parent", None)
+    if parent is None or not hasattr(parent, "get_text"):
+        return None
+    text = " ".join(parent.get_text(" ", strip=True).split())
+    if not text or len(text) > 180:
+        return None
+    return text
+
+
+def _first_nonempty(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:300]
+    return None
+
+
+def _looks_like_non_camera_asset(url: str) -> bool:
+    lower = url.casefold()
+    asset_markers = (
+        "og-default", "open_graph", "opengraph", "favicon", "logo", "sprite", "placeholder",
+        "avatar", "basemap", "/dark_all/", "/light_all/", "/tile/", "/tiles/", "cartocdn.com",
+        "openstreetmap.org/", "leaflet", "mapbox", "googleapis.com", "gstatic.com",
+    )
+    if any(marker in lower for marker in asset_markers):
+        return True
+    path = urlparse(url).path.casefold()
+    name = path.rsplit("/", 1)[-1]
+    if name in {"default.png", "default.jpg", "blank.png", "blank.jpg", "loading.gif"}:
+        return True
+    return False
+
+
+def _camera_id_from_url(url: str) -> str | None:
+    stem = urlparse(url).path.rsplit("/", 1)[-1].split(".", 1)[0]
+    stem = unquote(stem).strip()
+    return stem or None
+
+
+def _humanize_camera_slug_from_url(url: str) -> str | None:
+    stem = (_camera_id_from_url(url) or "").casefold()
+    if not stem or len(stem) < 4:
+        return None
+    if _looks_like_non_camera_asset(url):
+        return None
+    text = re.sub(r"[_\-]+", " ", stem)
+    # Compact highway identifiers such as sr99/us101/i80 are common in camera image paths.
+    text = re.sub(r"sr(\d{1,3})(\d+(?:st|nd|rd|th))", r"SR \1 \2", text)
+    text = re.sub(r"\bsr\s*(\d+)", r"SR \1 ", text)
+    text = re.sub(r"\bus\s*(\d+)", r"US \1 ", text)
+    text = re.sub(r"\bi\s*(\d+)", r"I-\1 ", text)
+    text = re.sub(r"\b(nb|sb|eb|wb)\b", lambda m: m.group(1).upper(), text)
+    text = re.sub(r"(?<=\d)(nb|sb|eb|wb)", lambda m: " " + m.group(1).upper() + " ", text)
+    text = re.sub(r"(\d+)(st|nd|rd|th)", r"\1\2 ", text)
+    text = re.sub(r"\bst\b", "St", text)
+    text = re.sub(r"\brd\b", "Rd", text)
+    text = re.sub(r"\bave\b", "Ave", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not any(re.search(pattern, text, re.I) for pattern in (r"\b(?:I-|SR|US)\s*\d+\b", r"\b\d+(?:st|nd|rd|th)\b", r"\b(?:NB|SB|EB|WB)\b", r"\b(?:St|Rd|Ave)\b")):
+        return None
+    return text[:120]
+
+
 def _looks_like_image(url: str) -> bool:
     return bool(re.search(r"\.(?:jpg|jpeg|png|webp)(?:\?|$)", url, re.I))
 
@@ -810,7 +962,7 @@ def _url_query_mapping(url: str) -> dict[str, Any]:
     return {key: values[0] for key, values in qs.items() if values}
 
 
-def _specific_location_text(value: str) -> bool:
+def _specific_candidate_location_text(value: str, target: TargetContext) -> bool:
     text = value.strip()
     if not text or len(text) < 4:
         return False
@@ -819,7 +971,23 @@ def _specific_location_text(value: str) -> bool:
         return False
     if re.fullmatch(r"[A-Za-z0-9_.:/?=&%-]+", text) and "/" in text:
         return False
-    return any(ch.isalpha() for ch in text)
+    target_bits = [bit.casefold() for bit in (target.canonical_target, target.target_label, target.admin_region, target.country) if isinstance(bit, str)]
+    generic_camera_page = any(bit and bit in lowered for bit in target_bits) and any(phrase in lowered for phrase in ("live traffic cameras", "traffic cameras", "road conditions", "camera map", "webcams"))
+    has_specific_clue = any(
+        re.search(pattern, text, re.I)
+        for pattern in (
+            r"\b(?:I-|I\s*|SR\s*|US\s*)\d+\b",
+            r"\b(?:at|near|and|@)\b",
+            r"\b(?:NB|SB|EB|WB|northbound|southbound|eastbound|westbound)\b",
+            r"\b\d+(?:st|nd|rd|th)\b",
+            r"\b(?:St|Street|Rd|Road|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Hwy|Highway)\b",
+        )
+    )
+    if generic_camera_page and "road conditions" in lowered and not re.search(r"\b(?:at|near|@|I-|SR\s*|US\s*)\d*", text, re.I):
+        return False
+    if generic_camera_page and not has_specific_clue:
+        return False
+    return any(ch.isalpha() for ch in text) and (has_specific_clue or not generic_camera_page)
 
 
 def _valid_lat_lon(lat: float | None, lon: float | None) -> bool:

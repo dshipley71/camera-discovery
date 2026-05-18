@@ -88,3 +88,59 @@ def test_review_pipeline_writes_table_for_candidates_without_coordinates(tmp_pat
     assert rows[0]["stream_url"] == "https://public.example/camera.jpg"
     assert outputs.camera_candidates_table_rows == 1
     assert not outputs.untrusted_geojson_created
+
+
+
+def test_html_img_extraction_preserves_alt_coordinates_and_filters_assets(tmp_path):
+    engine = CandidateDiscoveryEngine(_cfg(tmp_path))
+    html = """
+    <html><body>
+      <img src="/static/og-default.png" alt="site preview">
+      <div data-lat="38.1111" data-lon="-121.2222">
+        <img src="/cameras/i5-main-st.jpg" alt="I-5 at Main St">
+      </div>
+    </body></html>
+    """
+    rows = engine._extract_from_response(
+        "https://public.example/cameras.html",
+        {"url": "https://public.example/cameras.html", "title": "camera page"},
+        html,
+        "text/html",
+    )
+    assert len(rows) == 1
+    assert rows[0].stream_url == "https://public.example/cameras/i5-main-st.jpg"
+    assert rows[0].title == "I-5 at Main St"
+    assert rows[0].lat == 38.1111
+    assert rows[0].lon == -121.2222
+    assert rows[0].coordinate_source == "html_media_tag_attribute"
+
+
+def test_image_url_slug_can_provide_specific_geocodable_location_text(tmp_path):
+    engine = CandidateDiscoveryEngine(_cfg(tmp_path))
+    rows = engine._extract_from_text(
+        "https://public.example/page.html",
+        {"url": "https://public.example/page.html", "title": "California Live Traffic Cameras"},
+        "https://cwwp2.dot.ca.gov/data/d10/cctv/image/100sbsr995thst/100sbsr995thst.jpg",
+    )
+    assert len(rows) == 1
+    assert rows[0].location_text
+    assert "SR 99" in rows[0].location_text
+    assert "camera_id" in rows[0].source_metadata
+
+
+def test_generic_page_title_is_not_used_for_candidate_geocoding(tmp_path):
+    engine = CandidateDiscoveryEngine(_cfg(tmp_path))
+    target = TargetContext(
+        user_query="Get me all traffic cameras from California",
+        intent=TargetIntent(raw_query="Get me all traffic cameras from California", canonical_target="California"),
+        canonical_target="California",
+        target_label="California",
+        admin_region="California",
+        country="United States",
+        trust_policy=TrustPolicy.REVIEW_ONLY,
+    )
+    candidate = CameraCandidate(
+        stream_url="https://public.example/og-default.png",
+        title="California Live Traffic Cameras — Road Conditions in California",
+    )
+    assert engine._candidate_geocode_query(candidate, target) is None
