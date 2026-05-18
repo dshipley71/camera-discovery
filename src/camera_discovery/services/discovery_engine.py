@@ -89,21 +89,38 @@ class CandidateDiscoveryEngine:
     def discover(self, target: TargetContext) -> CandidateSet:
         queries = self._search_queries(target) if self.config.discovery_mode in {DiscoveryMode.BLIND, DiscoveryMode.BOTH} else []
         results = self._source_rows(target, queries)
+        selected_rows = self._select_rows(results)
         raw: list[CameraCandidate] = []
-        for row in self._select_rows(results)[: self.config.max_pages]:
+        for row in selected_rows[: self.config.max_pages]:
             raw.extend(self._extract_from_source_row(row))
             if len(raw) >= self.config.max_streams:
                 break
+        if len(raw) < self.config.max_streams:
+            promoted_rows = self._promoted_asset_host_rows(raw, target, selected_rows)
+            for row in promoted_rows[: max(0, self.config.max_pages - len(selected_rows[: self.config.max_pages]))]:
+                raw.extend(self._extract_from_source_row(row))
+                if len(raw) >= self.config.max_streams:
+                    break
         raw = raw[: self.config.max_streams]
         unique = self._dedupe(raw)
         for c in raw:
             c.target_id = target.target_id
             c.target_index = target.target_index
             c.target_label = target.target_label or target.canonical_target
+            c.source_metadata.setdefault("camera_type", target.intent.camera_type_intent or "camera")
+            if "camera_id" not in c.source_metadata:
+                camera_id = _camera_id_from_url(c.stream_url)
+                if camera_id:
+                    c.source_metadata["camera_id"] = camera_id
         for c in unique:
             c.target_id = target.target_id
             c.target_index = target.target_index
             c.target_label = target.target_label or target.canonical_target
+            c.source_metadata.setdefault("camera_type", target.intent.camera_type_intent or "camera")
+            if "camera_id" not in c.source_metadata:
+                camera_id = _camera_id_from_url(c.stream_url)
+                if camera_id:
+                    c.source_metadata["camera_id"] = camera_id
         self._enrich_candidate_coordinates(unique, target)
         self._scope_candidates(unique, target)
         self._apply_llm_candidate_review(unique, target)
@@ -141,11 +158,28 @@ class CandidateDiscoveryEngine:
             f"{base} {camera_intent} cameras",
             f"{base} public camera feed json",
             f"{base} public live cameras m3u8",
-            f"{base} traffic cameras live stream",
             f"{base} webcam HLS",
             f"{base} camera map layer feed",
             f"{base} camera snapshots",
         ]
+        if "traffic" in camera_intent.casefold():
+            # Generic transportation-camera discovery expansions. These are not tied
+            # to any source, state, or agency; they help blind search surface
+            # official transportation camera pages and structured feeds.
+            candidates.extend(
+                [
+                    f"{base} traffic cameras",
+                    f"{base} transportation cameras",
+                    f"{base} department of transportation cameras",
+                    f"{base} road conditions cameras",
+                    f"{base} CCTV traffic cameras",
+                    f"{base} live traffic camera list",
+                    f"{base} traffic camera map",
+                    f"{base} traffic camera API json",
+                    f"{base} traffic camera MapServer FeatureServer",
+                    f"{base} traffic camera m3u8",
+                ]
+            )
         return _dedupe_strings(candidates)[: self.config.max_search_queries]
 
     def _blind_search(self, queries: list[str]) -> list[dict[str, str]]:
@@ -194,6 +228,11 @@ class CandidateDiscoveryEngine:
                 continue
             seen.add(key)
             selected.append({**row, "url": key})
+            for page_row in _pagination_rows({**row, "url": key}, self.config.max_directory_pages if row.get("source_provider") in {"directory", "direct"} else 1):
+                page_key = page_row["url"].split("#", 1)[0]
+                if page_key not in seen and not self.source_policy.block_reason(page_key):
+                    seen.add(page_key)
+                    selected.append(page_row)
         write_jsonl(self.logs_dir / "blocked_source_rows.jsonl", blocked_rows)
         return selected
 
@@ -225,16 +264,22 @@ class CandidateDiscoveryEngine:
             if data is not None:
                 return self._extract_from_json_data(data, url, row, "json_endpoint")
         if "html" in content_type.casefold() or "<html" in text[:1000].casefold():
-            html_rows = self._extract_from_html(url, row, text)
-            text_rows = self._extract_from_text(url, row, text)
-            return self._dedupe(html_rows + text_rows)
+            structured_rows = self._extract_structured_from_html_text(url, row, text)
+            text_rows = self._extract_from_text(url, row, text, include_image_regex=not structured_rows)
+            html_rows = [] if structured_rows else self._extract_from_html(url, row, text)
+            return self._dedupe(structured_rows + text_rows + html_rows)
         return self._extract_from_text(url, row, text)
 
-    def _extract_from_text(self, url: str, row: dict[str, str], text: str) -> list[CameraCandidate]:
+    def _extract_from_text(self, url: str, row: dict[str, str], text: str, *, include_image_regex: bool = True) -> list[CameraCandidate]:
         coords = self._extract_first_coord(text)
         out: list[CameraCandidate] = []
         out.extend(self._extract_hls_from_text(url, row, text, coords, "hls_regex"))
-        out.extend(self._extract_images_from_text(url, row, text, coords, "image_snapshot_regex"))
+        if include_image_regex:
+            out.extend(self._extract_images_from_text(url, row, text, coords, "image_snapshot_regex"))
+        return self._dedupe(out)
+
+    def _extract_structured_from_html_text(self, url: str, row: dict[str, str], text: str) -> list[CameraCandidate]:
+        out: list[CameraCandidate] = []
         for blob in self._extract_json_blobs(text):
             out.extend(self._extract_from_json_data(blob, url, row, "javascript_config"))
         return self._dedupe(out)
@@ -289,15 +334,26 @@ class CandidateDiscoveryEngine:
             absolute = urljoin(url, href)
             if JSON_FEED_HINT_RE.search(absolute) and not self.source_policy.is_blocked(absolute):
                 hrefs.append(absolute)
+        for raw in re.findall(r'["\']([^"\']*(?:\.json|/api/|/feed|/feeds|/layer|/layers|MapServer|FeatureServer|/query)[^"\']*)["\']', html, flags=re.I):
+            absolute = urljoin(url, raw)
+            if absolute.startswith("http") and not self.source_policy.is_blocked(absolute):
+                hrefs.append(absolute)
         out: list[CameraCandidate] = []
-        for feed_url in _dedupe_strings(hrefs)[:8]:
+        endpoint_logs: list[dict[str, Any]] = []
+        for feed_url in _dedupe_strings(_expand_structured_endpoint_urls(hrefs))[: self.config.max_structured_endpoints_per_page]:
             try:
                 resp = client.get(feed_url)
                 if resp.status_code >= 400:
+                    endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "status": resp.status_code, "candidates": 0})
                     continue
+                before = len(out)
                 out.extend(self._extract_from_response(feed_url, row, resp.text, resp.headers.get("content-type", "")))
-            except Exception:
+                endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "status": resp.status_code, "candidates": len(out) - before})
+            except Exception as exc:
+                endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "error": repr(exc), "candidates": 0})
                 continue
+        if endpoint_logs:
+            write_jsonl(self.logs_dir / "structured_endpoint_discovery.jsonl", endpoint_logs, append=True)
         return self._dedupe(out)
 
     def _extract_hls_from_text(self, source_url: str, row: dict[str, str], text: str, coords: tuple[float, float] | None, method: str) -> list[CameraCandidate]:
@@ -481,6 +537,7 @@ class CandidateDiscoveryEngine:
         geocode_skipped = 0
         diagnostics: list[dict[str, Any]] = []
         geocode_cache: dict[str, tuple[float, float, str] | None] = {}
+        effective_max_geocodes = self._effective_candidate_geocode_limit(candidates, target)
         for candidate in candidates:
             if not candidate.has_coordinates:
                 lat_lon = self._candidate_lat_lon_from_existing_evidence(candidate)
@@ -491,7 +548,7 @@ class CandidateDiscoveryEngine:
                     metadata_enriched += 1
             if candidate.has_coordinates or not self.config.enable_candidate_geocoding:
                 continue
-            if geocode_attempted >= self.config.max_candidate_geocodes:
+            if geocode_attempted >= effective_max_geocodes:
                 geocode_skipped += 1
                 continue
             query = self._candidate_geocode_query(candidate, target)
@@ -528,10 +585,53 @@ class CandidateDiscoveryEngine:
                 "geocode_enriched": geocode_enriched,
                 "geocode_skipped": geocode_skipped,
                 "max_candidate_geocodes": self.config.max_candidate_geocodes,
+                "effective_max_candidate_geocodes": effective_max_geocodes,
                 "enable_candidate_geocoding": self.config.enable_candidate_geocoding,
                 "diagnostics": diagnostics[:200],
             },
         )
+
+    def _effective_candidate_geocode_limit(self, candidates: list[CameraCandidate], target: TargetContext) -> int:
+        configured = max(0, int(self.config.max_candidate_geocodes))
+        if configured == 0:
+            return 0
+        missing_specific = sum(
+            1 for c in candidates
+            if not c.has_coordinates and self._candidate_geocode_query(c, target)
+        )
+        broad_scope = str(target.scope_type or "").casefold() in {"state", "region", "country", "metro", "county"}
+        if broad_scope and missing_specific > configured:
+            return min(missing_specific, max(configured, self.config.max_state_scale_candidate_geocodes))
+        return configured
+
+    def _promoted_asset_host_rows(self, candidates: list[CameraCandidate], target: TargetContext, existing_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+        host_counts: dict[str, int] = {}
+        for candidate in candidates:
+            host = urlparse(candidate.stream_url).netloc.casefold()
+            if host:
+                host_counts[host] = host_counts.get(host, 0) + 1
+        existing_urls = {row.get("url", "").split("#", 1)[0] for row in existing_rows}
+        rows: list[dict[str, str]] = []
+        for host, count in sorted(host_counts.items(), key=lambda item: item[1], reverse=True):
+            if count < self.config.asset_host_promotion_threshold:
+                continue
+            for seed in _asset_host_discovery_urls(host, target):
+                if seed in existing_urls or self.source_policy.is_blocked(seed):
+                    continue
+                rows.append(
+                    {
+                        "query": f"promoted_asset_host:{target.target_id}",
+                        "title": f"Promoted camera asset host {host}",
+                        "url": seed,
+                        "snippet": f"Host appeared in {count} candidate media URLs",
+                        "source_provider": "asset_host_promotion",
+                        "source_kind": "promoted_host",
+                        "source_name": host,
+                    }
+                )
+        if rows:
+            write_jsonl(self.logs_dir / "promoted_asset_host_rows.jsonl", rows)
+        return rows
 
     def _candidate_lat_lon_from_existing_evidence(self, candidate: CameraCandidate) -> tuple[float, float] | None:
         for mapping in (candidate.source_metadata, _url_query_mapping(candidate.stream_url), _url_query_mapping(candidate.source_url or "")):
@@ -1023,6 +1123,64 @@ def _dedupe_media_urls(values: list[tuple[str, str]]) -> list[tuple[str, str]]:
 
 
 
+
+
+def _pagination_rows(row: dict[str, str], max_pages: int) -> list[dict[str, str]]:
+    url = row.get("url") or ""
+    if max_pages <= 1 or not _looks_like_paginated_directory_url(url):
+        return []
+    rows: list[dict[str, str]] = []
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    for page in range(2, max_pages + 1):
+        new_query = {key: values[:] for key, values in query.items()}
+        new_query["page"] = [str(page)]
+        qs = urlencode(new_query, doseq=True)
+        page_url = parsed._replace(query=qs).geturl()
+        new_row = dict(row)
+        new_row["url"] = page_url
+        new_row["source_kind"] = row.get("source_kind") or "paginated_page"
+        new_row["discovery_note"] = f"pagination_page_{page}"
+        rows.append(new_row)
+    return rows
+
+
+def _looks_like_paginated_directory_url(url: str) -> bool:
+    lower = url.casefold()
+    if not lower.startswith("http"):
+        return False
+    return any(token in lower for token in ("/camera", "/cameras", "/traffic", "/category/", "/livet", "webcam", "cctv"))
+
+
+def _expand_structured_endpoint_urls(urls: list[str]) -> list[str]:
+    expanded: list[str] = []
+    for url in urls:
+        expanded.append(url)
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/")
+        if re.search(r"/(?:MapServer|FeatureServer)(?:/\d+)?$", path, re.I):
+            base = parsed._replace(query="", fragment="").geturl().rstrip("/")
+            if re.search(r"/(?:MapServer|FeatureServer)$", path, re.I):
+                # Try a small generic range of layer IDs. Non-existing layers are harmless and logged.
+                for layer in range(0, 8):
+                    expanded.append(f"{base}/{layer}/query?where=1%3D1&outFields=*&returnGeometry=true&f=json")
+            else:
+                expanded.append(f"{base}/query?where=1%3D1&outFields=*&returnGeometry=true&f=json")
+        elif "/query" in path.casefold() and not parsed.query:
+            expanded.append(parsed._replace(query="where=1%3D1&outFields=*&returnGeometry=true&f=json").geturl())
+    return _dedupe_strings(expanded)
+
+
+def _asset_host_discovery_urls(host: str, target: TargetContext) -> list[str]:
+    scheme_host = f"https://{host}"
+    slugs = _target_region_slugs(target)[:3]
+    category_slugs = _camera_category_slugs(target)[:3]
+    urls = [scheme_host, f"{scheme_host}/cameras", f"{scheme_host}/camera", f"{scheme_host}/traffic", f"{scheme_host}/cctv"]
+    for slug in slugs:
+        urls.extend([f"{scheme_host}/{slug}", f"{scheme_host}/cameras/{slug}", f"{scheme_host}/traffic/{slug}"])
+        for category in category_slugs:
+            urls.append(f"{scheme_host}/cameras/{slug}/category/{category}")
+    return _dedupe_strings(urls)
 
 def _target_aware_site_rows(entry: SourceEntry, target: TargetContext) -> list[dict[str, str]]:
     """Generate generic target-aware pages for approved camera-directory sites.

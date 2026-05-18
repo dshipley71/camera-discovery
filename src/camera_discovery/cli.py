@@ -12,6 +12,7 @@ from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
 from camera_discovery.services.review_validation_pipeline import ReviewAndValidationPipeline
 from camera_discovery.services.target_resolver import TargetResolver
 from camera_discovery.utils.io import write_json
+import json
 
 app = typer.Typer(help="Simplified public camera discovery pipeline", no_args_is_help=True)
 console = Console()
@@ -92,6 +93,15 @@ def run(
         f"features={outputs.untrusted_geojson_features_written}"
     )
     console.print(f"[bold]Review package:[/bold] {outputs.review_artifacts_zip}")
+    explanation_path = cfg.output_dir / "logs" / "run_explanation.json"
+    if explanation_path.exists():
+        try:
+            explanation = json.loads(explanation_path.read_text(encoding="utf-8"))
+            console.print("[bold]Run explanation:[/bold]")
+            for item in explanation.get("plain_language_summary", []):
+                console.print(f"  - {item}")
+        except Exception:
+            console.print(f"[bold]Run explanation:[/bold] {cfg.output_dir / 'RUN_EXPLANATION.md'}")
 
 
 if __name__ == "__main__":

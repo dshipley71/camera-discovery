@@ -18,6 +18,9 @@ TABLE_COLUMNS = [
     "name",
     "target_label",
     "location_text",
+    "camera_type",
+    "camera_id",
+    "media_type",
     "latitude",
     "longitude",
     "stream_url",
@@ -83,6 +86,9 @@ def geojson_features_to_rows(geojson: dict[str, Any]) -> list[dict[str, Any]]:
             "name": _first_text(props, "name", "title", "camera_name", "source_name") or f"Camera {index + 1}",
             "target_label": props.get("target_label") or props.get("target_id"),
             "location_text": props.get("location_text") or props.get("source_metadata", {}).get("source_scope_hint") if isinstance(props.get("source_metadata"), dict) else props.get("location_text"),
+            "camera_type": _first_text(props, "camera_type", "type", "category"),
+            "camera_id": _first_text(props, "camera_id", "id"),
+            "media_type": _first_text(props, "media_type"),
             "latitude": props.get("lat", lat),
             "longitude": props.get("lon", lon),
             "stream_url": props.get("stream_url"),
@@ -144,6 +150,7 @@ def write_embedded_camera_map(
             "source_geojson": str(selected) if selected else None,
             "features": len(geojson.get("features") or []),
             "has_video_playback_button": True,
+            "has_refreshing_snapshot_viewer": True,
             "thumbnail_fields_supported": list(THUMBNAIL_KEYS),
         },
     )
@@ -208,6 +215,7 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
     .video-card header {{ display: flex; justify-content: space-between; gap: 10px; align-items: center; font-family: sans-serif; }}
     .close {{ background: #444; color: white; border: 0; padding: 6px 10px; border-radius: 6px; cursor: pointer; }}
     video {{ width: 100%; max-height: 72vh; margin-top: 10px; background: black; }}
+    .snapshot-live {{ width: 100%; max-height: 72vh; object-fit: contain; margin-top: 10px; background: #000; }}
     .stream-link {{ color: #90caf9; word-break: break-all; font-size: 12px; }}
   </style>
 </head>
@@ -218,6 +226,7 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
     <div class='video-card'>
       <header><strong id='videoTitle'>Camera stream</strong><button class='close' onclick='closeVideo()'>Close</button></header>
       <video id='cameraVideo' controls autoplay muted playsinline></video>
+      <img id='snapshotViewer' class='snapshot-live' style='display:none' alt='Refreshing camera snapshot'>
       <div id='streamLink' class='stream-link'></div>
     </div>
   </div>
@@ -237,6 +246,12 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       for (const k of keys) {{ if (meta && meta[k]) return meta[k]; }}
       return '';
     }}
+    function cacheBust(url) {{
+      if (!url || url.startsWith('data:')) return url;
+      const sep = url.includes('?') ? '&' : '?';
+      return url + sep + '_camera_discovery_ts=' + Date.now();
+    }}
+    let snapshotTimer = null;
     function popupHtml(feature) {{
       const p = feature.properties || {{}};
       const coords = feature.geometry && Array.isArray(feature.geometry.coordinates) ? feature.geometry.coordinates : [];
@@ -246,13 +261,20 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       const thumb = firstValue(p, {json.dumps(list(THUMBNAIL_KEYS))});
       const stream = p.stream_url || '';
       const source = p.source_url || '';
-      const thumbHtml = thumb ? `<img class="thumb" src="${{esc(thumb)}}" alt="Camera thumbnail" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{{className:'no-thumb',innerText:'Thumbnail unavailable'}}))">` : `<div class="no-thumb">No thumbnail URL in GeoJSON</div>`;
-      const playHtml = stream ? `<button class="play" onclick='playCamera(${{JSON.stringify(stream)}}, ${{JSON.stringify(name)}})'>▶ Play video</button>` : '';
+      const mediaType = firstValue(p, ['media_type']) || (String(stream).toLowerCase().includes('.m3u8') ? 'hls' : (thumb || /\.(jpg|jpeg|png|webp)(\?|$)/i.test(stream) ? 'image_snapshot' : 'unknown'));
+      const cameraType = firstValue(p, ['camera_type', 'type', 'category']) || '';
+      const cameraId = firstValue(p, ['camera_id', 'id']) || '';
+      const thumbHtml = thumb ? `<img class="thumb" src="${{esc(cacheBust(thumb))}}" alt="Camera thumbnail" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{{className:'no-thumb',innerText:'Thumbnail unavailable'}}))">` : `<div class="no-thumb">No thumbnail URL in GeoJSON</div>`;
+      const buttonLabel = mediaType === 'image_snapshot' ? '↻ Open refreshing snapshot' : '▶ Play video';
+      const playHtml = stream ? `<button class="play" onclick='playCamera(${{JSON.stringify(stream)}}, ${{JSON.stringify(name)}}, ${{JSON.stringify(mediaType)}})'>${{buttonLabel}}</button>` : '';
       const sourceHtml = source ? `<a href="${{esc(source)}}" target="_blank" rel="noopener">source</a>` : '';
-      const streamHtml = stream ? `<a href="${{esc(stream)}}" target="_blank" rel="noopener">stream</a>` : '';
+      const streamHtml = stream ? `<a href="${{esc(stream)}}" target="_blank" rel="noopener">media</a>` : '';
       return `<div class="popup"><h3>${{esc(name)}}</h3>${{thumbHtml}}${{playHtml}}<table>
         <tr><td>Target</td><td>${{esc(p.target_label || p.target_id || '')}}</td></tr>
         <tr><td>Location</td><td>${{esc(p.location_text || '')}}</td></tr>
+        <tr><td>Camera type</td><td>${{esc(cameraType)}}</td></tr>
+        <tr><td>Camera ID</td><td>${{esc(cameraId)}}</td></tr>
+        <tr><td>Media type</td><td>${{esc(mediaType)}}</td></tr>
         <tr><td>Lat/Lon</td><td>${{esc(lat)}}, ${{esc(lon)}}</td></tr>
         <tr><td>Trust</td><td>${{esc(p.trust_level || '')}}</td></tr>
         <tr><td>Validation</td><td>${{esc(p.validation_status || '')}}</td></tr>
@@ -261,28 +283,43 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
         <tr><td>Links</td><td>${{sourceHtml}} ${{streamHtml}}</td></tr>
       </table></div>`;
     }}
-    function playCamera(url, title) {{
+    function playCamera(url, title, mediaType) {{
       const modal = document.getElementById('videoModal');
       const video = document.getElementById('cameraVideo');
-      document.getElementById('videoTitle').innerText = title || 'Camera stream';
+      const snapshot = document.getElementById('snapshotViewer');
+      document.getElementById('videoTitle').innerText = title || 'Camera media';
       document.getElementById('streamLink').innerHTML = `<a href="${{esc(url)}}" target="_blank" rel="noopener">${{esc(url)}}</a>`;
       if (activeHls) {{ activeHls.destroy(); activeHls = null; }}
+      if (snapshotTimer) {{ clearInterval(snapshotTimer); snapshotTimer = null; }}
       video.pause(); video.removeAttribute('src'); video.load();
-      if (url.toLowerCase().includes('.m3u8') && window.Hls && Hls.isSupported()) {{
-        activeHls = new Hls({{ lowLatencyMode: true }});
-        activeHls.loadSource(url);
-        activeHls.attachMedia(video);
+      video.style.display = 'none';
+      snapshot.style.display = 'none';
+      snapshot.removeAttribute('src');
+      if (mediaType === 'image_snapshot' || /\.(jpg|jpeg|png|webp)(\?|$)/i.test(url)) {{
+        snapshot.src = cacheBust(url);
+        snapshot.style.display = 'block';
+        snapshotTimer = setInterval(() => {{ snapshot.src = cacheBust(url); }}, 15000);
       }} else {{
-        video.src = url;
+        video.style.display = 'block';
+        if (url.toLowerCase().includes('.m3u8') && window.Hls && Hls.isSupported()) {{
+          activeHls = new Hls({{ lowLatencyMode: true }});
+          activeHls.loadSource(url);
+          activeHls.attachMedia(video);
+        }} else {{
+          video.src = url;
+        }}
+        video.play().catch(() => {{}});
       }}
       modal.style.display = 'flex';
-      video.play().catch(() => {{}});
     }}
     function closeVideo() {{
       const modal = document.getElementById('videoModal');
       const video = document.getElementById('cameraVideo');
+      const snapshot = document.getElementById('snapshotViewer');
       if (activeHls) {{ activeHls.destroy(); activeHls = null; }}
+      if (snapshotTimer) {{ clearInterval(snapshotTimer); snapshotTimer = null; }}
       video.pause(); video.removeAttribute('src'); video.load();
+      snapshot.removeAttribute('src');
       modal.style.display = 'none';
     }}
     document.getElementById('videoModal').addEventListener('click', e => {{ if (e.target.id === 'videoModal') closeVideo(); }});

@@ -50,6 +50,10 @@ class RunConfig:
     max_search_results_per_query: int = 5
     max_pages: int = 25
     max_streams: int = 100
+    max_directory_pages: int = 8
+    max_structured_endpoints_per_page: int = 20
+    asset_host_promotion_threshold: int = 3
+    max_state_scale_candidate_geocodes: int = 250
     http_timeout: float = 20.0
     user_agent: str = "camera-discovery/0.1 (+public-camera-research)"
     allow_untrusted_review_output: bool = True

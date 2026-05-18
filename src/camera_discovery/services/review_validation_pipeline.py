@@ -112,7 +112,55 @@ class ReviewAndValidationPipeline:
         out.map_html = str(self._write_map())
         out.review_artifacts_zip = str(self._package_review_artifacts())
         write_json(self.logs_dir / "output_summary.json", asdict(out))
+        self._write_run_explanation(targets, candidates, v, out)
         return out
+
+    def _write_run_explanation(self, targets: list[TargetContext], candidates: CandidateSet, v: ValidationSummary, out: OutputSummary) -> None:
+        media_counts: dict[str, int] = {}
+        provider_counts: dict[str, int] = {}
+        missing_coordinates = 0
+        for candidate in candidates.unique:
+            metadata = candidate.source_metadata or {}
+            media = str(metadata.get("media_type") or "unknown")
+            provider = str(metadata.get("source_provider") or candidate.discovery_method or "unknown")
+            media_counts[media] = media_counts.get(media, 0) + 1
+            provider_counts[provider] = provider_counts.get(provider, 0) + 1
+            if not candidate.has_coordinates:
+                missing_coordinates += 1
+        explanation = {
+            "plain_language_summary": [
+                f"Resolved {len(targets)} target(s): " + ", ".join(t.canonical_target or t.target_label or t.target_id for t in targets),
+                f"Found {len(candidates.unique)} unique candidate camera record(s).",
+                f"{len(candidates.coordinate_bearing)} candidate(s) had real coordinates and can be mapped; {missing_coordinates} remain table-only because no verified coordinate was extracted or geocoded.",
+                f"Trusted camera.geojson created: {out.trusted_geojson_created} ({out.trusted_geojson_features_written} feature(s)).",
+                f"Untrusted review GeoJSON created: {out.untrusted_geojson_created} ({out.untrusted_geojson_features_written} feature(s)).",
+                "Fast profile is review-only; use balanced/full validation when you want stream validation and trusted output authorization.",
+            ],
+            "media_type_counts": media_counts,
+            "source_provider_counts": provider_counts,
+            "validation": asdict(v),
+            "outputs": asdict(out),
+            "interpretation": {
+                "camera_geojson": "Trusted, validated, in-scope coordinate-bearing camera inventory. Not written when validation is disabled or no trusted records exist.",
+                "untrusted_camera_candidates_geojson": "Coordinate-bearing candidates kept for review/map analysis. These are not trusted inventory.",
+                "camera_candidates_table_csv": "All non-rejected review candidates, including rows without coordinates that cannot be mapped yet.",
+                "map_html": "Interactive map for coordinate-bearing trusted/untrusted GeoJSON only.",
+            },
+        }
+        write_json(self.logs_dir / "run_explanation.json", explanation)
+        lines = ["# Camera Discovery Run Explanation", ""]
+        lines.extend(f"- {item}" for item in explanation["plain_language_summary"])
+        lines.append("")
+        lines.append("## Media types")
+        lines.extend(f"- {key}: {value}" for key, value in sorted(media_counts.items()))
+        lines.append("")
+        lines.append("## Source providers")
+        lines.extend(f"- {key}: {value}" for key, value in sorted(provider_counts.items()))
+        lines.append("")
+        lines.append("## Output meaning")
+        for key, value in explanation["interpretation"].items():
+            lines.append(f"- `{key}`: {value}")
+        (self.config.output_dir / "RUN_EXPLANATION.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _write_candidate_table(self, rows: list[CameraCandidate]):
         """Write a CSV table from all non-rejected candidates, including rows without coordinates."""
@@ -122,6 +170,8 @@ class ReviewAndValidationPipeline:
             "name",
             "target_label",
             "location_text",
+            "camera_type",
+            "camera_id",
             "stream_url",
             "source_url",
             "latitude",
@@ -152,6 +202,8 @@ class ReviewAndValidationPipeline:
                         "name": row.title or metadata.get("source_name") or "Camera candidate",
                         "target_label": row.target_label,
                         "location_text": row.location_text,
+                        "camera_type": metadata.get("camera_type"),
+                        "camera_id": metadata.get("camera_id") or metadata.get("id"),
                         "stream_url": row.stream_url,
                         "source_url": row.source_url,
                         "latitude": row.lat,
@@ -185,8 +237,13 @@ class ReviewAndValidationPipeline:
                 continue
             target = target_map.get(c.target_id or "")
             props = asdict(c)
+            metadata = c.source_metadata or {}
             props.update(
                 {
+                    "camera_type": metadata.get("camera_type"),
+                    "camera_id": metadata.get("camera_id") or metadata.get("id"),
+                    "media_type": metadata.get("media_type"),
+                    "snapshot_url": metadata.get("snapshot_url") or metadata.get("thumbnail_url") or metadata.get("image_url"),
                     "trust_level": "trusted" if trusted else "untrusted",
                     "output_policy": "trusted" if trusted else "review_only",
                     "review_required": not trusted,
@@ -217,7 +274,7 @@ class ReviewAndValidationPipeline:
     def _package_review_artifacts(self):
         zpath = self.config.output_dir / "review_artifacts.zip"
         with ZipFile(zpath, "w", ZIP_DEFLATED) as z:
-            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "camera_inventory.jsonl", "cameras.md", "map.html", "camera_candidates_table.csv"]:
+            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "camera_inventory.jsonl", "cameras.md", "map.html", "camera_candidates_table.csv", "RUN_EXPLANATION.md"]:
                 p = self.config.output_dir / rel
                 if p.exists():
                     z.write(p, rel)

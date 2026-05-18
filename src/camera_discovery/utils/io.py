@@ -12,7 +12,8 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj)!r} is not JSON serializable")
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True); path.write_text(json.dumps(data, indent=2, sort_keys=True, default=_json_default), encoding="utf-8")
-def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+def write_jsonl(path: Path, rows: list[dict[str, Any]], *, append: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
+    mode = "a" if append else "w"
+    with path.open(mode, encoding="utf-8") as f:
         for row in rows: f.write(json.dumps(row, sort_keys=True, default=_json_default) + "\n")
