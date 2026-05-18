@@ -82,7 +82,7 @@ def test_blind_mode_select_rows_applies_block_rules(tmp_path):
         query="Get cameras from Greenville, Texas",
         output_dir=tmp_path,
         llm_provider="ollama",
-        llm_model="gemma3:4b-cloud",
+        llm_model="qwen3.5:4b",
         sources_file=sources,
         discovery_mode=DiscoveryMode.BLIND,
     )

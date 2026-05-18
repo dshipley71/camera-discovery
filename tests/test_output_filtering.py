@@ -16,7 +16,7 @@ def test_untrusted_geojson_excludes_rejected_out_of_scope_candidates(tmp_path):
         output_dir=tmp_path,
         profile=RuntimeProfile.FAST,
         llm_provider="ollama",
-        llm_model="gemma3:4b-cloud",
+        llm_model="qwen3.5:4b",
     )
     target = TargetContext(
         user_query=cfg.query,

@@ -9,7 +9,7 @@ def test_query_clause_can_contain_multiple_locations(tmp_path):
         query="Get me all cameras from London, England and New York, New York",
         output_dir=tmp_path,
         llm_provider="ollama",
-        llm_model="gemma3:4b-cloud",
+        llm_model="qwen3.5:4b",
     )
     resolver = TargetResolver(cfg)
     phrases = resolver._extract_target_phrases(cfg.query)

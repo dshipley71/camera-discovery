@@ -8,7 +8,7 @@ def test_traffic_cameras_from_state_keeps_geography_as_target(tmp_path):
         query="Get me all traffic cameras from California",
         output_dir=tmp_path,
         llm_provider="ollama",
-        llm_model="gemma3:4b-cloud",
+        llm_model="qwen3.5:4b",
     )
     resolver = TargetResolver(cfg)
     phrases = resolver._extract_target_phrases(cfg.query)
@@ -27,7 +27,7 @@ def test_json_endpoint_extracts_image_snapshot_camera_record(tmp_path):
         query="Get me all traffic cameras from California",
         output_dir=tmp_path,
         llm_provider="ollama",
-        llm_model="gemma3:4b-cloud",
+        llm_model="qwen3.5:4b",
     )
     engine = CandidateDiscoveryEngine(cfg)
     text = """
@@ -61,7 +61,7 @@ def test_html_extracts_javascript_config_hls_and_coordinates(tmp_path):
         query="Get me all traffic cameras from California",
         output_dir=tmp_path,
         llm_provider="ollama",
-        llm_model="gemma3:4b-cloud",
+        llm_model="qwen3.5:4b",
     )
     engine = CandidateDiscoveryEngine(cfg)
     html = """
@@ -87,7 +87,7 @@ def test_geojson_feature_extracts_camera_snapshot(tmp_path):
         query="Get me all cameras from Example Region",
         output_dir=tmp_path,
         llm_provider="ollama",
-        llm_model="gemma3:4b-cloud",
+        llm_model="qwen3.5:4b",
     )
     engine = CandidateDiscoveryEngine(cfg)
     data = {

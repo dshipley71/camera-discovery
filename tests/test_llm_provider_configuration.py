@@ -26,13 +26,13 @@ def test_target_intent_uses_configured_model(tmp_path):
         output_dir=tmp_path,
         llm_provider="ollama",
         llm_model="gemma4:31b-cloud",
-        target_intent_model="gemma3:4b-cloud",
+        target_intent_model="qwen3.5:4b",
     )
     client = build_target_intent_client(cfg)
-    assert client.model == "gemma3:4b-cloud"
+    assert client.model == "qwen3.5:4b"
 
 
 def test_ollama_cloud_provider_defaults_to_cloud_endpoint(monkeypatch):
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
-    client = build_llm_client("ollama-cloud", "gemma3:4b-cloud")
+    client = build_llm_client("ollama-cloud", "qwen3.5:4b")
     assert getattr(client, "base_url") == "https://ollama.com"
