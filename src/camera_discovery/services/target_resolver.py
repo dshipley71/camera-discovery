@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from dataclasses import asdict
 from typing import Any
@@ -17,7 +18,7 @@ from camera_discovery.core.models import (
     TrustPolicy,
 )
 from camera_discovery.llm.base import ChatMessage, LLMClient
-from camera_discovery.llm.factory import build_geocoder_referee_client, build_target_intent_client
+from camera_discovery.llm.factory import build_geocoder_referee_client, build_llm_client, build_target_intent_client
 from camera_discovery.utils.io import write_json
 from camera_discovery.utils.json_utils import extract_json_object
 
@@ -146,15 +147,21 @@ class TargetResolver:
 
     def _build_target_intents(self) -> list[TargetIntent]:
         deterministic = self._deterministic_intents()
-        client = self.llm_client or build_target_intent_client(self.config)
-        raw = client.chat(
-            [
-                ChatMessage("system", "Return strict JSON only."),
-                ChatMessage("user", self._target_intent_prompt(self.config.query)),
-            ],
-            temperature=0.0,
-        )
-        write_json(self.logs_dir / "target_intent_llm_raw.json", {"raw": raw, "model": getattr(client, "model", None)})
+        raw = self._call_target_intent_llm()
+        if raw is None:
+            # The application still requires a real LLM provider. This branch
+            # handles an unavailable/timed-out advisory extraction call by using
+            # the deterministic query parser to preserve the user request and
+            # keep Fast review-only runs from crashing before discovery.
+            write_json(
+                self.logs_dir / "target_intent.json",
+                {
+                    "targets": [asdict(i) for i in deterministic],
+                    "source": "deterministic_after_llm_failure",
+                    "warning": "Target-intent LLM call failed or timed out; deterministic parser used for target clauses.",
+                },
+            )
+            return deterministic
         data = extract_json_object(raw)
         targets_data = data.get("targets") if isinstance(data.get("targets"), list) else None
         if targets_data:
@@ -165,12 +172,49 @@ class TargetResolver:
                 fallback = deterministic[i] if i < len(deterministic) else self._fallback_intent_from_text(str(item.get("canonical_target") or item.get("place_name") or self.config.query))
                 intents.append(self._intent_from_dict(item, fallback))
             if intents:
+                write_json(self.logs_dir / "target_intent.json", {"targets": [asdict(i) for i in intents], "source": "llm"})
                 return intents
         # Backward-compatible single-object target intent, but do not collapse
         # deterministically extracted multi-target clauses if the LLM omitted a list.
         if len(deterministic) > 1 and not targets_data:
+            write_json(self.logs_dir / "target_intent.json", {"targets": [asdict(i) for i in deterministic], "source": "deterministic_multi_target_guard"})
             return deterministic
-        return [self._intent_from_dict(data, deterministic[0] if deterministic else self._fallback_intent_from_text(self.config.query))]
+        intent = self._intent_from_dict(data, deterministic[0] if deterministic else self._fallback_intent_from_text(self.config.query))
+        write_json(self.logs_dir / "target_intent.json", {"targets": [asdict(intent)], "source": "llm_single_object"})
+        return [intent]
+
+    def _call_target_intent_llm(self) -> str | None:
+        prompt = self._target_intent_prompt(self.config.query)
+        system = ChatMessage("system", "Return compact strict JSON only. No prose.")
+        user = ChatMessage("user", prompt)
+        attempts = max(1, getattr(self.config, "target_intent_attempts", 1))
+        errors: list[dict[str, Any]] = []
+
+        client_specs: list[tuple[str, LLMClient]] = []
+        if self.llm_client is not None:
+            client_specs.append((getattr(self.llm_client, "model", "injected_client"), self.llm_client))
+        else:
+            primary = build_target_intent_client(self.config)
+            client_specs.append((getattr(primary, "model", "primary"), primary))
+            fallback_model = getattr(self.config, "target_intent_fallback_model", None)
+            primary_model = getattr(primary, "model", None)
+            if fallback_model and fallback_model != primary_model:
+                provider = (os.getenv("CAMERA_DISCOVERY_TARGET_INTENT_PROVIDER") or self.config.llm_provider).strip().lower()
+                client_specs.append((fallback_model, build_llm_client(provider, fallback_model, timeout=self.config.target_intent_timeout)))
+
+        for model, client in client_specs:
+            for attempt in range(1, attempts + 1):
+                try:
+                    raw = client.chat([system, user], temperature=0.0)
+                    write_json(
+                        self.logs_dir / "target_intent_llm_raw.json",
+                        {"raw": raw, "model": model, "attempt": attempt, "errors_before_success": errors},
+                    )
+                    return raw
+                except Exception as exc:
+                    errors.append({"model": model, "attempt": attempt, "error_type": type(exc).__name__, "error": str(exc)})
+        write_json(self.logs_dir / "target_intent_llm_error.json", {"errors": errors})
+        return None
 
     def _deterministic_intents(self) -> list[TargetIntent]:
         phrases = self._extract_target_phrases(self.config.query)
@@ -405,14 +449,13 @@ class TargetResolver:
 
     def _target_intent_prompt(self, query: str) -> str:
         return (
-            "Extract target intent for public camera discovery. The user may specify one or more places/locations. "
-            "Keep camera categories separate from geography: terms such as traffic cameras, weather cameras, webcams, "
-            "public live cameras, HLS, and streams are camera_type_intent, not target locations. "
-            "For a query shaped like 'traffic cameras from Example State', the target is Example State and camera_type_intent is traffic. "
-            "Return strict JSON with a top-level targets array. Each target should include canonical_target, place_name, "
-            "scope_type, admin_region, country, camera_type_intent, geocoder_query_variants, alternate_interpretations, "
-            "ambiguity, confidence, llm_center_lat, llm_center_lon, llm_bbox. LLM geometry is approximate only and not verified. "
-            "Do not decide trusted output or geometry verification. "
+            "Extract camera-search target intent. Return JSON only: "
+            "{\"targets\":[{\"canonical_target\":str,\"place_name\":str,\"scope_type\":str,"
+            "\"admin_region\":str|null,\"country\":str|null,\"camera_type_intent\":str,"
+            "\"geocoder_query_variants\":[str],\"ambiguity\":bool,\"confidence\":number}]} . "
+            "Rules: camera terms such as traffic/weather/webcam/live/HLS are camera_type_intent, not places. "
+            "Example: 'traffic cameras from California' => target California, camera_type_intent traffic. "
+            "Do not verify geometry or trusted output. "
             f"Query: {query!r}"
         )
 

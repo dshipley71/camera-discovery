@@ -35,6 +35,8 @@ class RunConfig:
 
     target_intent_model: str | None = None
     target_intent_timeout: float = 45.0
+    target_intent_attempts: int = 1
+    target_intent_fallback_model: str | None = None
 
     geocoder_referee_model: str | None = None
     geocoder_referee_timeout: float = 45.0

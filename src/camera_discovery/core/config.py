@@ -22,8 +22,28 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-def _stage_model(stage_var: str, llm_model: str | None, default: str = "gemma3:4b-cloud") -> str | None:
+def _stage_model(stage_var: str, llm_model: str | None, default: str = "gemma3:4b") -> str | None:
     return os.getenv(stage_var) or llm_model or default
+
+
+def _default_target_intent_model(provider: str, llm_model: str | None) -> str | None:
+    explicit = os.getenv("CAMERA_DISCOVERY_TARGET_INTENT_MODEL")
+    if explicit:
+        return explicit
+    if provider in {"ollama", "ollama-cloud"}:
+        # Target intent is a lightweight extraction task. Keep it fast by
+        # default while allowing users to override it independently.
+        return "qwen3.5:4b"
+    return llm_model
+
+
+def _default_target_intent_fallback_model(provider: str) -> str | None:
+    explicit = os.getenv("CAMERA_DISCOVERY_TARGET_INTENT_FALLBACK_MODEL")
+    if explicit:
+        return explicit
+    if provider in {"ollama", "ollama-cloud"}:
+        return "qwen3.5:4b"
+    return None
 
 
 def load_run_config(
@@ -38,13 +58,14 @@ def load_run_config(
 ) -> RunConfig:
     load_dotenv(override=False)
     selected_profile = RuntimeProfile(profile or os.getenv("CAMERA_DISCOVERY_PROFILE", "fast").strip().lower())
-    provider = os.getenv("CAMERA_DISCOVERY_LLM_PROVIDER", "ollama").strip().lower()
+    provider = os.getenv("CAMERA_DISCOVERY_LLM_PROVIDER", "ollama-cloud").strip().lower()
+    default_llm_model = "gemma4:31b-cloud" if provider == "ollama-cloud" else "gemma3:4b"
     llm_model = (
         os.getenv("CAMERA_DISCOVERY_LLM_MODEL")
         or os.getenv("OLLAMA_MODEL")
         or os.getenv("OPENAI_COMPATIBLE_MODEL")
         or os.getenv("BEDROCK_MODEL_ID")
-        or "gemma3:4b-cloud"
+        or default_llm_model
     )
     selected_discovery_mode = DiscoveryMode((discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE", "both")).strip().lower())
     configured_sources_file = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
@@ -54,7 +75,9 @@ def load_run_config(
         profile=selected_profile,
         llm_provider=provider,
         llm_model=llm_model,
-        target_intent_model=_stage_model("CAMERA_DISCOVERY_TARGET_INTENT_MODEL", llm_model),
+        target_intent_model=_default_target_intent_model(provider, llm_model),
+        target_intent_attempts=max(1, _int_env("CAMERA_DISCOVERY_TARGET_INTENT_ATTEMPTS", 1)),
+        target_intent_fallback_model=_default_target_intent_fallback_model(provider),
         geocoder_referee_model=_stage_model("CAMERA_DISCOVERY_GEOCODER_REFEREE_MODEL", llm_model),
         candidate_review_model=_stage_model("CAMERA_DISCOVERY_CANDIDATE_REVIEW_MODEL", llm_model),
         target_intent_timeout=_float_env("CAMERA_DISCOVERY_TARGET_INTENT_TIMEOUT", 45.0),
