@@ -117,6 +117,8 @@ CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS=50
 camera-discovery run "Get me all public live cameras in California" --profile fast --output-dir runs/test-fast
 ```
 
+`camera_discovery.cli run` shows Rich progress bars by default for target resolution, per-target source-row discovery, and validation/output writing. During discovery the per-target bar reports source rows processed plus accepted candidate counts split by HLS and image snapshots. Use `--no-progress` for plain logs in environments that do not render carriage-return progress output cleanly.
+
 Fast mode is review-only and blocks trusted `camera.geojson`. Balanced/Full enable validation and can write trusted output only if deterministic target and stream gates pass.
 
 ## Outputs
