@@ -5,7 +5,7 @@ import json
 import re
 import time
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse
 
 import httpx
@@ -115,41 +115,87 @@ class CandidateDiscoveryEngine:
         config: RunConfig,
         semantic_review_client: LLMClient | None = None,
         location_inference_client: LLMClient | None = None,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ):
         self.config = config
         self.semantic_review_client = semantic_review_client
         self.location_inference_client = location_inference_client
+        self.progress_callback = progress_callback
         self.logs_dir = config.output_dir / "logs"
         self.candidates_dir = config.output_dir / "candidates"
         self.source_policy = load_source_policy(config.sources_file, config.block_patterns)
         self.directory_provider = DirectorySourceProvider(self.source_policy)
         self.direct_provider = DirectUrlSourceProvider(config.seed_urls, self.source_policy)
 
+    def _emit_progress(self, event: str, **payload: Any) -> None:
+        if self.progress_callback is None:
+            return
+        safe_payload = dict(payload)
+        target = safe_payload.pop("target", None)
+        if target is not None:
+            safe_payload.setdefault("target_id", getattr(target, "target_id", None))
+            safe_payload.setdefault("target_label", getattr(target, "target_label", None) or getattr(target, "canonical_target", None))
+        try:
+            self.progress_callback(event, safe_payload)
+        except Exception:
+            # Progress reporting must never affect discovery results.
+            return
+
     def discover(self, target: TargetContext) -> CandidateSet:
         queries = self._search_queries(target) if self.config.discovery_mode in {DiscoveryMode.BLIND, DiscoveryMode.BOTH} else []
+        self._emit_progress("search_queries_ready", target=target, queries=len(queries))
         client = self._make_client()
+        results: list[dict[str, str]] = []
+        raw: list[CameraCandidate] = []
         try:
+            self._emit_progress("source_rows_loading", target=target)
             results = self._source_rows(target, queries, client)
             selected_rows = self._select_rows(results)
             primary_rows = selected_rows[: self.config.max_total_candidates]
-            raw = self._collect_candidates_from_rows(primary_rows, client)
+            self._emit_progress(
+                "source_rows_selected",
+                target=target,
+                discovered_rows=len(results),
+                selected_rows=len(selected_rows),
+                primary_rows=len(primary_rows),
+            )
+            raw = self._collect_candidates_from_rows(primary_rows, client, target=target, phase="primary")
 
             if not self._candidate_budgets_full(raw):
                 remaining_rows = max(0, self.config.max_total_candidates - len(primary_rows))
                 promoted_rows = self._promoted_asset_host_rows(raw, target, selected_rows)
                 if promoted_rows and remaining_rows > 0:
-                    raw.extend(self._collect_candidates_from_rows(promoted_rows[:remaining_rows], client, existing=raw))
+                    raw.extend(
+                        self._collect_candidates_from_rows(
+                            promoted_rows[:remaining_rows],
+                            client,
+                            existing=raw,
+                            target=target,
+                            phase="promoted_asset_hosts",
+                        )
+                    )
         finally:
             client.close()
 
+        self._emit_progress("candidate_metadata_started", target=target, raw=len(raw))
         raw = self._apply_candidate_metadata(raw, target)
         unique = self._dedupe(raw)
         unique = self._apply_candidate_metadata(unique, target)
+        self._emit_progress("coordinate_enrichment_started", target=target, unique=len(unique))
         self._enrich_candidate_coordinates(unique, target)
+        self._emit_progress("scope_review_started", target=target, unique=len(unique))
         self._scope_candidates(unique, target)
         self._apply_llm_candidate_review(unique, target)
         cs = self._build_candidate_set(raw, unique)
         self._write_artifacts(queries, results, cs, target)
+        self._emit_progress(
+            "discovery_complete",
+            target=target,
+            raw=len(cs.raw),
+            unique=len(cs.unique),
+            coordinate_bearing=len(cs.coordinate_bearing),
+            in_scope=len(cs.in_scope),
+        )
         return cs
 
     def _make_client(self) -> httpx.Client:
@@ -165,11 +211,23 @@ class CandidateDiscoveryEngine:
         client: httpx.Client,
         *,
         existing: list[CameraCandidate] | None = None,
+        target: TargetContext | None = None,
+        phase: str = "primary",
     ) -> list[CameraCandidate]:
         raw: list[CameraCandidate] = []
         hls_count = sum(1 for c in (existing or []) if _candidate_media_type(c) == "hls")
         snap_count = sum(1 for c in (existing or []) if _candidate_media_type(c) != "hls")
         total_count = len(existing or [])
+        processed_rows = 0
+        self._emit_progress(
+            "source_row_batch_started",
+            target=target,
+            phase=phase,
+            rows=len(rows),
+            hls_count=hls_count,
+            image_snapshot_count=snap_count,
+            accepted_total=total_count,
+        )
 
         def budgets_full() -> bool:
             return (
@@ -184,24 +242,49 @@ class CandidateDiscoveryEngine:
                     candidates = future.result()
                 except Exception:
                     candidates = []
-                for c in candidates:
-                    media_type = _candidate_media_type(c)
-                    if media_type == "hls":
-                        if hls_count >= self.config.max_hls_candidates:
-                            continue
-                        c.source_metadata.setdefault("media_type", "hls")
-                        hls_count += 1
-                    else:
-                        if snap_count >= self.config.max_image_snapshot_candidates:
-                            continue
-                        c.source_metadata.setdefault("media_type", media_type or "image_snapshot")
-                        snap_count += 1
-                    raw.append(c)
-                    total_count += 1
-                    if total_count >= self.config.max_total_candidates:
-                        break
-                if budgets_full():
-                    break
+                processed_rows += 1
+                accepted_from_row = 0
+                if not budgets_full():
+                    for c in candidates:
+                        media_type = _candidate_media_type(c)
+                        if media_type == "hls":
+                            if hls_count >= self.config.max_hls_candidates:
+                                continue
+                            c.source_metadata.setdefault("media_type", "hls")
+                            hls_count += 1
+                        else:
+                            if snap_count >= self.config.max_image_snapshot_candidates:
+                                continue
+                            c.source_metadata.setdefault("media_type", media_type or "image_snapshot")
+                            snap_count += 1
+                        raw.append(c)
+                        accepted_from_row += 1
+                        total_count += 1
+                        if total_count >= self.config.max_total_candidates:
+                            break
+                self._emit_progress(
+                    "source_row_processed",
+                    target=target,
+                    phase=phase,
+                    processed_rows=processed_rows,
+                    rows=len(rows),
+                    candidates_found=len(candidates),
+                    accepted_from_row=accepted_from_row,
+                    accepted_total=total_count,
+                    hls_count=hls_count,
+                    image_snapshot_count=snap_count,
+                    budgets_full=budgets_full(),
+                )
+        self._emit_progress(
+            "source_row_batch_complete",
+            target=target,
+            phase=phase,
+            processed_rows=processed_rows,
+            rows=len(rows),
+            accepted_total=total_count,
+            hls_count=hls_count,
+            image_snapshot_count=snap_count,
+        )
         return raw
 
     def _candidate_budgets_full(self, candidates: list[CameraCandidate]) -> bool:
