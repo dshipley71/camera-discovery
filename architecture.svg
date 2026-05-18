@@ -1,0 +1,95 @@
+<svg width="680" height="580" viewBox="0 0 680 580" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>Camera Discovery — 3-stage pipeline architecture</title>
+<desc>Flowchart showing TargetResolver, CandidateDiscoveryEngine, and ReviewAndValidationPipeline stages with LLM advisory and deterministic trust boundaries</desc>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="#888" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+</defs>
+
+<!-- Background -->
+<rect width="680" height="580" fill="#ffffff"/>
+
+<!-- INPUT -->
+<rect x="240" y="20" width="200" height="40" rx="8" fill="#e8e6e0" stroke="#aaa" stroke-width="0.5"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="340" y="44" text-anchor="middle" dominant-baseline="central" fill="#2c2c2a">Natural language query</text>
+<line x1="340" y1="60" x2="340" y2="86" stroke="#888" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+<!-- STAGE 1 container -->
+<rect x="60" y="88" width="560" height="110" rx="12" fill="#e1f5ee" stroke="#1d9e75" stroke-width="0.8"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="340" y="107" text-anchor="middle" fill="#085041">Stage 1 — TargetResolver</text>
+
+<rect x="80" y="118" width="150" height="68" rx="8" fill="#f1efe8" stroke="#aaa" stroke-width="0.5"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="155" y="143" text-anchor="middle" dominant-baseline="central" fill="#2c2c2a">Deterministic</text>
+<text font-family="sans-serif" font-size="11" x="155" y="161" text-anchor="middle" fill="#5f5e5a">regex + phrase parsing</text>
+<text font-family="sans-serif" font-size="11" x="155" y="175" text-anchor="middle" fill="#5f5e5a">Nominatim geocoding</text>
+
+<rect x="265" y="118" width="150" height="68" rx="8" fill="#eeedfe" stroke="#7f77dd" stroke-width="0.8"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="340" y="143" text-anchor="middle" dominant-baseline="central" fill="#26215c">LLM advisory</text>
+<text font-family="sans-serif" font-size="11" x="340" y="161" text-anchor="middle" fill="#534ab7">intent extraction</text>
+<text font-family="sans-serif" font-size="11" x="340" y="175" text-anchor="middle" fill="#534ab7">geocoder referee</text>
+
+<rect x="450" y="118" width="150" height="68" rx="8" fill="#f1efe8" stroke="#aaa" stroke-width="0.5"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="525" y="143" text-anchor="middle" dominant-baseline="central" fill="#2c2c2a">Trust gate</text>
+<text font-family="sans-serif" font-size="11" x="525" y="161" text-anchor="middle" fill="#5f5e5a">bbox plausibility</text>
+<text font-family="sans-serif" font-size="11" x="525" y="175" text-anchor="middle" fill="#5f5e5a">scope/admin check</text>
+
+<line x1="340" y1="198" x2="340" y2="224" stroke="#888" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text font-family="sans-serif" font-size="11" x="356" y="213" dominant-baseline="central" fill="#5f5e5a">TargetContext + trust policy</text>
+
+<!-- STAGE 2 container -->
+<rect x="60" y="226" width="560" height="130" rx="12" fill="#e6f1fb" stroke="#185fa5" stroke-width="0.8"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="340" y="245" text-anchor="middle" fill="#042c53">Stage 2 — CandidateDiscoveryEngine</text>
+
+<rect x="80" y="258" width="140" height="86" rx="8" fill="#f1efe8" stroke="#aaa" stroke-width="0.5"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="150" y="279" text-anchor="middle" dominant-baseline="central" fill="#2c2c2a">Source providers</text>
+<text font-family="sans-serif" font-size="11" x="150" y="297" text-anchor="middle" fill="#5f5e5a">blind DDG search</text>
+<text font-family="sans-serif" font-size="11" x="150" y="311" text-anchor="middle" fill="#5f5e5a">SOURCES.md directory</text>
+<text font-family="sans-serif" font-size="11" x="150" y="325" text-anchor="middle" fill="#5f5e5a">direct seed URLs</text>
+
+<rect x="240" y="258" width="160" height="86" rx="8" fill="#f1efe8" stroke="#aaa" stroke-width="0.5"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="320" y="279" text-anchor="middle" dominant-baseline="central" fill="#2c2c2a">Extraction</text>
+<text font-family="sans-serif" font-size="11" x="320" y="297" text-anchor="middle" fill="#5f5e5a">m3u8 regex + HTML tags</text>
+<text font-family="sans-serif" font-size="11" x="320" y="311" text-anchor="middle" fill="#5f5e5a">JSON / GeoJSON walk</text>
+<text font-family="sans-serif" font-size="11" x="320" y="325" text-anchor="middle" fill="#5f5e5a">JS blob + coord enrich</text>
+
+<rect x="420" y="258" width="180" height="86" rx="8" fill="#eeedfe" stroke="#7f77dd" stroke-width="0.8"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="510" y="279" text-anchor="middle" dominant-baseline="central" fill="#26215c">LLM advisory</text>
+<text font-family="sans-serif" font-size="11" x="510" y="297" text-anchor="middle" fill="#534ab7">semantic review (scope)</text>
+<text font-family="sans-serif" font-size="11" x="510" y="311" text-anchor="middle" fill="#534ab7">deterministic bbox gate</text>
+<text font-family="sans-serif" font-size="11" x="510" y="325" text-anchor="middle" fill="#534ab7">block list applied</text>
+
+<line x1="340" y1="356" x2="340" y2="382" stroke="#888" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text font-family="sans-serif" font-size="11" x="356" y="371" dominant-baseline="central" fill="#5f5e5a">CandidateSet (raw / unique / scoped)</text>
+
+<!-- STAGE 3 container -->
+<rect x="60" y="384" width="560" height="110" rx="12" fill="#faece7" stroke="#993c1d" stroke-width="0.8"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="340" y="403" text-anchor="middle" fill="#4a1b0c">Stage 3 — ReviewAndValidationPipeline</text>
+
+<rect x="80" y="415" width="155" height="68" rx="8" fill="#f1efe8" stroke="#aaa" stroke-width="0.5"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="157" y="440" text-anchor="middle" dominant-baseline="central" fill="#2c2c2a">Stream validation</text>
+<text font-family="sans-serif" font-size="11" x="157" y="458" text-anchor="middle" fill="#5f5e5a">HTTP HEAD + #EXTM3U</text>
+<text font-family="sans-serif" font-size="11" x="157" y="472" text-anchor="middle" fill="#5f5e5a">ffprobe (FULL profile)</text>
+
+<rect x="263" y="415" width="155" height="68" rx="8" fill="#f1efe8" stroke="#aaa" stroke-width="0.5"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="340" y="440" text-anchor="middle" dominant-baseline="central" fill="#2c2c2a">Trust decision</text>
+<text font-family="sans-serif" font-size="11" x="340" y="458" text-anchor="middle" fill="#5f5e5a">in_scope + active stream</text>
+<text font-family="sans-serif" font-size="11" x="340" y="472" text-anchor="middle" fill="#5f5e5a">+ verified bbox → trusted</text>
+
+<rect x="446" y="415" width="154" height="68" rx="8" fill="#f1efe8" stroke="#aaa" stroke-width="0.5"/>
+<text font-family="sans-serif" font-size="13" font-weight="500" x="523" y="440" text-anchor="middle" dominant-baseline="central" fill="#2c2c2a">Artifact writing</text>
+<text font-family="sans-serif" font-size="11" x="523" y="458" text-anchor="middle" fill="#5f5e5a">GeoJSON / JSONL / CSV</text>
+<text font-family="sans-serif" font-size="11" x="523" y="472" text-anchor="middle" fill="#5f5e5a">Leaflet map + ZIP</text>
+
+<!-- Output arrows -->
+<line x1="200" y1="494" x2="200" y2="530" stroke="#888" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="340" y1="494" x2="340" y2="530" stroke="#888" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="480" y1="494" x2="480" y2="530" stroke="#888" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+<!-- Output boxes -->
+<rect x="80" y="532" width="230" height="36" rx="8" fill="#e1f5ee" stroke="#1d9e75" stroke-width="0.8"/>
+<text font-family="sans-serif" font-size="11" x="195" y="554" text-anchor="middle" dominant-baseline="central" fill="#085041">camera.geojson (trusted only)</text>
+
+<rect x="330" y="532" width="270" height="36" rx="8" fill="#faeeda" stroke="#ba7517" stroke-width="0.8"/>
+<text font-family="sans-serif" font-size="11" x="465" y="554" text-anchor="middle" dominant-baseline="central" fill="#633806">untrusted_camera_candidates.geojson</text>
+</svg>
