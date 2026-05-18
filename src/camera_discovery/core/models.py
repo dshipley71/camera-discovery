@@ -41,6 +41,15 @@ class RunConfig:
     geocoder_referee_model: str | None = None
     geocoder_referee_timeout: float = 45.0
 
+    # LLM-assisted fallback coordinate enrichment. The LLM may infer place-name
+    # query variants from candidate evidence, but never coordinates. Nominatim
+    # remains the only source of geocoded lat/lon for this fallback.
+    location_inference_model: str | None = None
+    location_inference_timeout: float = 45.0
+    enable_llm_location_inference: bool = True
+    max_llm_location_inferences: int = 25
+    llm_location_inference_min_confidence: float = 0.70
+
     candidate_review_model: str | None = None
     candidate_review_timeout: float = 45.0
     candidate_review_batch_size: int = 8
@@ -175,8 +184,9 @@ class CameraCandidate:
     llm_semantic_confidence: float | None = None
     llm_semantic_reason: str | None = None
 
-    # Coordinate provenance. Coordinates are either extracted from source data
-    # or produced by an explicit geocoder call against candidate metadata.
+    # Coordinate provenance. Coordinates are either extracted from source data,
+    # geocoded from candidate metadata, or geocoded from LLM-inferred place names
+    # derived from candidate evidence. The LLM fallback never supplies coordinates.
     coordinate_source: str | None = None
     geocoded_query: str | None = None
     geocoded_display_name: str | None = None

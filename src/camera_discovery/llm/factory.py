@@ -70,6 +70,14 @@ def build_geocoder_referee_client(config: RunConfig) -> LLMClient:
     )
 
 
+def build_location_inference_client(config: RunConfig) -> LLMClient:
+    return build_llm_client(
+        _provider("CAMERA_DISCOVERY_LOCATION_INFERENCE_PROVIDER", config),
+        _model("CAMERA_DISCOVERY_LOCATION_INFERENCE_MODEL", config.location_inference_model, config),
+        timeout=config.location_inference_timeout,
+    )
+
+
 def build_candidate_review_client(config: RunConfig) -> LLMClient:
     return build_llm_client(
         _provider("CAMERA_DISCOVERY_CANDIDATE_REVIEW_PROVIDER", config),
