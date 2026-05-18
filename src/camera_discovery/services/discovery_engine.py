@@ -19,7 +19,14 @@ from camera_discovery.utils.json_utils import extract_json_object
 M3U8_RE = re.compile(r"https?://[^\s'\"<>]+?\.m3u8(?:\?[^\s'\"<>]*)?|['\"]([^'\"]+?\.m3u8(?:\?[^'\"]*)?)['\"]", re.I)
 IMAGE_RE = re.compile(r"https?://[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s'\"<>]*)?|['\"]([^'\"]+?\.(?:jpg|jpeg|png|webp)(?:\?[^'\"]*)?)['\"]", re.I)
 COORD_RE = re.compile(r"(?<!\d)([-+]?\d{1,2}\.\d{3,})\s*,\s*([-+]?\d{1,3}\.\d{3,})(?!\d)")
-JSON_FEED_HINT_RE = re.compile(r"(?:\.json(?:\?|$)|/api/|/feed|/feeds|/layer|/layers|camera|cameras|mapserver|featureserver)", re.I)
+JSON_FEED_HINT_RE = re.compile(
+    r"(?:\.json(?:\?|$)|/api/|/feed|/feeds|/layer|/layers|/query(?:\?|$)|camera|cameras|cctv|mapserver|featureserver|f=(?:p)?json)",
+    re.I,
+)
+ENDPOINT_URL_RE = re.compile(
+    r"[\"'](?P<url>[^\"']*(?:\.json(?:\?[^\"']*)?|/api/[^\"']*|/feed[^\"']*|/layer[^\"']*|/layers[^\"']*|/query\?[^\"']*|FeatureServer[^\"']*|MapServer[^\"']*|f=(?:p)?json[^\"']*)[^\"']*)[\"']",
+    re.I,
+)
 URL_KEYS = {"url", "stream", "stream_url", "streamurl", "hls", "hls_url", "hlsurl", "video", "video_url", "src"}
 IMAGE_KEYS = {"image", "image_url", "imageurl", "snapshot", "snapshot_url", "snapshoturl", "thumbnail", "thumbnail_url", "thumbnailurl", "preview", "preview_url", "poster", "poster_url"}
 LAT_KEYS = {"lat", "latitude", "y", "data_lat", "data_latitude"}
@@ -199,12 +206,33 @@ class CandidateDiscoveryEngine:
                 resp.raise_for_status()
                 text = resp.text
                 content_type = resp.headers.get("content-type", "")
-                out = self._extract_from_response(url, row, text, content_type)
-                if "html" in content_type.lower() or "<html" in text[:1000].lower():
-                    out.extend(self._extract_from_linked_feeds(url, row, text, client))
-                return self._dedupe(out)
+                if "html" in content_type.casefold() or "<html" in text[:1000].casefold():
+                    return self._extract_from_html_page(url, row, text, client)
+                return self._extract_from_response(url, row, text, content_type)
         except Exception:
             return []
+
+    def _extract_from_html_page(self, url: str, row: dict[str, str], html: str, client: httpx.Client) -> list[CameraCandidate]:
+        """Extract from structured page data first, then fall back to raw image tags.
+
+        Large camera sites usually expose camera records in JSON, ArcGIS layers,
+        map-layer feeds, or JavaScript state objects. Those records often contain
+        names, locations, image URLs, and coordinates. This method prefers those
+        structured records and uses HTML image scraping only when no structured
+        camera records are found. HLS URLs are still preserved whenever they are
+        directly visible on the page.
+        """
+        coords = self._extract_first_coord(html)
+        hls_rows = self._extract_hls_from_text(url, row, html, coords, "hls_regex")
+        structured_rows: list[CameraCandidate] = []
+        structured_rows.extend(self._extract_structured_from_text(url, row, html))
+        structured_rows.extend(self._extract_from_linked_feeds(url, row, html, client))
+        if structured_rows:
+            return self._dedupe(structured_rows + hls_rows)
+        fallback_rows = self._extract_from_html(url, row, html)
+        fallback_rows.extend(self._extract_images_from_text(url, row, html, coords, "image_snapshot_regex"))
+        fallback_rows.extend(hls_rows)
+        return self._dedupe(fallback_rows)
 
     def _extract_from_response(self, url: str, row: dict[str, str], text: str, content_type: str = "") -> list[CameraCandidate]:
         if _looks_like_json_response(url, content_type, text):
@@ -212,16 +240,29 @@ class CandidateDiscoveryEngine:
             if data is not None:
                 return self._extract_from_json_data(data, url, row, "json_endpoint")
         if "html" in content_type.casefold() or "<html" in text[:1000].casefold():
-            html_rows = self._extract_from_html(url, row, text)
-            text_rows = self._extract_from_text(url, row, text)
-            return self._dedupe(html_rows + text_rows)
+            # Used when a caller does not have an HTTP client available. It still
+            # prefers inline structured JavaScript/JSON over image-tag scraping.
+            coords = self._extract_first_coord(text)
+            structured_rows = self._extract_structured_from_text(url, row, text)
+            hls_rows = self._extract_hls_from_text(url, row, text, coords, "hls_regex")
+            if structured_rows:
+                return self._dedupe(structured_rows + hls_rows)
+            return self._dedupe(self._extract_from_html(url, row, text) + self._extract_images_from_text(url, row, text, coords, "image_snapshot_regex") + hls_rows)
         return self._extract_from_text(url, row, text)
 
     def _extract_from_text(self, url: str, row: dict[str, str], text: str) -> list[CameraCandidate]:
         coords = self._extract_first_coord(text)
         out: list[CameraCandidate] = []
         out.extend(self._extract_hls_from_text(url, row, text, coords, "hls_regex"))
-        out.extend(self._extract_images_from_text(url, row, text, coords, "image_snapshot_regex"))
+        structured_rows = self._extract_structured_from_text(url, row, text)
+        if structured_rows:
+            out.extend(structured_rows)
+        else:
+            out.extend(self._extract_images_from_text(url, row, text, coords, "image_snapshot_regex"))
+        return self._dedupe(out)
+
+    def _extract_structured_from_text(self, url: str, row: dict[str, str], text: str) -> list[CameraCandidate]:
+        out: list[CameraCandidate] = []
         for blob in self._extract_json_blobs(text):
             out.extend(self._extract_from_json_data(blob, url, row, "javascript_config"))
         return self._dedupe(out)
@@ -269,22 +310,25 @@ class CandidateDiscoveryEngine:
         return self._dedupe(out)
 
     def _extract_from_linked_feeds(self, url: str, row: dict[str, str], html: str, client: httpx.Client) -> list[CameraCandidate]:
-        soup = BeautifulSoup(html, "html.parser")
-        hrefs: list[str] = []
-        for tag in soup.select("a[href], link[href], script[src]"):
-            href = tag.get("href") or tag.get("src") or ""
-            absolute = urljoin(url, href)
-            if JSON_FEED_HINT_RE.search(absolute) and not self.source_policy.is_blocked(absolute):
-                hrefs.append(absolute)
+        endpoint_urls = _candidate_endpoint_urls_from_html(html, url)
         out: list[CameraCandidate] = []
-        for feed_url in _dedupe_strings(hrefs)[:8]:
-            try:
-                resp = client.get(feed_url)
-                if resp.status_code >= 400:
-                    continue
-                out.extend(self._extract_from_response(feed_url, row, resp.text, resp.headers.get("content-type", "")))
-            except Exception:
+        endpoint_log: list[dict[str, Any]] = []
+        for feed_url in endpoint_urls[:12]:
+            if self.source_policy.is_blocked(feed_url):
+                endpoint_log.append({"url": feed_url, "status": "blocked"})
                 continue
+            try:
+                resp = client.get(feed_url, headers={"Accept": "application/json,text/plain,*/*"})
+                if resp.status_code >= 400:
+                    endpoint_log.append({"url": feed_url, "status": f"http_{resp.status_code}"})
+                    continue
+                before = len(out)
+                out.extend(self._extract_from_response(feed_url, row, resp.text, resp.headers.get("content-type", "")))
+                endpoint_log.append({"url": feed_url, "status": "parsed", "candidates": len(out) - before})
+            except Exception as exc:
+                endpoint_log.append({"url": feed_url, "status": "error", "error": repr(exc)[:300]})
+        if endpoint_log:
+            write_jsonl(self.logs_dir / "structured_endpoint_discovery.jsonl", endpoint_log)
         return self._dedupe(out)
 
     def _extract_hls_from_text(self, source_url: str, row: dict[str, str], text: str, coords: tuple[float, float] | None, method: str) -> list[CameraCandidate]:
@@ -685,6 +729,48 @@ class CandidateDiscoveryEngine:
 
 
 
+
+def _candidate_endpoint_urls_from_html(html: str, base_url: str) -> list[str]:
+    """Return likely structured camera/feed endpoints referenced by a page.
+
+    This detects normal linked JSON/API/feed URLs plus ArcGIS MapServer and
+    FeatureServer layer URLs. ArcGIS layer URLs are expanded into generic query
+    endpoints that request features with geometry. This is a generic extractor,
+    not a source-specific rule.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    candidates: list[str] = []
+    for tag in soup.select("a[href], link[href], script[src]"):
+        href = tag.get("href") or tag.get("src") or ""
+        if href:
+            candidates.extend(_endpoint_variants(urljoin(base_url, href)))
+    for match in ENDPOINT_URL_RE.finditer(html):
+        raw = match.group("url") or ""
+        if raw:
+            candidates.extend(_endpoint_variants(urljoin(base_url, raw)))
+    return _dedupe_strings([url for url in candidates if JSON_FEED_HINT_RE.search(url) and url.startswith("http")])
+
+
+def _endpoint_variants(url: str) -> list[str]:
+    if not url or not url.startswith("http"):
+        return []
+    parsed = urlparse(url)
+    base = url.split("#", 1)[0]
+    variants = [base]
+    lower_path = parsed.path.casefold()
+    query = parse_qs(parsed.query)
+    is_arcgis_layer = bool(re.search(r"/(?:mapserver|featureserver)/\d+/?$", lower_path, re.I))
+    is_arcgis_server = "mapserver" in lower_path or "featureserver" in lower_path
+    has_query_operation = lower_path.endswith("/query")
+    if is_arcgis_layer and not has_query_operation:
+        variants.append(base.rstrip("/") + "/query?" + urlencode({"where": "1=1", "outFields": "*", "returnGeometry": "true", "f": "json"}))
+    elif is_arcgis_server and not parsed.query:
+        variants.append(base.rstrip("/") + "?" + urlencode({"f": "json"}))
+    elif has_query_operation and "f" not in query:
+        sep = "&" if parsed.query else "?"
+        variants.append(base + sep + urlencode({"where": "1=1", "outFields": "*", "returnGeometry": "true", "f": "json"}))
+    return _dedupe_strings(variants)
+
 def _looks_like_json_response(url: str, content_type: str, text: str) -> bool:
     ctype = content_type.casefold()
     if "json" in ctype:
@@ -703,11 +789,15 @@ def _record_media_urls(record: dict[str, Any], base_url: str) -> list[tuple[str,
         for item in values:
             if not isinstance(item, str) or not item.strip():
                 continue
-            absolute = urljoin(base_url, item.strip())
+            raw = item.strip()
+            absolute = urljoin(base_url, raw)
             if _looks_like_hls(absolute) or key_norm in URL_KEYS and ".m3u8" in absolute.casefold():
                 urls.append((absolute, "hls"))
-            elif _looks_like_image(absolute) or key_norm in IMAGE_KEYS:
+            elif (_looks_like_image(absolute) or key_norm in IMAGE_KEYS) and not _looks_like_non_camera_asset(absolute):
                 urls.append((absolute, "image_snapshot"))
+            elif key_norm in {"cctv", "cctvurl", "camera_url", "cameraurl", "feed", "feed_url"}:
+                embedded = _media_urls_from_attribute(raw, base_url)
+                urls.extend(embedded)
     return _dedupe_media_urls(urls)
 
 
@@ -798,7 +888,7 @@ def _record_title(record: dict[str, Any]) -> str | None:
 
 
 def _record_location_text(record: dict[str, Any]) -> str | None:
-    for key in ("location", "location_text", "road", "route", "city", "county", "district"):
+    for key in ("location", "location_text", "road", "route", "route_name", "highway", "cross_street", "intersection", "nearest_cross_street", "direction", "city", "county", "district"):
         for actual, value in record.items():
             if str(actual).replace("-", "_").casefold() == key and value not in (None, ""):
                 return str(value)[:300]
