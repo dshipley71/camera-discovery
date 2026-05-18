@@ -153,33 +153,65 @@ class CandidateDiscoveryEngine:
 
     def _search_queries(self, target: TargetContext) -> list[str]:
         base = target.canonical_target or target.user_query
-        camera_intent = (target.intent.camera_type_intent or "public_live").replace("_", " ")
-        candidates = [
-            f"{base} {camera_intent} cameras",
-            f"{base} public camera feed json",
-            f"{base} public live cameras m3u8",
-            f"{base} webcam HLS",
-            f"{base} camera map layer feed",
-            f"{base} camera snapshots",
-        ]
-        if "traffic" in camera_intent.casefold():
+        camera_intent = (target.intent.camera_type_intent or "public_live").replace("_", " ").casefold()
+        candidates: list[str] = []
+
+        if "traffic" in camera_intent:
             # Generic transportation-camera discovery expansions. These are not tied
-            # to any source, state, or agency; they help blind search surface
-            # official transportation camera pages and structured feeds.
+            # to any source, state, or agency. They are intentionally ordered before
+            # generic camera terms so they survive small max_search_queries values.
             candidates.extend(
                 [
                     f"{base} traffic cameras",
-                    f"{base} transportation cameras",
+                    f"{base} traffic camera map",
                     f"{base} department of transportation cameras",
+                    f"{base} traffic camera API json",
+                    f"{base} transportation cameras",
                     f"{base} road conditions cameras",
                     f"{base} CCTV traffic cameras",
                     f"{base} live traffic camera list",
-                    f"{base} traffic camera map",
-                    f"{base} traffic camera API json",
                     f"{base} traffic camera MapServer FeatureServer",
                     f"{base} traffic camera m3u8",
                 ]
             )
+        elif "weather" in camera_intent:
+            # Weather-camera searches get their own intent-specific terms. Do not
+            # leak traffic/DOT vocabulary into weather runs.
+            candidates.extend(
+                [
+                    f"{base} weather cameras",
+                    f"{base} weather webcams",
+                    f"{base} live weather camera",
+                    f"{base} weather camera map",
+                    f"{base} weather station webcam",
+                    f"{base} airport weather camera",
+                    f"{base} mountain weather camera",
+                    f"{base} public weather webcam",
+                    f"{base} weather camera feed json",
+                    f"{base} weather webcam HLS",
+                ]
+            )
+        else:
+            candidates.extend(
+                [
+                    f"{base} public live cameras",
+                    f"{base} live webcams",
+                    f"{base} public camera map",
+                    f"{base} public camera feed json",
+                    f"{base} webcam HLS",
+                    f"{base} camera snapshots",
+                ]
+            )
+
+        # Generic structured-data discovery terms are safe for every camera type.
+        candidates.extend(
+            [
+                f"{base} camera map layer feed",
+                f"{base} public camera API json",
+                f"{base} camera MapServer FeatureServer",
+                f"{base} public live cameras m3u8",
+            ]
+        )
         return _dedupe_strings(candidates)[: self.config.max_search_queries]
 
     def _blind_search(self, queries: list[str]) -> list[dict[str, str]]:
