@@ -261,7 +261,7 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       const thumb = firstValue(p, {json.dumps(list(THUMBNAIL_KEYS))});
       const stream = p.stream_url || '';
       const source = p.source_url || '';
-      const mediaType = firstValue(p, ['media_type']) || (String(stream).toLowerCase().includes('.m3u8') ? 'hls' : (thumb || /\.(jpg|jpeg|png|webp)(\?|$)/i.test(stream) ? 'image_snapshot' : 'unknown'));
+      const mediaType = firstValue(p, ['media_type']) || (String(stream).toLowerCase().includes('.m3u8') ? 'hls' : (thumb || /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(stream) ? 'image_snapshot' : 'unknown'));
       const cameraType = firstValue(p, ['camera_type', 'type', 'category']) || '';
       const cameraId = firstValue(p, ['camera_id', 'id']) || '';
       const thumbHtml = thumb ? `<img class="thumb" src="${{esc(cacheBust(thumb))}}" alt="Camera thumbnail" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{{className:'no-thumb',innerText:'Thumbnail unavailable'}}))">` : `<div class="no-thumb">No thumbnail URL in GeoJSON</div>`;
@@ -295,7 +295,7 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       video.style.display = 'none';
       snapshot.style.display = 'none';
       snapshot.removeAttribute('src');
-      if (mediaType === 'image_snapshot' || /\.(jpg|jpeg|png|webp)(\?|$)/i.test(url)) {{
+      if (mediaType === 'image_snapshot' || /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(url)) {{
         snapshot.src = cacheBust(url);
         snapshot.style.display = 'block';
         snapshotTimer = setInterval(() => {{ snapshot.src = cacheBust(url); }}, 15000);
