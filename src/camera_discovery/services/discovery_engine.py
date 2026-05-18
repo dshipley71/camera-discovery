@@ -596,63 +596,132 @@ class CandidateDiscoveryEngine:
                 candidate.reasons.append("missing_candidate_coordinates")
 
     def _apply_llm_candidate_review(self, candidates: list[CameraCandidate], target: TargetContext) -> None:
+        """Apply advisory LLM semantic review without making it a run-fatal step.
+
+        Candidate semantic review is an evidence interpretation stage, not the
+        stream-validation or output-trust authority. Remote LLM calls can time out
+        on large candidate batches, especially in notebook runs using larger cloud
+        models. To keep discovery usable, review is sent in bounded batches; a
+        failed batch is recorded in diagnostics and the affected candidates remain
+        review-only instead of crashing the run.
+        """
         if not candidates:
             return
-        client = self.semantic_review_client or build_candidate_review_client(self.config)
-        reviewable = [candidate for candidate in candidates if not (candidate.scope_status == "out_of_scope" and candidate.trust_level == "rejected")][:50]
+        max_reviews = max(0, int(self.config.max_candidate_reviews))
+        if max_reviews == 0:
+            write_json(
+                self.logs_dir / "candidate_semantic_review.json",
+                {"status": "skipped", "reason": "CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS=0"},
+            )
+            return
+
+        reviewable = [candidate for candidate in candidates if not (candidate.scope_status == "out_of_scope" and candidate.trust_level == "rejected")][:max_reviews]
         if not reviewable:
             return
-        payload = [
-            {
-                "index": candidates.index(candidate),
-                "stream_url": candidate.stream_url,
-                "source_url": candidate.source_url,
-                "title": candidate.title,
-                "lat": candidate.lat,
-                "lon": candidate.lon,
-                "location_text": candidate.location_text,
-                "deterministic_scope_status": candidate.scope_status,
-                "reasons": candidate.reasons,
-                "source_metadata": candidate.source_metadata,
-            }
-            for candidate in reviewable
-        ]
-        raw = client.chat(
-            [
-                ChatMessage("system", "Return strict JSON only. You are an advisory semantic reviewer, not a stream validator."),
-                ChatMessage("user", self._candidate_review_prompt(target, payload)),
-            ],
-            temperature=0.0,
-        )
-        data = extract_json_object(raw)
-        write_json(self.logs_dir / "candidate_semantic_review_llm_raw.json", {"raw": raw, "model": getattr(client, "model", None)})
-        write_json(self.logs_dir / "candidate_semantic_review.json", data)
-        rows = data.get("candidates") if isinstance(data.get("candidates"), list) else []
+
+        client = self.semantic_review_client or build_candidate_review_client(self.config)
+        batch_size = max(1, int(self.config.candidate_review_batch_size))
         by_index = {index: candidate for index, candidate in enumerate(candidates)}
-        for row in rows:
-            if not isinstance(row, dict):
+        batches: list[dict[str, Any]] = []
+        applied_rows: list[dict[str, Any]] = []
+
+        for batch_number, batch in enumerate(_chunks(reviewable, batch_size), start=1):
+            payload = [self._candidate_review_payload(candidate, candidates.index(candidate)) for candidate in batch]
+            try:
+                raw = client.chat(
+                    [
+                        ChatMessage("system", "Return strict JSON only. You are an advisory semantic reviewer, not a stream validator."),
+                        ChatMessage("user", self._candidate_review_prompt(target, payload)),
+                    ],
+                    temperature=0.0,
+                )
+                data = extract_json_object(raw)
+            except Exception as exc:  # External LLM/API failure must not corrupt deterministic review artifacts.
+                message = repr(exc)[:1000]
+                batches.append(
+                    {
+                        "batch": batch_number,
+                        "status": "failed",
+                        "error": message,
+                        "candidate_indexes": [row["index"] for row in payload],
+                        "model": getattr(client, "model", None),
+                    }
+                )
+                for row in payload:
+                    candidate = by_index.get(row["index"])
+                    if candidate is not None:
+                        candidate.reasons.append("llm_semantic_review_failed")
+                        if candidate.scope_status == "unknown":
+                            candidate.scope_status = "review"
                 continue
-            index = _int_or_none(row.get("index"))
-            if index is None or index not in by_index:
-                continue
-            candidate = by_index[index]
-            decision = str(row.get("decision") or "review").casefold()
-            if decision not in {"in_scope", "out_of_scope", "review", "unknown"}:
-                decision = "review"
-            candidate.llm_semantic_decision = decision  # type: ignore[assignment]
-            candidate.llm_semantic_confidence = _float_or_none(row.get("confidence"))
-            candidate.llm_semantic_reason = str(row.get("reason") or "")[:500]
-            candidate.reasons.append(f"llm_semantic_review:{decision}")
-            if candidate.scope_status == "out_of_scope" and candidate.trust_level == "rejected":
-                continue
-            if decision == "out_of_scope" and (candidate.llm_semantic_confidence or 0.0) >= 0.75:
-                candidate.scope_status = "out_of_scope"
-                candidate.trust_level = "rejected"
-            elif decision == "in_scope" and target.bbox_verified and candidate.has_coordinates:
-                if candidate.scope_status != "out_of_scope":
-                    candidate.scope_status = "in_scope"
-            elif decision in {"in_scope", "review"} and candidate.scope_status == "unknown":
-                candidate.scope_status = "review"
+
+            rows = data.get("candidates") if isinstance(data.get("candidates"), list) else []
+            batches.append(
+                {
+                    "batch": batch_number,
+                    "status": "ok",
+                    "raw": raw,
+                    "parsed": data,
+                    "candidate_indexes": [row["index"] for row in payload],
+                    "model": getattr(client, "model", None),
+                }
+            )
+            for row in rows:
+                if isinstance(row, dict) and self._apply_candidate_review_row(row, by_index, target):
+                    applied_rows.append(row)
+
+        write_json(
+            self.logs_dir / "candidate_semantic_review_llm_raw.json",
+            {"batches": batches, "model": getattr(client, "model", None)},
+        )
+        write_json(
+            self.logs_dir / "candidate_semantic_review.json",
+            {
+                "status": "completed_with_failures" if any(batch["status"] == "failed" for batch in batches) else "completed",
+                "reviewable_candidates": len(reviewable),
+                "batch_size": batch_size,
+                "batches": [{k: v for k, v in batch.items() if k != "raw"} for batch in batches],
+                "applied_rows": applied_rows,
+            },
+        )
+
+    def _candidate_review_payload(self, candidate: CameraCandidate, index: int) -> dict[str, Any]:
+        return {
+            "index": index,
+            "stream_url": candidate.stream_url,
+            "source_url": candidate.source_url,
+            "title": candidate.title,
+            "lat": candidate.lat,
+            "lon": candidate.lon,
+            "location_text": candidate.location_text,
+            "deterministic_scope_status": candidate.scope_status,
+            "reasons": candidate.reasons,
+            "source_metadata": candidate.source_metadata,
+        }
+
+    def _apply_candidate_review_row(self, row: dict[str, Any], by_index: dict[int, CameraCandidate], target: TargetContext) -> bool:
+        index = _int_or_none(row.get("index"))
+        if index is None or index not in by_index:
+            return False
+        candidate = by_index[index]
+        decision = str(row.get("decision") or "review").casefold()
+        if decision not in {"in_scope", "out_of_scope", "review", "unknown"}:
+            decision = "review"
+        candidate.llm_semantic_decision = decision  # type: ignore[assignment]
+        candidate.llm_semantic_confidence = _float_or_none(row.get("confidence"))
+        candidate.llm_semantic_reason = str(row.get("reason") or "")[:500]
+        candidate.reasons.append(f"llm_semantic_review:{decision}")
+        if candidate.scope_status == "out_of_scope" and candidate.trust_level == "rejected":
+            return True
+        if decision == "out_of_scope" and (candidate.llm_semantic_confidence or 0.0) >= 0.75:
+            candidate.scope_status = "out_of_scope"
+            candidate.trust_level = "rejected"
+        elif decision == "in_scope" and target.bbox_verified and candidate.has_coordinates:
+            if candidate.scope_status != "out_of_scope":
+                candidate.scope_status = "in_scope"
+        elif decision in {"in_scope", "review"} and candidate.scope_status == "unknown":
+            candidate.scope_status = "review"
+        return True
 
     def _candidate_review_prompt(self, target: TargetContext, candidates: list[dict]) -> str:
         return (
@@ -1115,3 +1184,7 @@ def _int_or_none(value):
         return None if value in (None, "") else int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _chunks(values: list[CameraCandidate], size: int) -> list[list[CameraCandidate]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]

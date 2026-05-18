@@ -41,6 +41,8 @@ class RunConfig:
 
     candidate_review_model: str | None = None
     candidate_review_timeout: float = 45.0
+    candidate_review_batch_size: int = 8
+    max_candidate_reviews: int = 50
 
     max_search_queries: int = 4
     max_search_results_per_query: int = 5
