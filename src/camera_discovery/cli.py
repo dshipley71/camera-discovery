@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import concurrent.futures
+import os
 import threading
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,7 +33,30 @@ def _make_progress(console: Console, *, enabled: bool) -> Progress:
         console=console,
         transient=False,
         disable=not enabled,
+        refresh_per_second=2,
     )
+
+
+def _resolve_progress_mode(console: Console, *, enabled: bool, style: str = "auto") -> str:
+    """Return rich, plain, or off for progress rendering.
+
+    Rich live progress bars are excellent in real terminals, but they become
+    hundreds of repeated lines when stdout is piped into notebooks or log
+    capture. In auto mode, use Rich only for interactive terminals and a
+    concise milestone renderer everywhere else.
+    """
+    if not enabled:
+        return "off"
+    normalized = (style or "auto").strip().casefold()
+    if normalized not in {"auto", "rich", "plain"}:
+        raise typer.BadParameter("progress style must be one of: auto, rich, plain")
+    if normalized == "auto":
+        # FORCE_COLOR can make Rich consider a pipe terminal-like, which is
+        # exactly what creates repeated live-render frames in notebooks. Require
+        # both Rich terminal support and an actual TTY file descriptor for live bars.
+        file_is_tty = bool(getattr(console.file, "isatty", lambda: False)())
+        return "rich" if console.is_terminal and file_is_tty else "plain"
+    return normalized
 
 
 def _make_discovery_progress_callback(
@@ -87,6 +112,79 @@ def _make_discovery_progress_callback(
     return callback
 
 
+def _make_plain_discovery_progress_callback(
+    console: Console,
+    state: dict[str, int],
+    lock: threading.Lock,
+):
+    """Create a low-noise progress callback for notebooks, pipes, and logs."""
+
+    def _bucket(completed: int, total: int) -> int:
+        if total <= 0:
+            return completed
+        return min(10, max(0, int((completed / total) * 10)))
+
+    def callback(event: str, payload: dict[str, Any]) -> None:
+        label = payload.get("target_label") or payload.get("target_id") or "target"
+        with lock:
+            if event == "source_rows_loading":
+                if not state.get("loading_reported"):
+                    console.print(f"Progress: {label} — loading source rows...")
+                    state["loading_reported"] = 1
+            elif event == "source_rows_selected":
+                total = int(payload.get("primary_rows") or 0)
+                state["total"] = max(state.get("total", 0), total)
+                console.print(
+                    f"Progress: {label} — scanning {total} source rows "
+                    f"({payload.get('selected_rows', 0)} selected, {payload.get('discovered_rows', 0)} discovered)."
+                )
+            elif event == "source_row_batch_started":
+                rows = int(payload.get("rows") or 0)
+                if payload.get("phase") != "primary":
+                    state["total"] = state.get("total", 0) + rows
+                    console.print(f"Progress: {label} — checking promoted asset hosts ({rows} rows).")
+                elif not state.get("total"):
+                    state["total"] = rows
+            elif event == "source_row_processed":
+                completed = int(payload.get("processed_rows") or (state.get("completed", 0) + 1))
+                if payload.get("phase") != "primary":
+                    completed = state.get("completed", 0) + 1
+                state["completed"] = completed
+                total = int(state.get("total") or payload.get("rows") or 0)
+                current_bucket = _bucket(completed, total)
+                accepted = int(payload.get("accepted_total") or 0)
+                last_accepted = int(state.get("last_accepted_report", 0))
+                should_report = (
+                    completed == total
+                    or current_bucket > int(state.get("last_bucket", -1))
+                    or accepted - last_accepted >= 50
+                    or (bool(payload.get("budgets_full")) and not state.get("budgets_full_reported"))
+                )
+                if should_report:
+                    state["last_bucket"] = current_bucket
+                    state["last_accepted_report"] = accepted
+                    if payload.get("budgets_full"):
+                        state["budgets_full_reported"] = 1
+                    denominator = total if total else "?"
+                    console.print(
+                        f"Progress: {label} — scanned {completed}/{denominator} rows; "
+                        f"accepted {accepted} candidates "
+                        f"(HLS {payload.get('hls_count', 0)}, images {payload.get('image_snapshot_count', 0)})."
+                    )
+            elif event == "coordinate_enrichment_started":
+                console.print(f"Progress: {label} — enriching coordinates for {payload.get('unique', 0)} unique candidates...")
+            elif event == "scope_review_started":
+                console.print(f"Progress: {label} — checking target scope and review gates...")
+            elif event == "discovery_complete":
+                state["finished"] = 1
+                console.print(
+                    f"Progress: {label} — discovery complete: raw {payload.get('raw', 0)}, "
+                    f"unique {payload.get('unique', 0)}, mapped {payload.get('coordinate_bearing', 0)}."
+                )
+
+    return callback
+
+
 @app.callback()
 def main() -> None:
     """Camera discovery command group."""
@@ -101,7 +199,8 @@ def run(
     sources_file: Optional[Path] = typer.Option(None, "--sources-file"),
     discovery_mode: str = typer.Option("both", "--discovery-mode", help="blind, directory, both, or direct"),
     block_pattern: Optional[list[str]] = typer.Option(None, "--block-pattern"),
-    show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show progress bars while resolving, discovering, and writing outputs."),
+    show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show progress while resolving, discovering, and writing outputs. Auto mode uses Rich bars in terminals and concise milestone lines in notebooks/logs."),
+    progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, or plain."),
 ) -> None:
     """Run public-camera discovery for one or more locations in QUERY."""
     cfg = load_run_config(
@@ -122,11 +221,27 @@ def run(
     console.print(f"[bold]Discovery mode:[/bold] {cfg.discovery_mode.value}")
     console.print(f"[bold]Sources file:[/bold] {cfg.sources_file}")
 
-    progress = _make_progress(console, enabled=show_progress)
-    with progress:
-        resolve_task = progress.add_task("Resolving targets", total=1)
+    progress_mode = _resolve_progress_mode(
+        console,
+        enabled=show_progress,
+        style=os.environ.get("CAMERA_DISCOVERY_PROGRESS_STYLE", progress_style),
+    )
+    progress = _make_progress(console, enabled=True) if progress_mode == "rich" else None
+
+    with progress if progress is not None else nullcontext():
+        if progress_mode == "rich":
+            assert progress is not None
+            resolve_task = progress.add_task("Resolving targets", total=1)
+        elif progress_mode == "plain":
+            console.print("Progress: resolving targets...")
+
         targets = TargetResolver(cfg).resolve_all()
-        progress.update(resolve_task, completed=1, description="Resolved targets")
+
+        if progress_mode == "rich":
+            assert progress is not None
+            progress.update(resolve_task, completed=1, description="Resolved targets")
+        elif progress_mode == "plain":
+            console.print(f"Progress: resolved {len(targets)} target(s).")
 
         state.targets = targets
         state.target = targets[0] if targets else None
@@ -149,13 +264,31 @@ def run(
         target_progress_state: dict[str, dict[str, int]] = {}
         for target in runnable_targets:
             label = target.target_label or target.canonical_target or target.target_id
-            target_tasks[target.target_id] = progress.add_task(f"Discovering {label}", total=None)
+            if progress_mode == "rich":
+                assert progress is not None
+                target_tasks[target.target_id] = progress.add_task(f"Discovering {label}", total=None)
+            elif progress_mode == "plain":
+                console.print(f"Progress: discovering {label}...")
             target_progress_state[target.target_id] = {"total": 0, "completed": 0}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(runnable_targets))) as pool:
             futures = {}
             for target in runnable_targets:
-                callback = _make_discovery_progress_callback(progress, target_tasks[target.target_id], target_progress_state[target.target_id], progress_lock)
+                callback = None
+                if progress_mode == "rich":
+                    assert progress is not None
+                    callback = _make_discovery_progress_callback(
+                        progress,
+                        target_tasks[target.target_id],
+                        target_progress_state[target.target_id],
+                        progress_lock,
+                    )
+                elif progress_mode == "plain":
+                    callback = _make_plain_discovery_progress_callback(
+                        console,
+                        target_progress_state[target.target_id],
+                        progress_lock,
+                    )
                 engine = CandidateDiscoveryEngine(cfg, progress_callback=callback)
                 futures[pool.submit(engine.discover, target)] = target
             for future in concurrent.futures.as_completed(futures):
@@ -163,10 +296,12 @@ def run(
                 try:
                     per_target_sets[target.target_id] = future.result()
                 finally:
-                    task_id = target_tasks[target.target_id]
-                    state_for_target = target_progress_state[target.target_id]
-                    total = max(1, state_for_target.get("total", 0), state_for_target.get("completed", 0))
-                    progress.update(task_id, total=total, completed=total, description=f"Discovered {target.target_label or target.canonical_target or target.target_id}")
+                    if progress_mode == "rich":
+                        assert progress is not None
+                        task_id = target_tasks[target.target_id]
+                        state_for_target = target_progress_state[target.target_id]
+                        total = max(1, state_for_target.get("total", 0), state_for_target.get("completed", 0))
+                        progress.update(task_id, total=total, completed=total, description=f"Discovered {target.target_label or target.canonical_target or target.target_id}")
 
         state.candidate_sets_by_target = per_target_sets
         merged = CandidateSet.merge(list(per_target_sets.values()))
@@ -176,9 +311,17 @@ def run(
             f"coordinate_bearing={len(merged.coordinate_bearing)} targets={len(per_target_sets)}"
         )
 
-        validation_task = progress.add_task("Validating streams and writing outputs", total=1)
+        if progress_mode == "rich":
+            assert progress is not None
+            validation_task = progress.add_task("Validating streams and writing outputs", total=1)
+        elif progress_mode == "plain":
+            console.print("Progress: validating streams and writing outputs...")
         validation, outputs = ReviewAndValidationPipeline(cfg).run(runnable_targets, merged)
-        progress.update(validation_task, completed=1, description="Validation and outputs complete")
+        if progress_mode == "rich":
+            assert progress is not None
+            progress.update(validation_task, completed=1, description="Validation and outputs complete")
+        elif progress_mode == "plain":
+            console.print("Progress: validation and outputs complete.")
     state.validation = validation
     state.outputs = outputs
     write_json(cfg.output_dir / "logs" / "run_summary.json", state.to_dict())
