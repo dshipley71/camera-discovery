@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import asdict
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -103,12 +104,79 @@ class ReviewAndValidationPipeline:
             out.untrusted_geojson_features_written = len(review)
             self._write_geojson(self.config.output_dir / "untrusted_camera_candidates.geojson", review, trusted=False, target_map=target_map)
             write_jsonl(self.candidates_dir / "untrusted_camera_candidates_source_rows.jsonl", [asdict(c) for c in review])
+        table_path = self._write_candidate_table(candidates.unique)
+        out.camera_candidates_table_csv = str(table_path)
+        out.camera_candidates_table_rows = len(candidates.unique)
         write_jsonl(self.logs_dir / "validation_results.jsonl", [asdict(c) for c in candidates.unique])
         write_json(self.logs_dir / "validation_summary.json", asdict(v))
-        write_json(self.logs_dir / "output_summary.json", asdict(out))
         out.map_html = str(self._write_map())
         out.review_artifacts_zip = str(self._package_review_artifacts())
+        write_json(self.logs_dir / "output_summary.json", asdict(out))
         return out
+
+    def _write_candidate_table(self, rows: list[CameraCandidate]):
+        """Write a CSV table from all non-rejected candidates, including rows without coordinates."""
+        path = self.config.output_dir / "camera_candidates_table.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = [
+            "name",
+            "target_label",
+            "location_text",
+            "stream_url",
+            "source_url",
+            "latitude",
+            "longitude",
+            "coordinate_source",
+            "geocoded_query",
+            "geocoded_display_name",
+            "thumbnail_url",
+            "media_type",
+            "trust_level",
+            "validation_status",
+            "scope_status",
+            "discovery_method",
+            "review_required",
+            "target_id",
+            "llm_semantic_decision",
+            "llm_semantic_reason",
+            "reasons",
+        ]
+        visible = [row for row in rows if row.trust_level != "rejected"]
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in visible:
+                metadata = row.source_metadata or {}
+                writer.writerow(
+                    {
+                        "name": row.title or metadata.get("source_name") or "Camera candidate",
+                        "target_label": row.target_label,
+                        "location_text": row.location_text,
+                        "stream_url": row.stream_url,
+                        "source_url": row.source_url,
+                        "latitude": row.lat,
+                        "longitude": row.lon,
+                        "coordinate_source": row.coordinate_source,
+                        "geocoded_query": row.geocoded_query,
+                        "geocoded_display_name": row.geocoded_display_name,
+                        "thumbnail_url": metadata.get("snapshot_url") or metadata.get("thumbnail_url") or metadata.get("image_url"),
+                        "media_type": metadata.get("media_type"),
+                        "trust_level": row.trust_level,
+                        "validation_status": row.validation_status,
+                        "scope_status": row.scope_status,
+                        "discovery_method": row.discovery_method,
+                        "review_required": row.trust_level != "trusted",
+                        "target_id": row.target_id,
+                        "llm_semantic_decision": row.llm_semantic_decision,
+                        "llm_semantic_reason": row.llm_semantic_reason,
+                        "reasons": "; ".join(row.reasons),
+                    }
+                )
+        write_json(
+            self.logs_dir / "camera_candidates_table_status.json",
+            {"path": str(path), "rows": len(visible), "includes_rows_without_coordinates": True},
+        )
+        return path
 
     def _write_geojson(self, path, rows: list[CameraCandidate], *, trusted: bool, target_map: dict[str, TargetContext]) -> None:
         feats = []
@@ -149,7 +217,7 @@ class ReviewAndValidationPipeline:
     def _package_review_artifacts(self):
         zpath = self.config.output_dir / "review_artifacts.zip"
         with ZipFile(zpath, "w", ZIP_DEFLATED) as z:
-            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "camera_inventory.jsonl", "cameras.md", "map.html"]:
+            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "camera_inventory.jsonl", "cameras.md", "map.html", "camera_candidates_table.csv"]:
                 p = self.config.output_dir / rel
                 if p.exists():
                     z.write(p, rel)

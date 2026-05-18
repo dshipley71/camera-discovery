@@ -53,6 +53,8 @@ class RunConfig:
     sources_file: Path | None = None
     discovery_mode: DiscoveryMode = DiscoveryMode.BOTH
     block_patterns: list[str] = field(default_factory=list)
+    enable_candidate_geocoding: bool = True
+    max_candidate_geocodes: int = 25
 
     @property
     def validation_enabled(self) -> bool:
@@ -160,6 +162,12 @@ class CameraCandidate:
     llm_semantic_confidence: float | None = None
     llm_semantic_reason: str | None = None
 
+    # Coordinate provenance. Coordinates are either extracted from source data
+    # or produced by an explicit geocoder call against candidate metadata.
+    coordinate_source: str | None = None
+    geocoded_query: str | None = None
+    geocoded_display_name: str | None = None
+
     @property
     def has_coordinates(self) -> bool:
         return self.lat is not None and self.lon is not None
@@ -211,6 +219,8 @@ class OutputSummary:
     untrusted_geojson_features_written: int = 0
     review_artifacts_zip: str | None = None
     map_html: str | None = None
+    camera_candidates_table_csv: str | None = None
+    camera_candidates_table_rows: int = 0
 
 
 @dataclass

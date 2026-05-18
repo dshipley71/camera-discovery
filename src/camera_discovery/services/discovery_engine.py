@@ -86,8 +86,6 @@ class CandidateDiscoveryEngine:
                 break
         raw = raw[: self.config.max_streams]
         unique = self._dedupe(raw)
-        self._scope_candidates(unique, target)
-        self._apply_llm_candidate_review(unique, target)
         for c in raw:
             c.target_id = target.target_id
             c.target_index = target.target_index
@@ -96,6 +94,9 @@ class CandidateDiscoveryEngine:
             c.target_id = target.target_id
             c.target_index = target.target_index
             c.target_label = target.target_label or target.canonical_target
+        self._enrich_candidate_coordinates(unique, target)
+        self._scope_candidates(unique, target)
+        self._apply_llm_candidate_review(unique, target)
         cs = self._build_candidate_set(raw, unique)
         self._write_artifacts(queries, results, cs, target)
         return cs
@@ -250,6 +251,7 @@ class CandidateDiscoveryEngine:
                 candidate.source_metadata["media_type"] = "hls"
                 if coords:
                     candidate.lat, candidate.lon = coords
+                    candidate.coordinate_source = "page_text_coordinate"
                 out.append(candidate)
         return out
 
@@ -264,6 +266,7 @@ class CandidateDiscoveryEngine:
                 candidate.source_metadata["snapshot_url"] = image_url
                 if coords:
                     candidate.lat, candidate.lon = coords
+                    candidate.coordinate_source = "page_text_coordinate"
                 out.append(candidate)
         return out
 
@@ -321,7 +324,9 @@ class CandidateDiscoveryEngine:
         if not urls:
             return None
         candidate = self._candidate_from_stream(urls[0][0], source_url, row, method + "_geojson_feature")
-        candidate.lat, candidate.lon = lat_lon if lat_lon else (candidate.lat, candidate.lon)
+        if lat_lon:
+            candidate.lat, candidate.lon = lat_lon
+            candidate.coordinate_source = "geojson_geometry"
         candidate.title = _record_title(props) or candidate.title
         candidate.location_text = _record_location_text(props)
         candidate.source_metadata.update(_simple_metadata(props))
@@ -331,8 +336,9 @@ class CandidateDiscoveryEngine:
         return candidate
 
     def _candidates_from_record(self, record: dict[str, Any], source_url: str, row: dict[str, str], method: str) -> list[CameraCandidate]:
-        lat_lon = _record_lat_lon(record)
-        urls = _record_media_urls(record, source_url)
+        flattened = _flatten_camera_record(record)
+        lat_lon = _record_lat_lon(flattened)
+        urls = _record_media_urls(flattened, source_url)
         if not urls:
             return []
         out: list[CameraCandidate] = []
@@ -342,9 +348,10 @@ class CandidateDiscoveryEngine:
             candidate = self._candidate_from_stream(media_url, source_url, row, method + "_record")
             if lat_lon:
                 candidate.lat, candidate.lon = lat_lon
-            candidate.title = _record_title(record) or candidate.title
-            candidate.location_text = _record_location_text(record)
-            candidate.source_metadata.update(_simple_metadata(record))
+                candidate.coordinate_source = "source_record"
+            candidate.title = _record_title(flattened) or candidate.title
+            candidate.location_text = _record_location_text(flattened)
+            candidate.source_metadata.update(_simple_metadata(flattened))
             candidate.source_metadata["media_type"] = media_type
             if media_type == "image_snapshot":
                 candidate.source_metadata["snapshot_url"] = media_url
@@ -393,6 +400,118 @@ class CandidateDiscoveryEngine:
                 existing.location_text = row.location_text
             existing.source_metadata.update({k: v for k, v in row.source_metadata.items() if k not in existing.source_metadata or existing.source_metadata[k] in (None, "")})
         return [by_key[key] for key in order]
+
+    def _enrich_candidate_coordinates(self, candidates: list[CameraCandidate], target: TargetContext) -> None:
+        """Populate real candidate coordinates from source metadata or geocoding.
+
+        The enrichment step never invents coordinates. It first extracts lat/lon
+        that already exist in source metadata, URL query parameters, or structured
+        records. If still missing, it optionally geocodes sufficiently specific
+        candidate location text through the same public geocoder path used for
+        target resolution. Geocoded points must satisfy the verified target bbox
+        when one is available.
+        """
+        metadata_enriched = 0
+        geocode_attempted = 0
+        geocode_enriched = 0
+        geocode_skipped = 0
+        diagnostics: list[dict[str, Any]] = []
+        geocode_cache: dict[str, tuple[float, float, str] | None] = {}
+        for candidate in candidates:
+            if not candidate.has_coordinates:
+                lat_lon = self._candidate_lat_lon_from_existing_evidence(candidate)
+                if lat_lon:
+                    candidate.lat, candidate.lon = lat_lon
+                    candidate.coordinate_source = candidate.coordinate_source or "candidate_metadata"
+                    candidate.reasons.append("coordinates_extracted_from_candidate_metadata")
+                    metadata_enriched += 1
+            if candidate.has_coordinates or not self.config.enable_candidate_geocoding:
+                continue
+            if geocode_attempted >= self.config.max_candidate_geocodes:
+                geocode_skipped += 1
+                continue
+            query = self._candidate_geocode_query(candidate, target)
+            if not query:
+                geocode_skipped += 1
+                continue
+            geocode_attempted += 1
+            if query not in geocode_cache:
+                geocode_cache[query] = self._geocode_candidate_location(query)
+            result = geocode_cache[query]
+            if result is None:
+                diagnostics.append({"stream_url": candidate.stream_url, "query": query, "status": "not_resolved"})
+                continue
+            lat, lon, display_name = result
+            if target.bbox_verified and target.bbox and not _point_in_bbox(lat, lon, target.bbox):
+                candidate.reasons.append("candidate_geocode_outside_verified_target_bbox")
+                diagnostics.append({"stream_url": candidate.stream_url, "query": query, "status": "outside_target_bbox", "display_name": display_name})
+                continue
+            candidate.lat = lat
+            candidate.lon = lon
+            candidate.coordinate_source = "candidate_geocoder"
+            candidate.geocoded_query = query
+            candidate.geocoded_display_name = display_name
+            candidate.reasons.append("coordinates_geocoded_from_candidate_metadata")
+            geocode_enriched += 1
+            diagnostics.append({"stream_url": candidate.stream_url, "query": query, "status": "resolved", "display_name": display_name, "lat": lat, "lon": lon})
+        write_json(
+            self.logs_dir / "candidate_coordinate_enrichment.json",
+            {
+                "candidates": len(candidates),
+                "already_coordinate_bearing": sum(1 for c in candidates if c.has_coordinates) - metadata_enriched - geocode_enriched,
+                "metadata_enriched": metadata_enriched,
+                "geocode_attempted": geocode_attempted,
+                "geocode_enriched": geocode_enriched,
+                "geocode_skipped": geocode_skipped,
+                "max_candidate_geocodes": self.config.max_candidate_geocodes,
+                "enable_candidate_geocoding": self.config.enable_candidate_geocoding,
+                "diagnostics": diagnostics[:200],
+            },
+        )
+
+    def _candidate_lat_lon_from_existing_evidence(self, candidate: CameraCandidate) -> tuple[float, float] | None:
+        for mapping in (candidate.source_metadata, _url_query_mapping(candidate.stream_url), _url_query_mapping(candidate.source_url or "")):
+            lat_lon = _record_lat_lon(mapping)
+            if lat_lon:
+                return lat_lon
+        return None
+
+    def _candidate_geocode_query(self, candidate: CameraCandidate, target: TargetContext) -> str | None:
+        parts: list[str] = []
+        for value in (candidate.location_text, candidate.title):
+            if isinstance(value, str) and _specific_location_text(value):
+                parts.append(value.strip())
+        for key in ("city", "county", "route", "road", "cross_street", "direction", "source_name"):
+            value = candidate.source_metadata.get(key)
+            if isinstance(value, str) and _specific_location_text(value):
+                parts.append(value.strip())
+        parts = _dedupe_strings(parts)
+        if not parts:
+            return None
+        suffix_parts = _dedupe_strings([part for part in (target.canonical_target, target.admin_region, target.country) if part])
+        suffix = ", ".join(suffix_parts)
+        query = ", ".join([parts[0], suffix]) if suffix and suffix.casefold() not in parts[0].casefold() else parts[0]
+        return query[:300]
+
+    def _geocode_candidate_location(self, query: str) -> tuple[float, float, str] | None:
+        url = f"https://nominatim.openstreetmap.org/search?{urlencode({'q': query, 'format': 'jsonv2', 'limit': '1', 'addressdetails': '1'})}"
+        try:
+            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                data = response.json()
+        except Exception:
+            return None
+        if not isinstance(data, list) or not data:
+            return None
+        first = data[0]
+        if not isinstance(first, dict):
+            return None
+        lat = _float_or_none(first.get("lat"))
+        lon = _float_or_none(first.get("lon"))
+        if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            return None
+        return lat, lon, str(first.get("display_name") or query)
 
     def _scope_candidates(self, candidates: list[CameraCandidate], target: TargetContext) -> None:
         bbox = target.bbox if target.bbox_verified else None
@@ -541,6 +660,46 @@ def _record_media_urls(record: dict[str, Any], base_url: str) -> list[tuple[str,
     return _dedupe_media_urls(urls)
 
 
+def _flatten_camera_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Merge common map-layer record wrappers into one searchable mapping."""
+    flattened: dict[str, Any] = dict(record)
+    for key in ("attributes", "properties", "props"):
+        value = record.get(key)
+        if isinstance(value, dict):
+            flattened.update(value)
+    geometry = record.get("geometry")
+    if isinstance(geometry, dict):
+        flattened.setdefault("geometry", geometry)
+        if "x" in geometry and "y" in geometry:
+            flattened.setdefault("x", geometry.get("x"))
+            flattened.setdefault("y", geometry.get("y"))
+        if "longitude" in geometry and "latitude" in geometry:
+            flattened.setdefault("longitude", geometry.get("longitude"))
+            flattened.setdefault("latitude", geometry.get("latitude"))
+        if "coordinates" in geometry:
+            flattened.setdefault("coordinates", geometry.get("coordinates"))
+    for key in ("location", "position", "point", "centroid"):
+        value = record.get(key)
+        if isinstance(value, dict):
+            flattened.setdefault(key, value)
+            for inner_key, inner_value in value.items():
+                flattened.setdefault(str(inner_key), inner_value)
+    return flattened
+
+
+def _lat_lon_from_sequence_or_mapping(value: Any) -> tuple[float, float] | None:
+    if isinstance(value, dict):
+        return _record_lat_lon(value)
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        first = _float_or_none(value[0])
+        second = _float_or_none(value[1])
+        if _valid_lat_lon(first, second):
+            return first, second
+        # GeoJSON and many map APIs use [lon, lat].
+        if _valid_lat_lon(second, first):
+            return second, first
+    return None
+
 def _record_lat_lon(record: dict[str, Any]) -> tuple[float, float] | None:
     lat = None
     lon = None
@@ -550,8 +709,23 @@ def _record_lat_lon(record: dict[str, Any]) -> tuple[float, float] | None:
             lat = _float_or_none(value)
         elif key_norm in LON_KEYS:
             lon = _float_or_none(value)
-    if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
+    if _valid_lat_lon(lat, lon):
         return lat, lon
+    for key in ("coordinates", "coords", "latlon", "lat_lng", "latlng"):
+        value = record.get(key)
+        lat_lon = _lat_lon_from_sequence_or_mapping(value)
+        if lat_lon:
+            return lat_lon
+    for key in ("geometry", "location", "position", "point", "centroid"):
+        value = record.get(key)
+        if isinstance(value, dict):
+            nested = _record_lat_lon(value)
+            if nested:
+                return nested
+        else:
+            nested = _lat_lon_from_sequence_or_mapping(value)
+            if nested:
+                return nested
     return None
 
 
@@ -626,6 +800,34 @@ def _row_from_source_entry(entry: SourceEntry, target: TargetContext, provider: 
         "source_scope_hint": entry.scope_hint or "",
         "source_notes": entry.notes or "",
     }
+
+
+def _url_query_mapping(url: str) -> dict[str, Any]:
+    if not url:
+        return {}
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    return {key: values[0] for key, values in qs.items() if values}
+
+
+def _specific_location_text(value: str) -> bool:
+    text = value.strip()
+    if not text or len(text) < 4:
+        return False
+    lowered = text.casefold()
+    if lowered in {"camera", "cameras", "traffic", "webcam", "snapshot", "image"}:
+        return False
+    if re.fullmatch(r"[A-Za-z0-9_.:/?=&%-]+", text) and "/" in text:
+        return False
+    return any(ch.isalpha() for ch in text)
+
+
+def _valid_lat_lon(lat: float | None, lon: float | None) -> bool:
+    return lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180
+
+
+def _point_in_bbox(lat: float, lon: float, bbox: dict[str, float]) -> bool:
+    return bbox["min_lat"] <= lat <= bbox["max_lat"] and bbox["min_lon"] <= lon <= bbox["max_lon"]
 
 
 def _looks_like_hls(url: str) -> bool:

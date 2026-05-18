@@ -69,7 +69,16 @@ def load_run_config(
         sources_file=Path(configured_sources_file).expanduser() if configured_sources_file else None,
         discovery_mode=selected_discovery_mode,
         block_patterns=block_patterns or _split_csv_env("CAMERA_DISCOVERY_BLOCK_PATTERNS"),
+        enable_candidate_geocoding=_bool_env("CAMERA_DISCOVERY_ENABLE_CANDIDATE_GEOCODING", True),
+        max_candidate_geocodes=_int_env("CAMERA_DISCOVERY_MAX_CANDIDATE_GEOCODES", 25),
     )
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def _split_csv_env(name: str) -> list[str]:

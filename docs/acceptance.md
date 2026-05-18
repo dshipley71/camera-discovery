@@ -36,3 +36,11 @@ The notebook is acceptable when it can:
 - show marker popups with GeoJSON metadata,
 - show a thumbnail image when a thumbnail/snapshot URL is present,
 - provide a **Play video** button in each popup that attempts HLS playback through hls.js.
+
+## Coordinate Enrichment Acceptance
+
+- extract coordinates from JSON, GeoJSON, ArcGIS map-layer records, JavaScript config objects, URL query parameters, and source metadata;
+- optionally geocode specific candidate location text with a real geocoder when coordinates are missing;
+- never synthesize coordinates;
+- write `camera_candidates_table.csv` even when no GeoJSON can be created;
+- write GeoJSON only for candidates with real coordinates.

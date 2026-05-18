@@ -136,6 +136,23 @@ camera-discovery run "Review this public HLS URL" --discovery-mode direct --seed
 This keeps the simplified architecture intact: `DirectorySourceProvider` is an input provider inside `CandidateDiscoveryEngine`, not a separate orchestration layer.
 
 
+## Candidate Coordinate Enrichment
+
+Discovery may find valid public camera records before coordinates are available. The pipeline therefore performs a real, evidence-based coordinate enrichment step before scope gating and output finalization:
+
+1. Extract latitude/longitude directly from JSON, GeoJSON, ArcGIS-style `attributes` + `geometry`, JavaScript config objects, map-layer feeds, URL query parameters, and source metadata.
+2. If coordinates are still missing and candidate metadata is specific enough, optionally geocode the candidate title/location text with the configured public geocoder.
+3. If a verified target bbox exists, geocoded candidate coordinates must fall inside it before they are accepted.
+4. Candidates that still lack coordinates remain in `camera_candidates_table.csv` and JSONL review artifacts but are not written to GeoJSON.
+
+This step does not invent or synthesize coordinates. Candidate coordinates are either present in source evidence or returned by an explicit geocoder call. Configure it with:
+
+```bash
+CAMERA_DISCOVERY_ENABLE_CANDIDATE_GEOCODING=true
+CAMERA_DISCOVERY_MAX_CANDIDATE_GEOCODES=25
+```
+
+
 ## Colab GeoJSON Review Table and Map
 
 The live-test notebook can display either `camera.geojson` or `untrusted_camera_candidates.geojson`. It adds:
