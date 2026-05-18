@@ -48,3 +48,17 @@ Blocked sources apply to:
 - Apply coordinate/bbox hard gates.
 
 LLM semantic review does not validate stream liveness and does not authorize trusted output.
+
+
+## Required Generic Extractors
+
+The discovery engine must support blind search even when `SOURCES.md` has no allowed sources.  For every selected public URL, it should attempt generic extraction in this order:
+
+- direct HLS `.m3u8` URLs;
+- JSON endpoints;
+- JavaScript configuration blobs containing camera records;
+- map-layer/feed records, including GeoJSON features;
+- image snapshot camera metadata;
+- HLS URLs where available.
+
+Camera-type terms such as `traffic cameras` are candidate intent, not target geography.

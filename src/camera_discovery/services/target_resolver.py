@@ -34,6 +34,17 @@ US_STATE_NAMES = {
     "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming", "District of Columbia",
 }
 
+CAMERA_TYPE_WORDS = {
+    "camera", "cameras", "cam", "cams", "webcam", "webcams", "traffic", "weather",
+    "public", "live", "hls", "stream", "streams", "streaming", "video", "videos",
+    "road", "roads", "highway", "highways", "freeway", "freeways", "transportation",
+}
+CAMERA_TYPE_PATTERNS = {
+    "traffic": ("traffic", "road", "roads", "highway", "highways", "freeway", "freeways", "transportation"),
+    "weather": ("weather",),
+    "webcam": ("webcam", "webcams"),
+}
+
 
 class TargetResolver:
     """Resolve one or more target geographies with LLM interpretation plus deterministic verification.
@@ -166,17 +177,18 @@ class TargetResolver:
         return [self._fallback_intent_from_text(p) for p in phrases] or [self._fallback_intent_from_text(self.config.query)]
 
     def _fallback_intent_from_text(self, target: str) -> TargetIntent:
-        target = re.sub(r"^(?:the state of|state of|the city of|city of)\s+", "", target.strip(" ."), flags=re.I)
+        target = self._clean_target_phrase(target)
         scope = self._infer_scope(target)
         admin = self._infer_admin_hint(target)
+        country = "United States" if admin and admin in US_STATE_NAMES else None
         return TargetIntent(
             raw_query=self.config.query.strip(),
             canonical_target=target,
             place_name=self._strip_scope_words(target),
             scope_type=scope,
             admin_region=admin,
-            country="United States" if admin and admin in US_STATE_NAMES else None,
-            camera_type_intent="public_live",
+            country=country,
+            camera_type_intent=self._infer_camera_type_intent(self.config.query),
             geocoder_query_variants=[target],
             confidence=0.5,
         )
@@ -186,18 +198,34 @@ class TargetResolver:
         admin = data.get("admin_region") or fallback.admin_region
         country = data.get("country") or fallback.country
         canonical = data.get("canonical_target") or data.get("target") or fallback.canonical_target
+        place_name = data.get("place_name") or fallback.place_name
+        camera_type_intent = data.get("camera_type_intent") or fallback.camera_type_intent
+
+        # LLMs can confuse a camera category with a location, e.g. returning
+        # "traffic_cameras" as the target for "traffic cameras from California".
+        # Treat camera-only phrases as camera intent and preserve the deterministic
+        # geographic fallback from the original user query.
+        if canonical and _looks_like_camera_type_only(str(canonical)):
+            camera_type_intent = self._infer_camera_type_intent(str(canonical)) or camera_type_intent
+            canonical = fallback.canonical_target
+            place_name = fallback.place_name
+        if place_name and _looks_like_camera_type_only(str(place_name)):
+            place_name = fallback.place_name
+
         if admin and canonical and admin.casefold() not in canonical.casefold():
             variants.append(f"{canonical}, {admin}")
+        if fallback.canonical_target and canonical and fallback.canonical_target.casefold() != str(canonical).casefold():
+            variants.append(fallback.canonical_target)
         return TargetIntent(
             raw_query=fallback.raw_query,
             canonical_target=canonical,
-            place_name=data.get("place_name") or fallback.place_name,
+            place_name=place_name,
             scope_type=data.get("scope_type") or fallback.scope_type,
             admin_region=admin,
             country=country,
-            camera_type_intent=data.get("camera_type_intent") or fallback.camera_type_intent,
+            camera_type_intent=camera_type_intent,
             alternate_interpretations=data.get("alternate_interpretations") if isinstance(data.get("alternate_interpretations"), list) else [],
-            geocoder_query_variants=[str(v) for v in variants] + fallback.geocoder_query_variants,
+            geocoder_query_variants=[str(v) for v in variants if not _looks_like_camera_type_only(str(v))] + fallback.geocoder_query_variants,
             ambiguity=bool(data.get("ambiguity", fallback.ambiguity)),
             ambiguity_reason=data.get("ambiguity_reason") or fallback.ambiguity_reason,
             confidence=_float_or_none(data.get("confidence")) or fallback.confidence,
@@ -378,6 +406,9 @@ class TargetResolver:
     def _target_intent_prompt(self, query: str) -> str:
         return (
             "Extract target intent for public camera discovery. The user may specify one or more places/locations. "
+            "Keep camera categories separate from geography: terms such as traffic cameras, weather cameras, webcams, "
+            "public live cameras, HLS, and streams are camera_type_intent, not target locations. "
+            "For a query shaped like 'traffic cameras from Example State', the target is Example State and camera_type_intent is traffic. "
             "Return strict JSON with a top-level targets array. Each target should include canonical_target, place_name, "
             "scope_type, admin_region, country, camera_type_intent, geocoder_query_variants, alternate_interpretations, "
             "ambiguity, confidence, llm_center_lat, llm_center_lon, llm_bbox. LLM geometry is approximate only and not verified. "
@@ -397,11 +428,25 @@ class TargetResolver:
     def _extract_target_phrases(self, query: str) -> list[str]:
         match = LOCATION_CLAUSE_RE.search(query)
         clause = match.group(1) if match else query
-        clause = re.sub(r"\b(?:public|live|camera|cameras|webcam|webcams|hls|streams?|from|in)\b", " ", clause, flags=re.I)
+        clause = re.sub(r"\b(?:public|live|camera|cameras|cam|cams|webcam|webcams|traffic|weather|hls|streams?|from|in)\b", " ", clause, flags=re.I)
         clause = re.sub(r"\s+", " ", clause).strip(" .,;|")
         # Split explicit multi-location conjunctions without splitting place/admin commas.
         parts = re.split(r"\s+(?:and|&)\s+|\s*;\s*|\s*\|\s*", clause, flags=re.I)
         return [re.sub(r"^(?:the state of|state of|the city of|city of)\s+", "", p.strip(" .,"), flags=re.I) for p in parts if p and p.strip(" .,;|")]
+
+
+    def _clean_target_phrase(self, target: str) -> str:
+        target = target.strip(" .")
+        target = re.sub(r"^(?:the state of|state of|the city of|city of)\s+", "", target, flags=re.I)
+        target = re.sub(r"\b(?:public|live|camera|cameras|cam|cams|webcam|webcams|traffic|weather|hls|streams?)\b", " ", target, flags=re.I)
+        return re.sub(r"\s+", " ", target).strip(" ,")
+
+    def _infer_camera_type_intent(self, text: str) -> str:
+        lowered = text.replace("_", " ").casefold()
+        for intent, terms in CAMERA_TYPE_PATTERNS.items():
+            if any(re.search(rf"\b{re.escape(term)}\b", lowered) for term in terms):
+                return intent
+        return "public_live"
 
     def _infer_scope(self, target: str) -> str:
         t = target.casefold()
@@ -426,6 +471,11 @@ class TargetResolver:
             out = re.sub(rf"\b{re.escape(word)}\b", "", out, flags=re.I)
         return re.sub(r"\s+", " ", out).strip(" ,")
 
+
+
+def _looks_like_camera_type_only(value: str) -> bool:
+    tokens = {t.casefold() for t in re.findall(r"[A-Za-z0-9]+", value.replace("_", " ")) if t}
+    return bool(tokens) and tokens.issubset(CAMERA_TYPE_WORDS)
 
 def _bbox_from_nominatim(raw: Any) -> dict[str, float] | None:
     if not isinstance(raw, list) or len(raw) != 4:

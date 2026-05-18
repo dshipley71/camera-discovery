@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import asdict
+from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import httpx
@@ -15,7 +17,14 @@ from camera_discovery.utils.io import write_json, write_jsonl
 from camera_discovery.utils.json_utils import extract_json_object
 
 M3U8_RE = re.compile(r"https?://[^\s'\"<>]+?\.m3u8(?:\?[^\s'\"<>]*)?|['\"]([^'\"]+?\.m3u8(?:\?[^'\"]*)?)['\"]", re.I)
+IMAGE_RE = re.compile(r"https?://[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s'\"<>]*)?|['\"]([^'\"]+?\.(?:jpg|jpeg|png|webp)(?:\?[^'\"]*)?)['\"]", re.I)
 COORD_RE = re.compile(r"(?<!\d)([-+]?\d{1,2}\.\d{3,})\s*,\s*([-+]?\d{1,3}\.\d{3,})(?!\d)")
+JSON_FEED_HINT_RE = re.compile(r"(?:\.json(?:\?|$)|/api/|/feed|/feeds|/layer|/layers|camera|cameras|mapserver|featureserver)", re.I)
+URL_KEYS = {"url", "stream", "stream_url", "streamurl", "hls", "hls_url", "hlsurl", "video", "video_url", "src"}
+IMAGE_KEYS = {"image", "image_url", "imageurl", "snapshot", "snapshot_url", "snapshoturl", "thumbnail", "thumbnail_url", "thumbnailurl", "preview", "preview_url", "poster", "poster_url"}
+LAT_KEYS = {"lat", "latitude", "y"}
+LON_KEYS = {"lon", "lng", "long", "longitude", "x"}
+TITLE_KEYS = {"name", "title", "label", "description", "camera", "id"}
 
 
 class DirectorySourceProvider:
@@ -113,12 +122,17 @@ class CandidateDiscoveryEngine:
 
     def _search_queries(self, target: TargetContext) -> list[str]:
         base = target.canonical_target or target.user_query
-        return [
+        camera_intent = (target.intent.camera_type_intent or "public_live").replace("_", " ")
+        candidates = [
+            f"{base} {camera_intent} cameras",
+            f"{base} public camera feed json",
             f"{base} public live cameras m3u8",
             f"{base} traffic cameras live stream",
             f"{base} webcam HLS",
-            f"{base} public cameras live",
-        ][: self.config.max_search_queries]
+            f"{base} camera map layer feed",
+            f"{base} camera snapshots",
+        ]
+        return _dedupe_strings(candidates)[: self.config.max_search_queries]
 
     def _blind_search(self, queries: list[str]) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
@@ -183,18 +197,158 @@ class CandidateDiscoveryEngine:
                 resp = client.get(url)
                 resp.raise_for_status()
                 text = resp.text
+                content_type = resp.headers.get("content-type", "")
+                out = self._extract_from_response(url, row, text, content_type)
+                if "html" in content_type.lower() or "<html" in text[:1000].lower():
+                    out.extend(self._extract_from_linked_feeds(url, row, text, client))
+                return self._dedupe(out)
         except Exception:
             return []
+
+    def _extract_from_response(self, url: str, row: dict[str, str], text: str, content_type: str = "") -> list[CameraCandidate]:
+        if _looks_like_json_response(url, content_type, text):
+            data = self._parse_json_text(text)
+            if data is not None:
+                return self._extract_from_json_data(data, url, row, "json_endpoint")
+        return self._extract_from_text(url, row, text)
+
+    def _extract_from_text(self, url: str, row: dict[str, str], text: str) -> list[CameraCandidate]:
         coords = self._extract_first_coord(text)
+        out: list[CameraCandidate] = []
+        out.extend(self._extract_hls_from_text(url, row, text, coords, "hls_regex"))
+        out.extend(self._extract_images_from_text(url, row, text, coords, "image_snapshot_regex"))
+        for blob in self._extract_json_blobs(text):
+            out.extend(self._extract_from_json_data(blob, url, row, "javascript_config"))
+        return self._dedupe(out)
+
+    def _extract_from_linked_feeds(self, url: str, row: dict[str, str], html: str, client: httpx.Client) -> list[CameraCandidate]:
+        soup = BeautifulSoup(html, "html.parser")
+        hrefs: list[str] = []
+        for tag in soup.select("a[href], link[href], script[src]"):
+            href = tag.get("href") or tag.get("src") or ""
+            absolute = urljoin(url, href)
+            if JSON_FEED_HINT_RE.search(absolute) and not self.source_policy.is_blocked(absolute):
+                hrefs.append(absolute)
+        out: list[CameraCandidate] = []
+        for feed_url in _dedupe_strings(hrefs)[:8]:
+            try:
+                resp = client.get(feed_url)
+                if resp.status_code >= 400:
+                    continue
+                out.extend(self._extract_from_response(feed_url, row, resp.text, resp.headers.get("content-type", "")))
+            except Exception:
+                continue
+        return self._dedupe(out)
+
+    def _extract_hls_from_text(self, source_url: str, row: dict[str, str], text: str, coords: tuple[float, float] | None, method: str) -> list[CameraCandidate]:
         out: list[CameraCandidate] = []
         for match in M3U8_RE.finditer(text):
             raw = match.group(0).strip("'\"") if match.group(0).startswith("http") else (match.group(1) or "").strip("'\"")
-            stream = urljoin(url, raw)
+            stream = urljoin(source_url, raw)
             if ".m3u8" in stream.lower() and not self.source_policy.is_blocked(stream):
-                candidate = self._candidate_from_stream(stream, url, row, "page_regex")
+                candidate = self._candidate_from_stream(stream, source_url, row, method)
+                candidate.source_metadata["media_type"] = "hls"
                 if coords:
                     candidate.lat, candidate.lon = coords
                 out.append(candidate)
+        return out
+
+    def _extract_images_from_text(self, source_url: str, row: dict[str, str], text: str, coords: tuple[float, float] | None, method: str) -> list[CameraCandidate]:
+        out: list[CameraCandidate] = []
+        for match in IMAGE_RE.finditer(text):
+            raw = match.group(0).strip("'\"") if match.group(0).startswith("http") else (match.group(1) or "").strip("'\"")
+            image_url = urljoin(source_url, raw)
+            if not self.source_policy.is_blocked(image_url):
+                candidate = self._candidate_from_stream(image_url, source_url, row, method)
+                candidate.source_metadata["media_type"] = "image_snapshot"
+                candidate.source_metadata["snapshot_url"] = image_url
+                if coords:
+                    candidate.lat, candidate.lon = coords
+                out.append(candidate)
+        return out
+
+    def _parse_json_text(self, text: str) -> Any | None:
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+    def _extract_json_blobs(self, text: str) -> list[Any]:
+        blobs: list[Any] = []
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"[\[{]", text):
+            start = match.start()
+            window = text[max(0, start - 80): start].casefold()
+            if not any(hint in window for hint in ("camera", "cameras", "features", "layers", "markers", "data", "feed")):
+                continue
+            try:
+                obj, end = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                continue
+            if end > 10:
+                blobs.append(obj)
+            if len(blobs) >= 20:
+                break
+        return blobs
+
+    def _extract_from_json_data(self, data: Any, source_url: str, row: dict[str, str], method: str) -> list[CameraCandidate]:
+        out: list[CameraCandidate] = []
+        self._walk_json(data, source_url, row, method, out)
+        return self._dedupe(out)
+
+    def _walk_json(self, value: Any, source_url: str, row: dict[str, str], method: str, out: list[CameraCandidate]) -> None:
+        if isinstance(value, dict):
+            feature_candidate = self._candidate_from_geojson_feature(value, source_url, row, method)
+            if feature_candidate is not None:
+                out.append(feature_candidate)
+            out.extend(self._candidates_from_record(value, source_url, row, method))
+            for child in value.values():
+                if isinstance(child, (dict, list)):
+                    self._walk_json(child, source_url, row, method, out)
+        elif isinstance(value, list):
+            for child in value:
+                if isinstance(child, (dict, list)):
+                    self._walk_json(child, source_url, row, method, out)
+
+    def _candidate_from_geojson_feature(self, feature: dict[str, Any], source_url: str, row: dict[str, str], method: str) -> CameraCandidate | None:
+        if str(feature.get("type") or "").casefold() != "feature":
+            return None
+        geometry = feature.get("geometry") if isinstance(feature.get("geometry"), dict) else {}
+        coords = geometry.get("coordinates") if isinstance(geometry, dict) else None
+        lat_lon = _lat_lon_from_geojson_coordinates(coords)
+        props = feature.get("properties") if isinstance(feature.get("properties"), dict) else {}
+        urls = _record_media_urls(props, source_url)
+        if not urls:
+            return None
+        candidate = self._candidate_from_stream(urls[0][0], source_url, row, method + "_geojson_feature")
+        candidate.lat, candidate.lon = lat_lon if lat_lon else (candidate.lat, candidate.lon)
+        candidate.title = _record_title(props) or candidate.title
+        candidate.location_text = _record_location_text(props)
+        candidate.source_metadata.update(_simple_metadata(props))
+        candidate.source_metadata["media_type"] = urls[0][1]
+        if urls[0][1] == "image_snapshot":
+            candidate.source_metadata["snapshot_url"] = urls[0][0]
+        return candidate
+
+    def _candidates_from_record(self, record: dict[str, Any], source_url: str, row: dict[str, str], method: str) -> list[CameraCandidate]:
+        lat_lon = _record_lat_lon(record)
+        urls = _record_media_urls(record, source_url)
+        if not urls:
+            return []
+        out: list[CameraCandidate] = []
+        for media_url, media_type in urls:
+            if self.source_policy.is_blocked(media_url):
+                continue
+            candidate = self._candidate_from_stream(media_url, source_url, row, method + "_record")
+            if lat_lon:
+                candidate.lat, candidate.lon = lat_lon
+            candidate.title = _record_title(record) or candidate.title
+            candidate.location_text = _record_location_text(record)
+            candidate.source_metadata.update(_simple_metadata(record))
+            candidate.source_metadata["media_type"] = media_type
+            if media_type == "image_snapshot":
+                candidate.source_metadata["snapshot_url"] = media_url
+            out.append(candidate)
         return out
 
     def _candidate_from_stream(self, stream_url: str, source_url: str, row: dict[str, str], method: str) -> CameraCandidate:
@@ -222,14 +376,23 @@ class CandidateDiscoveryEngine:
         return None
 
     def _dedupe(self, rows: list[CameraCandidate]) -> list[CameraCandidate]:
-        seen: set[str] = set()
-        out: list[CameraCandidate] = []
+        by_key: dict[str, CameraCandidate] = {}
+        order: list[str] = []
         for row in rows:
             key = row.stream_url.split("#", 1)[0]
-            if key not in seen:
-                seen.add(key)
-                out.append(row)
-        return out
+            existing = by_key.get(key)
+            if existing is None:
+                by_key[key] = row
+                order.append(key)
+                continue
+            if row.has_coordinates and not existing.has_coordinates:
+                by_key[key] = row
+            elif row.title and not existing.title:
+                existing.title = row.title
+            elif row.location_text and not existing.location_text:
+                existing.location_text = row.location_text
+            existing.source_metadata.update({k: v for k, v in row.source_metadata.items() if k not in existing.source_metadata or existing.source_metadata[k] in (None, "")})
+        return [by_key[key] for key in order]
 
     def _scope_candidates(self, candidates: list[CameraCandidate], target: TargetContext) -> None:
         bbox = target.bbox if target.bbox_verified else None
@@ -349,6 +512,106 @@ class CandidateDiscoveryEngine:
             write_jsonl(self.candidates_dir / "agentic_candidates.jsonl", [asdict(candidate) for candidate in cs.raw])
             write_jsonl(self.candidates_dir / "agentic_candidates_unique.jsonl", [asdict(candidate) for candidate in cs.unique])
             write_json(self.logs_dir / "candidate_discovery_summary.json", summary)
+
+
+
+def _looks_like_json_response(url: str, content_type: str, text: str) -> bool:
+    ctype = content_type.casefold()
+    if "json" in ctype:
+        return True
+    if url.lower().split("?", 1)[0].endswith(".json"):
+        return True
+    stripped = text.lstrip()
+    return stripped.startswith("{") or stripped.startswith("[")
+
+
+def _record_media_urls(record: dict[str, Any], base_url: str) -> list[tuple[str, str]]:
+    urls: list[tuple[str, str]] = []
+    for key, value in record.items():
+        key_norm = str(key).replace("-", "_").casefold()
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            absolute = urljoin(base_url, item.strip())
+            if _looks_like_hls(absolute) or key_norm in URL_KEYS and ".m3u8" in absolute.casefold():
+                urls.append((absolute, "hls"))
+            elif _looks_like_image(absolute) or key_norm in IMAGE_KEYS:
+                urls.append((absolute, "image_snapshot"))
+    return _dedupe_media_urls(urls)
+
+
+def _record_lat_lon(record: dict[str, Any]) -> tuple[float, float] | None:
+    lat = None
+    lon = None
+    for key, value in record.items():
+        key_norm = str(key).replace("-", "_").casefold()
+        if key_norm in LAT_KEYS:
+            lat = _float_or_none(value)
+        elif key_norm in LON_KEYS:
+            lon = _float_or_none(value)
+    if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
+        return lat, lon
+    return None
+
+
+def _lat_lon_from_geojson_coordinates(coords: Any) -> tuple[float, float] | None:
+    if isinstance(coords, list) and len(coords) >= 2 and not isinstance(coords[0], list):
+        lon = _float_or_none(coords[0])
+        lat = _float_or_none(coords[1])
+        if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
+            return lat, lon
+    return None
+
+
+def _record_title(record: dict[str, Any]) -> str | None:
+    for key in TITLE_KEYS:
+        for actual, value in record.items():
+            if str(actual).replace("-", "_").casefold() == key and value not in (None, ""):
+                return str(value)[:200]
+    return None
+
+
+def _record_location_text(record: dict[str, Any]) -> str | None:
+    for key in ("location", "location_text", "road", "route", "city", "county", "district"):
+        for actual, value in record.items():
+            if str(actual).replace("-", "_").casefold() == key and value not in (None, ""):
+                return str(value)[:300]
+    return None
+
+
+def _simple_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key, value in record.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            metadata[str(key)] = value
+    return metadata
+
+
+def _looks_like_image(url: str) -> bool:
+    return bool(re.search(r"\.(?:jpg|jpeg|png|webp)(?:\?|$)", url, re.I))
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        key = value.casefold()
+        if key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out
+
+
+def _dedupe_media_urls(values: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for url, media_type in values:
+        key = url.split("#", 1)[0]
+        if key not in seen:
+            seen.add(key)
+            out.append((key, media_type))
+    return out
 
 
 def _row_from_source_entry(entry: SourceEntry, target: TargetContext, provider: str = "directory") -> dict[str, str]:
