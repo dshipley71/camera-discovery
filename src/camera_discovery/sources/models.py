@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-SourceType = Literal["page", "feed", "direct_hls", "site"]
+SourceType = Literal["page", "feed", "direct_hls", "site", "dynamic"]
 
 
 @dataclass

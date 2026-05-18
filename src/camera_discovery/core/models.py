@@ -49,7 +49,12 @@ class RunConfig:
     max_search_queries: int = 4
     max_search_results_per_query: int = 5
     max_pages: int = 25
-    max_streams: int = 100
+    max_hls_candidates: int = 100
+    max_image_snapshot_candidates: int = 50
+    max_total_candidates: int = 200
+    # Deprecated: superseded by max_hls_candidates, max_image_snapshot_candidates,
+    # and max_total_candidates. Kept for compatibility with older callers.
+    max_streams: int = 200
     max_directory_pages: int = 8
     max_structured_endpoints_per_page: int = 20
     asset_host_promotion_threshold: int = 3
@@ -210,6 +215,13 @@ class CandidateSet:
 
 @dataclass
 class ValidationSummary:
+    """Validation counters.
+
+    HLS validation may emit active_live_verified when FULL-profile segment
+    probing succeeds, or active_playlist_dead_segments when the playlist is
+    reachable but its first media/variant segment cannot be reached.
+    """
+
     validation_enabled: bool = False
     ffprobe_enabled: bool = False
     attempted: int = 0

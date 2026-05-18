@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
+import time
 from dataclasses import asdict
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse
@@ -20,11 +22,42 @@ M3U8_RE = re.compile(r"https?://[^\s'\"<>]+?\.m3u8(?:\?[^\s'\"<>]*)?|['\"]([^'\"
 IMAGE_RE = re.compile(r"https?://[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s'\"<>]*)?|['\"]([^'\"]+?\.(?:jpg|jpeg|png|webp)(?:\?[^'\"]*)?)['\"]", re.I)
 COORD_RE = re.compile(r"(?<!\d)([-+]?\d{1,2}\.\d{3,})\s*,\s*([-+]?\d{1,3}\.\d{3,})(?!\d)")
 JSON_FEED_HINT_RE = re.compile(r"(?:\.json(?:\?|$)|/api/|/feed|/feeds|/layer|/layers|camera|cameras|mapserver|featureserver)", re.I)
+MAP_LAYER_API_RE = re.compile(r"(?:/MapServer|/FeatureServer|/arcgis/|/api/cameras)", re.I)
+MAX_WORKERS = 8
 URL_KEYS = {"url", "stream", "stream_url", "streamurl", "hls", "hls_url", "hlsurl", "video", "video_url", "src"}
 IMAGE_KEYS = {"image", "image_url", "imageurl", "snapshot", "snapshot_url", "snapshoturl", "thumbnail", "thumbnail_url", "thumbnailurl", "preview", "preview_url", "poster", "poster_url"}
 LAT_KEYS = {"lat", "latitude", "y", "data_lat", "data_latitude"}
 LON_KEYS = {"lon", "lng", "long", "longitude", "x", "data_lon", "data_lng", "data_longitude"}
 TITLE_KEYS = {"name", "title", "label", "description", "camera", "id"}
+
+
+def _get_with_retry(client: httpx.Client, url: str, *, retries: int = 1) -> httpx.Response:
+    last_exc: Exception | None = None
+    resp: httpx.Response | None = None
+    for attempt in range(retries + 1):
+        try:
+            resp = client.get(url)
+            if resp.status_code < 500:
+                return resp
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+    if last_exc:
+        raise last_exc
+    if resp is not None:
+        return resp
+    raise httpx.ConnectError(f"No response returned for {url}")
+
+def _candidate_media_type(candidate: CameraCandidate) -> str:
+    media_type = str((candidate.source_metadata or {}).get("media_type") or "").casefold()
+    if media_type:
+        return media_type
+    if _looks_like_hls(candidate.stream_url):
+        return "hls"
+    return "image_snapshot"
 
 
 class DirectorySourceProvider:
@@ -88,39 +121,24 @@ class CandidateDiscoveryEngine:
 
     def discover(self, target: TargetContext) -> CandidateSet:
         queries = self._search_queries(target) if self.config.discovery_mode in {DiscoveryMode.BLIND, DiscoveryMode.BOTH} else []
-        results = self._source_rows(target, queries)
-        selected_rows = self._select_rows(results)
-        raw: list[CameraCandidate] = []
-        for row in selected_rows[: self.config.max_pages]:
-            raw.extend(self._extract_from_source_row(row))
-            if len(raw) >= self.config.max_streams:
-                break
-        if len(raw) < self.config.max_streams:
-            promoted_rows = self._promoted_asset_host_rows(raw, target, selected_rows)
-            for row in promoted_rows[: max(0, self.config.max_pages - len(selected_rows[: self.config.max_pages]))]:
-                raw.extend(self._extract_from_source_row(row))
-                if len(raw) >= self.config.max_streams:
-                    break
-        raw = raw[: self.config.max_streams]
+        client = self._make_client()
+        try:
+            results = self._source_rows(target, queries, client)
+            selected_rows = self._select_rows(results)
+            primary_rows = selected_rows[: self.config.max_total_candidates]
+            raw = self._collect_candidates_from_rows(primary_rows, client)
+
+            if not self._candidate_budgets_full(raw):
+                remaining_rows = max(0, self.config.max_total_candidates - len(primary_rows))
+                promoted_rows = self._promoted_asset_host_rows(raw, target, selected_rows)
+                if promoted_rows and remaining_rows > 0:
+                    raw.extend(self._collect_candidates_from_rows(promoted_rows[:remaining_rows], client, existing=raw))
+        finally:
+            client.close()
+
+        raw = self._apply_candidate_metadata(raw, target)
         unique = self._dedupe(raw)
-        for c in raw:
-            c.target_id = target.target_id
-            c.target_index = target.target_index
-            c.target_label = target.target_label or target.canonical_target
-            c.source_metadata.setdefault("camera_type", target.intent.camera_type_intent or "camera")
-            if "camera_id" not in c.source_metadata:
-                camera_id = _camera_id_from_url(c.stream_url)
-                if camera_id:
-                    c.source_metadata["camera_id"] = camera_id
-        for c in unique:
-            c.target_id = target.target_id
-            c.target_index = target.target_index
-            c.target_label = target.target_label or target.canonical_target
-            c.source_metadata.setdefault("camera_type", target.intent.camera_type_intent or "camera")
-            if "camera_id" not in c.source_metadata:
-                camera_id = _camera_id_from_url(c.stream_url)
-                if camera_id:
-                    c.source_metadata["camera_id"] = camera_id
+        unique = self._apply_candidate_metadata(unique, target)
         self._enrich_candidate_coordinates(unique, target)
         self._scope_candidates(unique, target)
         self._apply_llm_candidate_review(unique, target)
@@ -128,7 +146,81 @@ class CandidateDiscoveryEngine:
         self._write_artifacts(queries, results, cs, target)
         return cs
 
-    def _source_rows(self, target: TargetContext, queries: list[str]) -> list[dict[str, str]]:
+    def _make_client(self) -> httpx.Client:
+        return httpx.Client(
+            timeout=self.config.http_timeout,
+            headers={"User-Agent": self.config.user_agent},
+            follow_redirects=True,
+        )
+
+    def _collect_candidates_from_rows(
+        self,
+        rows: list[dict[str, str]],
+        client: httpx.Client,
+        *,
+        existing: list[CameraCandidate] | None = None,
+    ) -> list[CameraCandidate]:
+        raw: list[CameraCandidate] = []
+        hls_count = sum(1 for c in (existing or []) if _candidate_media_type(c) == "hls")
+        snap_count = sum(1 for c in (existing or []) if _candidate_media_type(c) != "hls")
+        total_count = len(existing or [])
+
+        def budgets_full() -> bool:
+            return (
+                (hls_count >= self.config.max_hls_candidates and snap_count >= self.config.max_image_snapshot_candidates)
+                or total_count >= self.config.max_total_candidates
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {pool.submit(self._extract_from_source_row, row, client): row for row in rows}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    candidates = future.result()
+                except Exception:
+                    candidates = []
+                for c in candidates:
+                    media_type = _candidate_media_type(c)
+                    if media_type == "hls":
+                        if hls_count >= self.config.max_hls_candidates:
+                            continue
+                        c.source_metadata.setdefault("media_type", "hls")
+                        hls_count += 1
+                    else:
+                        if snap_count >= self.config.max_image_snapshot_candidates:
+                            continue
+                        c.source_metadata.setdefault("media_type", media_type or "image_snapshot")
+                        snap_count += 1
+                    raw.append(c)
+                    total_count += 1
+                    if total_count >= self.config.max_total_candidates:
+                        break
+                if budgets_full():
+                    break
+        return raw
+
+    def _candidate_budgets_full(self, candidates: list[CameraCandidate]) -> bool:
+        hls_count = sum(1 for c in candidates if _candidate_media_type(c) == "hls")
+        snap_count = sum(1 for c in candidates if _candidate_media_type(c) != "hls")
+        return (
+            len(candidates) >= self.config.max_total_candidates
+            or (hls_count >= self.config.max_hls_candidates and snap_count >= self.config.max_image_snapshot_candidates)
+        )
+
+    def _apply_candidate_metadata(self, candidates: list[CameraCandidate], target: TargetContext) -> list[CameraCandidate]:
+        for c in candidates:
+            c.target_id = target.target_id
+            c.target_index = target.target_index
+            c.target_label = target.target_label or target.canonical_target
+            c.source_metadata.setdefault("camera_type", target.intent.camera_type_intent or "camera")
+            if _looks_like_hls(c.stream_url):
+                c.source_metadata.setdefault("media_type", "hls")
+            if "camera_id" not in c.source_metadata:
+                camera_id = _camera_id_from_url(c.stream_url)
+                if camera_id:
+                    c.source_metadata["camera_id"] = camera_id
+        return candidates
+
+    def _source_rows(self, target: TargetContext, queries: list[str], client: httpx.Client | None = None) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
         # User-approved directory entries are evaluated before blind search in
         # `both` mode so their provenance is preserved when they overlap with
@@ -136,7 +228,7 @@ class CandidateDiscoveryEngine:
         if self.config.discovery_mode in {DiscoveryMode.DIRECTORY, DiscoveryMode.BOTH}:
             rows.extend(self.directory_provider.rows_for_target(target))
         if self.config.discovery_mode in {DiscoveryMode.BLIND, DiscoveryMode.BOTH}:
-            rows.extend(self._blind_search(queries))
+            rows.extend(self._blind_search(queries, client))
         if self.config.seed_urls and self.config.discovery_mode in {DiscoveryMode.DIRECT, DiscoveryMode.BOTH, DiscoveryMode.BLIND, DiscoveryMode.DIRECTORY}:
             rows.extend(self.direct_provider.rows_for_target(target))
         return rows
@@ -214,16 +306,21 @@ class CandidateDiscoveryEngine:
         )
         return _dedupe_strings(candidates)[: self.config.max_search_queries]
 
-    def _blind_search(self, queries: list[str]) -> list[dict[str, str]]:
+    def _blind_search(self, queries: list[str], client: httpx.Client | None = None) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
-        with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
+        owns_client = client is None
+        client = client or self._make_client()
+        try:
             for query in queries:
                 try:
-                    resp = client.get(f"https://duckduckgo.com/html/?q={quote_plus(query)}")
+                    resp = _get_with_retry(client, f"https://duckduckgo.com/html/?q={quote_plus(query)}")
                     resp.raise_for_status()
                     rows.extend(self._parse_ddg(query, resp.text))
                 except Exception as exc:
                     rows.append({"query": query, "url": "", "title": "", "error": repr(exc), "source_provider": "blind"})
+        finally:
+            if owns_client:
+                client.close()
         return rows
 
     def _parse_ddg(self, query: str, html: str) -> list[dict[str, str]]:
@@ -268,27 +365,99 @@ class CandidateDiscoveryEngine:
         write_jsonl(self.logs_dir / "blocked_source_rows.jsonl", blocked_rows)
         return selected
 
-    def _extract_from_source_row(self, row: dict[str, str]) -> list[CameraCandidate]:
+    def _extract_from_source_row(self, row: dict[str, str], client: httpx.Client | None = None) -> list[CameraCandidate]:
         url = row.get("url") or ""
         if self.source_policy.is_blocked(url):
             return []
         if _looks_like_hls(url):
-            return [self._candidate_from_stream(url, url, row, "direct_hls")]
-        return self._extract_from_page(url, row)
+            candidate = self._candidate_from_stream(url, url, row, "direct_hls")
+            candidate.source_metadata["media_type"] = "hls"
+            return [candidate]
+        if row.get("source_kind") == "dynamic":
+            return self._extract_from_dynamic_page(url, row)
+        return self._extract_from_page(url, row, client)
 
-    def _extract_from_page(self, url: str, row: dict[str, str]) -> list[CameraCandidate]:
+    def _extract_from_dynamic_page(self, url: str, row: dict[str, str]) -> list[CameraCandidate]:
         try:
-            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
-                resp = client.get(url)
-                resp.raise_for_status()
-                text = resp.text
-                content_type = resp.headers.get("content-type", "")
-                out = self._extract_from_response(url, row, text, content_type)
-                if "html" in content_type.lower() or "<html" in text[:1000].lower():
-                    out.extend(self._extract_from_linked_feeds(url, row, text, client))
-                return self._dedupe(out)
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return []
+
+        collected_hls: set[str] = set()
+        collected_json: set[str] = set()
+        browser = None
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page(user_agent=self.config.user_agent)
+
+                def collect_url(candidate_url: str, content_type: str = "") -> None:
+                    if not candidate_url:
+                        return
+                    lowered_type = content_type.casefold()
+                    if _looks_like_hls(candidate_url) or "application/x-mpegurl" in lowered_type or "application/vnd.apple.mpegurl" in lowered_type:
+                        collected_hls.add(candidate_url)
+                    if JSON_FEED_HINT_RE.search(candidate_url) or MAP_LAYER_API_RE.search(candidate_url):
+                        collected_json.add(candidate_url)
+
+                page.on("request", lambda request: collect_url(request.url, str(request.headers.get("content-type", ""))))
+                page.on("response", lambda response: collect_url(response.url, str(response.headers.get("content-type", ""))))
+                page.goto(url, wait_until="networkidle", timeout=15_000)
+        except Exception as exc:
+            write_jsonl(
+                self.logs_dir / "playwright_network_capture_errors.jsonl",
+                [{"url": url, "error": repr(exc), "source_name": row.get("source_name") or row.get("title")}],
+                append=True,
+            )
+            return []
+        finally:
+            try:
+                if browser is not None:
+                    browser.close()
+            except Exception:
+                pass
+
+        out: list[CameraCandidate] = []
+        for stream_url in sorted(collected_hls):
+            if self.source_policy.is_blocked(stream_url):
+                continue
+            candidate = self._candidate_from_stream(stream_url, url, row, "playwright_network_capture")
+            candidate.source_metadata["media_type"] = "hls"
+            out.append(candidate)
+        if collected_json:
+            client = self._make_client()
+            try:
+                for feed_url in sorted(collected_json):
+                    if self.source_policy.is_blocked(feed_url):
+                        continue
+                    try:
+                        resp = _get_with_retry(client, feed_url)
+                        if resp.status_code >= 400:
+                            continue
+                        out.extend(self._extract_from_response(feed_url, row, resp.text, resp.headers.get("content-type", "")))
+                    except Exception:
+                        continue
+            finally:
+                client.close()
+        return self._dedupe(out)
+
+    def _extract_from_page(self, url: str, row: dict[str, str], client: httpx.Client | None = None) -> list[CameraCandidate]:
+        owns_client = client is None
+        client = client or self._make_client()
+        try:
+            resp = _get_with_retry(client, url)
+            resp.raise_for_status()
+            text = resp.text
+            content_type = resp.headers.get("content-type", "")
+            out = self._extract_from_response(url, row, text, content_type)
+            if "html" in content_type.lower() or "<html" in text[:1000].lower():
+                out.extend(self._extract_from_linked_feeds(url, row, text, client))
+            return self._dedupe(out)
         except Exception:
             return []
+        finally:
+            if owns_client:
+                client.close()
 
     def _extract_from_response(self, url: str, row: dict[str, str], text: str, content_type: str = "") -> list[CameraCandidate]:
         if _looks_like_json_response(url, content_type, text):
@@ -303,11 +472,10 @@ class CandidateDiscoveryEngine:
         return self._extract_from_text(url, row, text)
 
     def _extract_from_text(self, url: str, row: dict[str, str], text: str, *, include_image_regex: bool = True) -> list[CameraCandidate]:
-        coords = self._extract_first_coord(text)
         out: list[CameraCandidate] = []
-        out.extend(self._extract_hls_from_text(url, row, text, coords, "hls_regex"))
+        out.extend(self._extract_hls_from_text(url, row, text, "hls_regex"))
         if include_image_regex:
-            out.extend(self._extract_images_from_text(url, row, text, coords, "image_snapshot_regex"))
+            out.extend(self._extract_images_from_text(url, row, text, "image_snapshot_regex"))
         return self._dedupe(out)
 
     def _extract_structured_from_html_text(self, url: str, row: dict[str, str], text: str) -> list[CameraCandidate]:
@@ -388,7 +556,7 @@ class CandidateDiscoveryEngine:
             write_jsonl(self.logs_dir / "structured_endpoint_discovery.jsonl", endpoint_logs, append=True)
         return self._dedupe(out)
 
-    def _extract_hls_from_text(self, source_url: str, row: dict[str, str], text: str, coords: tuple[float, float] | None, method: str) -> list[CameraCandidate]:
+    def _extract_hls_from_text(self, source_url: str, row: dict[str, str], text: str, method: str) -> list[CameraCandidate]:
         out: list[CameraCandidate] = []
         for match in M3U8_RE.finditer(text):
             raw = match.group(0).strip("'\"") if match.group(0).startswith("http") else (match.group(1) or "").strip("'\"")
@@ -396,13 +564,16 @@ class CandidateDiscoveryEngine:
             if ".m3u8" in stream.lower() and not self.source_policy.is_blocked(stream):
                 candidate = self._candidate_from_stream(stream, source_url, row, method)
                 candidate.source_metadata["media_type"] = "hls"
-                if coords:
-                    candidate.lat, candidate.lon = coords
-                    candidate.coordinate_source = "page_text_coordinate"
+                start = max(0, match.start() - 500)
+                end = min(len(text), match.end() + 500)
+                local_coords = self._extract_first_coord(text[start:end])
+                if local_coords:
+                    candidate.lat, candidate.lon = local_coords
+                    candidate.coordinate_source = "proximity_text"
                 out.append(candidate)
         return out
 
-    def _extract_images_from_text(self, source_url: str, row: dict[str, str], text: str, coords: tuple[float, float] | None, method: str) -> list[CameraCandidate]:
+    def _extract_images_from_text(self, source_url: str, row: dict[str, str], text: str, method: str) -> list[CameraCandidate]:
         out: list[CameraCandidate] = []
         for match in IMAGE_RE.finditer(text):
             raw = match.group(0).strip("'\"") if match.group(0).startswith("http") else (match.group(1) or "").strip("'\"")
@@ -416,9 +587,12 @@ class CandidateDiscoveryEngine:
                     candidate.source_metadata["camera_id"] = _camera_id_from_url(image_url) or slug_location
                 candidate.source_metadata["media_type"] = "image_snapshot"
                 candidate.source_metadata["snapshot_url"] = image_url
-                if coords:
-                    candidate.lat, candidate.lon = coords
-                    candidate.coordinate_source = "page_text_coordinate"
+                start = max(0, match.start() - 500)
+                end = min(len(text), match.end() + 500)
+                local_coords = self._extract_first_coord(text[start:end])
+                if local_coords:
+                    candidate.lat, candidate.lon = local_coords
+                    candidate.coordinate_source = "proximity_text"
                 out.append(candidate)
         return out
 
@@ -543,6 +717,11 @@ class CandidateDiscoveryEngine:
             if existing is None:
                 by_key[key] = row
                 order.append(key)
+                continue
+            row_type = _candidate_media_type(row)
+            existing_type = _candidate_media_type(existing)
+            if row_type == "hls" and existing_type != "hls":
+                by_key[key] = row
                 continue
             if row.has_coordinates and not existing.has_coordinates:
                 by_key[key] = row
@@ -693,6 +872,7 @@ class CandidateDiscoveryEngine:
         url = f"https://nominatim.openstreetmap.org/search?{urlencode({'q': query, 'format': 'jsonv2', 'limit': '1', 'addressdetails': '1'})}"
         try:
             with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
+                time.sleep(1.0)
                 response = client.get(url)
                 response.raise_for_status()
                 data = response.json()

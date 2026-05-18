@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import asdict
+from urllib.parse import urljoin
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import httpx
@@ -52,10 +53,10 @@ class ReviewAndValidationPipeline:
             v.attempted += 1
             status = self._validate_hls(c.stream_url)
             c.validation_status = status
-            if status.startswith("active"):
+            if status in {"active_live_unknown", "active_live_verified"}:
                 v.live += 1
                 c.trust_level = "trusted" if c.scope_status == "in_scope" else "untrusted"
-            elif status in {"dead_link", "offline_http", "restricted_http"}:
+            elif status in {"dead_link", "offline_http", "restricted_http", "active_playlist_dead_segments"}:
                 v.dead += 1
                 c.trust_level = "rejected"
             else:
@@ -70,9 +71,32 @@ class ReviewAndValidationPipeline:
                     return "restricted_http"
                 if r.status_code >= 400:
                     return "offline_http"
-                return "active_live_unknown" if "#EXTM3U" in r.text[:4096] else "decode_failed"
+                if "#EXTM3U" not in r.text[:4096]:
+                    return "decode_failed"
+                if not self.config.ffprobe_enabled:
+                    return "active_live_unknown"
+                segment_url = self._first_playlist_segment_url(url, r.text)
+                if not segment_url:
+                    return "active_live_unknown"
+                try:
+                    segment = client.head(segment_url)
+                    if 200 <= segment.status_code < 300:
+                        return "active_live_verified"
+                    return "active_playlist_dead_segments"
+                except Exception:
+                    return "active_playlist_dead_segments"
         except Exception:
             return "dead_link"
+
+    def _first_playlist_segment_url(self, playlist_url: str, playlist_body: str) -> str | None:
+        for line in playlist_body.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            clean = stripped.split("?", 1)[0].casefold()
+            if clean.endswith(".ts") or clean.endswith(".m3u8"):
+                return urljoin(playlist_url, stripped)
+        return None
 
     def _write_outputs(self, targets: list[TargetContext], target_map: dict[str, TargetContext], candidates: CandidateSet, v: ValidationSummary) -> OutputSummary:
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -263,9 +287,21 @@ class ReviewAndValidationPipeline:
         )
 
     def _write_cameras_md(self, rows: list[CameraCandidate]) -> None:
+        lines = [
+            "# Trusted Camera Inventory\n",
+            "| Name | Location | Latitude | Longitude | Stream URL | Source URL |",
+            "|---|---|---|---|---|---|",
+        ]
+        for r in rows:
+            name = (r.title or "Camera").replace("|", "\\|")
+            location = (r.location_text or "").replace("|", "\\|")
+            lat = str(r.lat) if r.lat is not None else ""
+            lon = str(r.lon) if r.lon is not None else ""
+            stream = r.stream_url.replace("|", "\\|")
+            source = (r.source_url or "").replace("|", "\\|")
+            lines.append(f"| {name} | {location} | {lat} | {lon} | {stream} | {source} |")
         (self.config.output_dir / "cameras.md").write_text(
-            "# Trusted Camera Inventory\n\n" + "\n".join(f"- `{r.stream_url}` — {r.target_label or r.target_id}" for r in rows) + "\n",
-            encoding="utf-8",
+            "\n".join(lines) + "\n", encoding="utf-8"
         )
 
     def _write_map(self):

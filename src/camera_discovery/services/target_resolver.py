@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 from dataclasses import asdict
 from typing import Any
 from urllib.parse import urlencode
@@ -306,6 +307,7 @@ class TargetResolver:
     def _geocode(self, query: str) -> list[GeocoderCandidate]:
         url = f"https://nominatim.openstreetmap.org/search?{urlencode({'q': query, 'format': 'jsonv2', 'limit': '5', 'polygon_geojson': '1', 'addressdetails': '1'})}"
         with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
+            time.sleep(1.0)
             rows = client.get(url)
             rows.raise_for_status()
             data = rows.json()

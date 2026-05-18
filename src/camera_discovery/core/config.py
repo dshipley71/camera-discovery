@@ -69,6 +69,9 @@ def load_run_config(
     )
     selected_discovery_mode = DiscoveryMode((discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE", "both")).strip().lower())
     configured_sources_file = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
+    max_total_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_TOTAL_CANDIDATES", 200))
+    max_hls_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_HLS_CANDIDATES", 100))
+    max_image_snapshot_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES", 50))
     return RunConfig(
         query=query,
         output_dir=Path(output_dir),
@@ -88,7 +91,10 @@ def load_run_config(
         max_search_queries=_int_env("CAMERA_DISCOVERY_MAX_SEARCH_QUERIES", 4),
         max_search_results_per_query=_int_env("CAMERA_DISCOVERY_MAX_SEARCH_RESULTS_PER_QUERY", 5),
         max_pages=_int_env("CAMERA_DISCOVERY_MAX_PAGES", 25),
-        max_streams=_int_env("CAMERA_DISCOVERY_MAX_STREAMS", 100),
+        max_hls_candidates=max_hls_candidates,
+        max_image_snapshot_candidates=max_image_snapshot_candidates,
+        max_total_candidates=max_total_candidates,
+        max_streams=_int_env("CAMERA_DISCOVERY_MAX_STREAMS", max_total_candidates),
         max_directory_pages=max(1, _int_env("CAMERA_DISCOVERY_MAX_DIRECTORY_PAGES", 8)),
         max_structured_endpoints_per_page=max(1, _int_env("CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", 20)),
         asset_host_promotion_threshold=max(2, _int_env("CAMERA_DISCOVERY_ASSET_HOST_PROMOTION_THRESHOLD", 3)),

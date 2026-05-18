@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 from pathlib import Path
 from typing import Optional
 
@@ -69,9 +70,14 @@ def run(
         raise typer.Exit(code=2)
 
     per_target_sets: dict[str, CandidateSet] = {}
-    for target in runnable_targets:
-        console.print(f"[bold]Discovering:[/bold] {target.target_label or target.canonical_target or target.target_id}")
-        per_target_sets[target.target_id] = CandidateDiscoveryEngine(cfg).discover(target)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(runnable_targets))) as pool:
+        futures = {}
+        for target in runnable_targets:
+            console.print(f"[bold]Discovering:[/bold] {target.target_label or target.canonical_target or target.target_id}")
+            futures[pool.submit(CandidateDiscoveryEngine(cfg).discover, target)] = target
+        for future in concurrent.futures.as_completed(futures):
+            target = futures[future]
+            per_target_sets[target.target_id] = future.result()
     state.candidate_sets_by_target = per_target_sets
     merged = CandidateSet.merge(list(per_target_sets.values()))
     state.candidates = merged

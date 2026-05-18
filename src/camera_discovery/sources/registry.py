@@ -62,7 +62,7 @@ def _consume_rows(policy: SourcePolicy, section: str | None, headers: list[str],
             if not url:
                 continue
             source_type = (row.get("type") or row.get("source_type") or "page").strip().casefold()
-            if source_type not in {"page", "feed", "direct_hls", "site"}:
+            if source_type not in {"page", "feed", "direct_hls", "site", "dynamic"}:
                 source_type = "page"
             policy.allowed_sources.append(
                 SourceEntry(
