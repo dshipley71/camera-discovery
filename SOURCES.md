@@ -8,7 +8,6 @@ Allowed sources are used only in `directory` and `both` discovery modes. Blocked
 
 | name | url | type | scope_hint | enabled | notes |
 |---|---|---|---|---|---|
-| OpenCCTV | https://opencctv.org/ | site | global | true | User-approved public CCTV directory/source page. |
 
 ## Blocked Sources
 
