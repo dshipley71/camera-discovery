@@ -873,7 +873,6 @@ class CandidateDiscoveryEngine:
         diagnostics: list[dict[str, Any]] = []
         geocode_cache: dict[str, tuple[float, float, str] | None] = {}
         effective_max_geocodes = self._effective_candidate_geocode_limit(candidates, target)
-        max_llm_location_inferences = max(0, int(getattr(self.config, "max_llm_location_inferences", 0)))
         min_llm_confidence = max(0.0, min(1.0, float(getattr(self.config, "llm_location_inference_min_confidence", 0.70))))
         location_client: LLMClient | None = self.location_inference_client
         location_client_failed = False
@@ -895,7 +894,6 @@ class CandidateDiscoveryEngine:
                         candidate.coordinate_source == "proximity_text"
                         and getattr(self.config, "enable_llm_location_inference", False)
                         and _candidate_has_location_inference_evidence(candidate)
-                        and llm_location_attempted < max_llm_location_inferences
                         and not location_client_failed
                     ):
                         if location_client is None:
@@ -989,14 +987,10 @@ class CandidateDiscoveryEngine:
                 if not getattr(self.config, "enable_llm_location_inference", False):
                     llm_location_skipped += 1
                     continue
-                if llm_location_attempted >= max_llm_location_inferences:
-                    llm_location_skipped += 1
-                    diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "skipped_max_llm_location_inferences"})
-                    continue
-                if not _candidate_has_location_inference_evidence(candidate):
-                    llm_location_skipped += 1
-                    diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "skipped_no_location_like_evidence"})
-                    continue
+                # LLM location inference intentionally has no cap. Every candidate
+                # that still lacks coordinates is allowed through this fallback;
+                # the LLM may decline by returning has_location_hint=false when
+                # the stream URL and metadata do not contain usable place evidence.
                 if location_client_failed:
                     llm_location_skipped += 1
                     continue
@@ -1107,7 +1101,6 @@ class CandidateDiscoveryEngine:
                 "llm_location_enriched": llm_location_enriched,
                 "llm_location_skipped": llm_location_skipped,
                 "enable_llm_location_inference": getattr(self.config, "enable_llm_location_inference", False),
-                "max_llm_location_inferences": max_llm_location_inferences,
                 "llm_location_inference_min_confidence": min_llm_confidence,
                 "max_candidate_geocodes": self.config.max_candidate_geocodes,
                 "effective_max_candidate_geocodes": effective_max_geocodes,
@@ -1117,17 +1110,10 @@ class CandidateDiscoveryEngine:
         )
 
     def _effective_candidate_geocode_limit(self, candidates: list[CameraCandidate], target: TargetContext) -> int:
-        configured = max(0, int(self.config.max_candidate_geocodes))
-        if configured == 0:
-            return 0
-        missing_specific = sum(
-            1 for c in candidates
-            if not c.has_coordinates and self._candidate_geocode_query(c, target)
-        )
-        broad_scope = str(target.scope_type or "").casefold() in {"state", "region", "country", "metro", "county"}
-        if broad_scope and missing_specific > configured:
-            return min(missing_specific, max(configured, self.config.max_state_scale_candidate_geocodes))
-        return configured
+        # Candidate geocoding budgets are tied to the configured candidate budget.
+        # This prevents state-scale runs from silently leaving many candidates
+        # ungeocoded because of stale fixed caps.
+        return max(0, int(self.config.max_total_candidates))
 
     def _promoted_asset_host_rows(self, candidates: list[CameraCandidate], target: TargetContext, existing_rows: list[dict[str, str]]) -> list[dict[str, str]]:
         host_counts: dict[str, int] = {}
@@ -1302,6 +1288,12 @@ class CandidateDiscoveryEngine:
     def _scope_candidates(self, candidates: list[CameraCandidate], target: TargetContext) -> None:
         bbox = target.bbox if target.bbox_verified else None
         for candidate in candidates:
+            if candidate.source_metadata.get("coordinate_conflict") or "coordinate_conflict_between_proximity_text_and_llm_geocode" in candidate.reasons:
+                candidate.scope_status = "review"
+                candidate.trust_level = "untrusted"
+                if "coordinate_conflict_disqualified_from_trusted_output" not in candidate.reasons:
+                    candidate.reasons.append("coordinate_conflict_disqualified_from_trusted_output")
+                continue
             if candidate.has_coordinates and bbox:
                 if bbox["min_lat"] <= candidate.lat <= bbox["max_lat"] and bbox["min_lon"] <= candidate.lon <= bbox["max_lon"]:
                     candidate.scope_status = "in_scope"
@@ -1333,7 +1325,7 @@ class CandidateDiscoveryEngine:
         if max_reviews == 0:
             write_json(
                 self.logs_dir / "candidate_semantic_review.json",
-                {"status": "skipped", "reason": "CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS=0"},
+                {"status": "skipped", "reason": "max_candidate_reviews=0"},
             )
             return
 
@@ -1371,10 +1363,8 @@ class CandidateDiscoveryEngine:
                 )
                 for row in payload:
                     candidate = by_index.get(row["index"])
-                    if candidate is not None:
-                        candidate.reasons.append("llm_semantic_review_failed")
-                        if candidate.scope_status == "unknown":
-                            candidate.scope_status = "review"
+                    if candidate is not None and candidate.scope_status == "unknown":
+                        candidate.scope_status = "review"
                 continue
 
             rows = data.get("candidates") if isinstance(data.get("candidates"), list) else []
@@ -2128,8 +2118,39 @@ def _is_broad_or_target_level_inference(row: dict[str, Any], query: str, display
     for value in sorted(normalized_targets, key=len, reverse=True):
         residual = residual.replace(value, " ")
     residual_tokens = [tok for tok in residual.split() if len(tok) >= 3]
-    return not residual_tokens
+    if not residual_tokens:
+        return True
+    if _geocode_specificity_score(query, display_name) < 1:
+        return True
+    return False
 
+
+def _geocode_specificity_score(query: str, display_name: str) -> int:
+    """Score whether a geocode result is specific enough for an individual camera.
+
+    State/county/country results can be inside a target bbox but still far too
+    broad to represent a camera. Prefer named places, intersections, roads with
+    route numbers, highway exits, and directional/location tokens.
+    """
+    text = f"{query} {display_name}"
+    lowered = text.casefold()
+    score = 0
+    if re.search(r"\b(?:i-|i\s*|sr\s*|us\s*|ca\s*)\d+\b", lowered, re.I):
+        score += 1
+    if re.search(r"\b(?:at|near|and|@|jct|junction|exit)\b", lowered, re.I):
+        score += 1
+    if re.search(r"\b(?:st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|hwy|highway|fwy|freeway|ramp|bridge)\b", lowered, re.I):
+        score += 1
+    if re.search(r"\b(?:nb|sb|eb|wb|northbound|southbound|eastbound|westbound)\b", lowered, re.I):
+        score += 1
+    # Named city/place in display; reject if the result is only target-level admin.
+    admin_only_tokens = {"california", "united", "states", "usa", "county", "state", "route", "road", "highway"}
+    meaningful = [t for t in re.findall(r"[a-z][a-z0-9]{2,}", lowered) if t not in admin_only_tokens]
+    if len(set(meaningful)) >= 2:
+        score += 2
+    if re.search(r"\b(?:county|state|united states|usa)\b", lowered) and not re.search(r"\b(?:st|street|rd|road|ave|avenue|blvd|dr|hwy|highway|i-|sr\s*|us\s*|jct|junction|exit)\b", lowered):
+        score -= 1
+    return score
 
 def _normalize_place_token(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (value or "").casefold()).strip()

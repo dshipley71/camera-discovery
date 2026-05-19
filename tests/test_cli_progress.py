@@ -102,3 +102,18 @@ def test_rich_progress_callback_tracks_coordinate_enrichment():
         task = progress.tasks[task_id]
         assert task.completed == 500
         assert task.total == 500
+
+
+def test_rich_validation_progress_callback_tracks_candidate_counts():
+    from camera_discovery.cli import _make_rich_validation_progress_callback
+    console = Console(file=open('/tmp/camera_discovery_validation_progress_test.out', 'w'), force_terminal=False)
+    progress = Progress(console=console, transient=True, disable=True)
+    with progress:
+        callback = _make_rich_validation_progress_callback(progress, threading.Lock())
+        callback('hls_validation_started', {'total': 3, 'live': 0, 'dead': 0, 'restricted': 0, 'decode_failed': 0, 'static_image_asset': 0, 'unknown': 0})
+        callback('hls_validation_processed', {'processed': 1, 'total': 3, 'live': 1, 'dead': 0, 'restricted': 0, 'decode_failed': 0, 'static_image_asset': 0, 'unknown': 0})
+        callback('hls_validation_processed', {'processed': 2, 'total': 3, 'live': 1, 'dead': 1, 'restricted': 0, 'decode_failed': 0, 'static_image_asset': 0, 'unknown': 0})
+        hls_tasks = [task for task in progress.tasks if 'HLS' in task.description]
+        assert hls_tasks
+        assert hls_tasks[0].completed == 2
+        assert hls_tasks[0].total == 3

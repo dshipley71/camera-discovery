@@ -250,6 +250,108 @@ def _make_notebook_discovery_progress_callback(lock: threading.Lock):
     return callback
 
 
+
+
+def _make_rich_validation_progress_callback(progress: Progress, lock: threading.Lock):
+    tasks: dict[str, int] = {}
+    state: dict[str, Any] = {"counts": {}}
+
+    def _counts(payload: dict[str, Any]) -> str:
+        return (
+            f"live {payload.get('live', 0)} | dead {payload.get('dead', 0)} | "
+            f"restricted {payload.get('restricted', 0)} | decode {payload.get('decode_failed', 0)} | "
+            f"static {payload.get('static_image_asset', 0)} | unknown {payload.get('unknown', 0)}"
+        )
+
+    def callback(event: str, payload: dict[str, Any]) -> None:
+        with lock:
+            if event == "validation_candidates_selected":
+                state["selected"] = payload
+            elif event == "hls_validation_started":
+                total = int(payload.get("total") or 0)
+                tasks["hls"] = progress.add_task(f"Validating HLS playlists — {_counts(payload)}", total=total or 1)
+                if total == 0:
+                    progress.update(tasks["hls"], completed=1)
+            elif event == "hls_validation_processed":
+                task = tasks.get("hls")
+                if task is not None:
+                    progress.update(task, completed=int(payload.get("processed") or 0), description=f"Validating HLS playlists — {_counts(payload)}")
+            elif event == "hls_validation_complete":
+                task = tasks.get("hls")
+                if task is not None:
+                    total = int(payload.get("total") or 0)
+                    progress.update(task, completed=total or 1, description=f"HLS validation complete — {_counts(payload)}")
+            elif event == "image_validation_started":
+                total = int(payload.get("total") or 0)
+                tasks["image"] = progress.add_task(f"Validating image snapshots — {_counts(payload)}", total=total or 1)
+                if total == 0:
+                    progress.update(tasks["image"], completed=1)
+            elif event == "image_validation_processed":
+                task = tasks.get("image")
+                if task is not None:
+                    progress.update(task, completed=int(payload.get("processed") or 0), description=f"Validating image snapshots — {_counts(payload)}")
+            elif event == "image_validation_complete":
+                task = tasks.get("image")
+                if task is not None:
+                    total = int(payload.get("total") or 0)
+                    progress.update(task, completed=total or 1, description=f"Image validation complete — {_counts(payload)}")
+            elif event == "output_writing_started":
+                tasks["outputs"] = progress.add_task("Writing outputs", total=5)
+            elif event == "output_writing_step":
+                task = tasks.get("outputs")
+                if task is not None:
+                    completed = min(5, int(progress.tasks[task].completed) + 1)
+                    progress.update(task, completed=completed, description=f"Writing outputs — {payload.get('step', 'step')}")
+            elif event == "artifact_packaging_started":
+                task = tasks.get("outputs")
+                if task is not None:
+                    progress.update(task, completed=4, description="Packaging review artifacts")
+            elif event == "artifact_packaging_complete":
+                task = tasks.get("outputs")
+                if task is not None:
+                    progress.update(task, completed=5, description="Outputs packaged")
+    return callback
+
+
+def _make_plain_validation_progress_callback(console: Console, lock: threading.Lock):
+    state: dict[str, int] = {"hls_bucket": -1, "image_bucket": -1}
+
+    def _bucket(done: int, total: int) -> int:
+        return 10 if total <= 0 else min(10, int((done / total) * 10))
+
+    def callback(event: str, payload: dict[str, Any]) -> None:
+        with lock:
+            if event == "hls_validation_started":
+                console.print(f"Progress: validating HLS playlists ({payload.get('total', 0)} candidates)...")
+            elif event == "hls_validation_processed":
+                done = int(payload.get("processed") or 0); total = int(payload.get("total") or 0)
+                b = _bucket(done, total)
+                if b != state.get("hls_bucket"):
+                    state["hls_bucket"] = b
+                    console.print(f"Progress: HLS validation {done}/{total} · live {payload.get('live', 0)} · dead {payload.get('dead', 0)} · restricted {payload.get('restricted', 0)} · decode {payload.get('decode_failed', 0)}")
+            elif event == "image_validation_started":
+                console.print(f"Progress: validating image snapshots ({payload.get('total', 0)} candidates)...")
+            elif event == "image_validation_processed":
+                done = int(payload.get("processed") or 0); total = int(payload.get("total") or 0)
+                b = _bucket(done, total)
+                if b != state.get("image_bucket"):
+                    state["image_bucket"] = b
+                    console.print(f"Progress: image validation {done}/{total} · live {payload.get('live', 0)} · static {payload.get('static_image_asset', 0)} · unknown {payload.get('unknown', 0)}")
+            elif event == "output_writing_started":
+                console.print("Progress: writing outputs...")
+            elif event == "artifact_packaging_started":
+                console.print("Progress: packaging review artifacts...")
+            elif event == "artifact_packaging_complete":
+                console.print("Progress: review artifacts packaged.")
+    return callback
+
+
+def _make_notebook_validation_progress_callback(lock: threading.Lock):
+    def callback(event: str, payload: dict[str, Any]) -> None:
+        with lock:
+            _emit_notebook_progress_event(event, payload)
+    return callback
+
 @app.callback()
 def main() -> None:
     """Camera discovery command group."""
@@ -384,24 +486,27 @@ def run(
             f"coordinate_bearing={len(merged.coordinate_bearing)} targets={len(per_target_sets)}"
         )
 
+        validation_callback = None
         if progress_mode == "rich":
             assert progress is not None
-            validation_task = progress.add_task("Validating streams and writing outputs", total=1)
+            validation_callback = _make_rich_validation_progress_callback(progress, progress_lock)
         elif progress_mode == "plain":
-            console.print("Progress: validating streams and writing outputs...")
+            validation_callback = _make_plain_validation_progress_callback(console, progress_lock)
         elif progress_mode == "notebook":
-            _emit_notebook_progress_event("validation_started", {"completed": 0, "total": 1, "description": "Validating streams and writing outputs"})
-        validation, outputs = ReviewAndValidationPipeline(cfg).run(runnable_targets, merged)
-        if progress_mode == "rich":
-            assert progress is not None
-            progress.update(validation_task, completed=1, description="Validation and outputs complete")
-        elif progress_mode == "plain":
-            console.print("Progress: validation and outputs complete.")
-        elif progress_mode == "notebook":
-            _emit_notebook_progress_event("validation_complete", {"completed": 1, "total": 1, "description": "Validation and outputs complete"})
+            validation_callback = _make_notebook_validation_progress_callback(progress_lock)
+        validation, outputs = ReviewAndValidationPipeline(cfg, progress_callback=validation_callback).run(runnable_targets, merged)
     state.validation = validation
     state.outputs = outputs
     write_json(cfg.output_dir / "logs" / "run_summary.json", state.to_dict())
+    write_json(cfg.output_dir / "logs" / "output_summary.json", state.outputs.__dict__)
+    # Repackage once run-level diagnostics are written. Notebook-created logs are
+    # also included when present in the output directory.
+    try:
+        outputs.review_artifacts_zip = str(ReviewAndValidationPipeline(cfg)._package_review_artifacts())
+        state.outputs = outputs
+        write_json(cfg.output_dir / "logs" / "output_summary.json", state.outputs.__dict__)
+    except Exception as exc:
+        state.warnings.append(f"review_artifacts_repackage_failed: {exc!r}")
     console.print(
         f"[bold]Trusted GeoJSON:[/bold] {outputs.trusted_geojson_created} "
         f"features={outputs.trusted_geojson_features_written}"

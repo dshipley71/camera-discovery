@@ -52,7 +52,6 @@ def _cfg(tmp_path, **overrides):
         "llm_model": "gemma4:31b-cloud",
         "enable_candidate_geocoding": True,
         "enable_llm_location_inference": True,
-        "max_llm_location_inferences": 5,
         "llm_location_inference_min_confidence": 0.7,
         "max_candidate_geocodes": 5,
     }
@@ -91,7 +90,7 @@ def test_ollama_api_url_does_not_double_append_api():
 
 def test_llm_location_inference_prioritizes_hls_slug_over_image_candidate(tmp_path, monkeypatch):
     client = RoutingLocationClient()
-    engine = CandidateDiscoveryEngine(_cfg(tmp_path, max_llm_location_inferences=1), location_inference_client=client)
+    engine = CandidateDiscoveryEngine(_cfg(tmp_path), location_inference_client=client)
     image = CameraCandidate(
         stream_url="https://public.example/cameras/example-road.jpg",
         source_metadata={"media_type": "image_snapshot", "source_name": "Example camera page"},
@@ -105,8 +104,8 @@ def test_llm_location_inference_prioritizes_hls_slug_over_image_candidate(tmp_pa
     engine._enrich_candidate_coordinates([image, hls], _target())
 
     assert hls.coordinate_source == "llm_url_location_nominatim"
-    assert image.coordinate_source is None
-    assert len(client.prompts) == 1
+    assert image.coordinate_source == "llm_url_location_nominatim"
+    assert len(client.prompts) == 2
     assert "Brawley" in client.prompts[0]
 
 

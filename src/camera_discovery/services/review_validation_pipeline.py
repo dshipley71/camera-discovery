@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import concurrent.futures
 import csv
 from dataclasses import asdict
 import time
+from typing import Any, Callable
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qsl
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -30,10 +32,19 @@ class ReviewAndValidationPipeline:
     on each candidate and checking each candidate against its target's trust policy.
     """
 
-    def __init__(self, config: RunConfig):
+    def __init__(self, config: RunConfig, progress_callback: Callable[[str, dict[str, Any]], None] | None = None):
         self.config = config
+        self.progress_callback = progress_callback
         self.logs_dir = config.output_dir / "logs"
         self.candidates_dir = config.output_dir / "candidates"
+
+    def _emit_progress(self, event: str, **payload: Any) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(event, payload)
+        except Exception:
+            return
 
     def run(self, target: TargetContext | list[TargetContext], candidates: CandidateSet):
         targets = target if isinstance(target, list) else [target]
@@ -50,50 +61,108 @@ class ReviewAndValidationPipeline:
 
     def _validate(self, candidates: CandidateSet, v: ValidationSummary) -> None:
         rows = candidates.in_scope or candidates.review
-        for c in rows:
-            v.attempted += 1
-            status = self._validate_candidate(c)
-            c.validation_status = status
-            if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing"}:
-                v.live += 1
-                c.trust_level = "trusted" if c.scope_status == "in_scope" else "untrusted"
-            elif status in {"dead_link", "offline_http", "restricted_http", "active_playlist_dead_segments", "static_image_asset", "image_snapshot_not_image"}:
-                v.dead += 1
-                c.trust_level = "rejected"
-            else:
-                v.unknown += 1
-                c.trust_level = "untrusted"
+        hls_rows = [c for c in rows if str((c.source_metadata or {}).get("media_type") or "").casefold() != "image_snapshot"]
+        image_rows = [c for c in rows if str((c.source_metadata or {}).get("media_type") or "").casefold() == "image_snapshot"]
+        totals = {"hls": len(hls_rows), "image_snapshot": len(image_rows), "total": len(rows)}
+        self._emit_progress("validation_candidates_selected", **totals)
 
-    def _validate_candidate(self, candidate: CameraCandidate) -> str:
-        media_type = str((candidate.source_metadata or {}).get("media_type") or "").casefold()
-        if media_type == "image_snapshot":
-            return self._validate_image_snapshot(candidate.stream_url)
-        return self._validate_hls(candidate.stream_url)
+        counts = _empty_validation_counts()
+        with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
+            self._validate_hls_rows(hls_rows, v, counts, client)
+            self._validate_image_snapshot_rows(image_rows, v, counts, client)
 
-    def _validate_hls(self, url: str) -> str:
-        try:
-            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
-                r = client.get(url)
-                if r.status_code in {401, 403}:
-                    return "restricted_http"
-                if r.status_code >= 400:
-                    return "offline_http"
-                if "#EXTM3U" not in r.text[:4096]:
-                    return "decode_failed"
-                if not self.config.ffprobe_enabled:
-                    return "active_live_unknown"
-                segment_url = self._first_playlist_segment_url(url, r.text)
-                if not segment_url:
-                    return "active_live_unknown"
+    def _validate_hls_rows(self, rows: list[CameraCandidate], v: ValidationSummary, counts: dict[str, int], client: httpx.Client) -> None:
+        self._emit_progress("hls_validation_started", total=len(rows), **counts)
+        if not rows:
+            self._emit_progress("hls_validation_complete", total=0, processed=0, **counts)
+            return
+        max_workers = min(16, max(1, len(rows)))
+        processed = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(self._validate_hls, c.stream_url, client): c for c in rows}
+            for future in concurrent.futures.as_completed(futures):
+                c = futures[future]
                 try:
-                    segment = client.head(segment_url)
-                    if 200 <= segment.status_code < 300:
-                        return "active_live_verified"
-                    return "active_playlist_dead_segments"
+                    status = future.result()
                 except Exception:
-                    return "active_playlist_dead_segments"
+                    status = "dead_link"
+                self._apply_validation_status(c, status, v, counts)
+                processed += 1
+                self._emit_progress("hls_validation_processed", total=len(rows), processed=processed, status=status, **counts)
+        self._emit_progress("hls_validation_complete", total=len(rows), processed=processed, **counts)
+
+    def _validate_image_snapshot_rows(self, rows: list[CameraCandidate], v: ValidationSummary, counts: dict[str, int], client: httpx.Client) -> None:
+        self._emit_progress("image_validation_started", total=len(rows), **counts)
+        processed = 0
+        for c in rows:
+            status = self._validate_image_snapshot(c.stream_url, client)
+            self._apply_validation_status(c, status, v, counts)
+            processed += 1
+            self._emit_progress("image_validation_processed", total=len(rows), processed=processed, status=status, **counts)
+        self._emit_progress("image_validation_complete", total=len(rows), processed=processed, **counts)
+
+    def _apply_validation_status(self, c: CameraCandidate, status: str, v: ValidationSummary, counts: dict[str, int]) -> None:
+        v.attempted += 1
+        c.validation_status = status
+        _increment_validation_counts(counts, status)
+        if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing"}:
+            v.live += 1
+            c.trust_level = "trusted" if c.scope_status == "in_scope" else "untrusted"
+        elif status in {"dead_link", "offline_http", "restricted_http", "active_playlist_dead_segments", "static_image_asset", "image_snapshot_not_image"}:
+            v.dead += 1
+            if status in {"dead_link", "offline_http", "active_playlist_dead_segments"}:
+                v.offline += 1
+            elif status == "restricted_http":
+                v.restricted += 1
+            elif status == "static_image_asset":
+                v.static_image_asset += 1
+            c.trust_level = "rejected"
+        else:
+            v.unknown += 1
+            if status == "decode_failed":
+                v.decode_failed += 1
+            c.trust_level = "untrusted"
+
+    def _validate_candidate(self, candidate: CameraCandidate, client: httpx.Client | None = None) -> str:
+        media_type = str((candidate.source_metadata or {}).get("media_type") or "").casefold()
+        close_client = client is None
+        client = client or httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True)
+        try:
+            if media_type == "image_snapshot":
+                return self._validate_image_snapshot(candidate.stream_url, client)
+            return self._validate_hls(candidate.stream_url, client)
+        finally:
+            if close_client and hasattr(client, "close"):
+                client.close()
+
+    def _validate_hls(self, url: str, client: httpx.Client | None = None) -> str:
+        close_client = client is None
+        client = client or httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True)
+        try:
+            r = client.get(url)
+            if r.status_code in {401, 403}:
+                return "restricted_http"
+            if r.status_code >= 400:
+                return "offline_http"
+            if "#EXTM3U" not in r.text[:4096]:
+                return "decode_failed"
+            if not self.config.ffprobe_enabled:
+                return "active_live_unknown"
+            segment_url = self._first_playlist_segment_url(url, r.text)
+            if not segment_url:
+                return "active_live_unknown"
+            try:
+                segment = client.head(segment_url)
+                if 200 <= segment.status_code < 300:
+                    return "active_live_verified"
+                return "active_playlist_dead_segments"
+            except Exception:
+                return "active_playlist_dead_segments"
         except Exception:
             return "dead_link"
+        finally:
+            if close_client and hasattr(client, "close"):
+                client.close()
 
     def _first_playlist_segment_url(self, playlist_url: str, playlist_body: str) -> str | None:
         for line in playlist_body.splitlines():
@@ -105,7 +174,7 @@ class ReviewAndValidationPipeline:
                 return urljoin(playlist_url, stripped)
         return None
 
-    def _validate_image_snapshot(self, url: str) -> str:
+    def _validate_image_snapshot(self, url: str, client: httpx.Client | None = None) -> str:
         """Validate that an image snapshot endpoint is a real image and appears refreshable.
 
         This performs live HTTP checks. Static web assets are rejected; image
@@ -114,30 +183,35 @@ class ReviewAndValidationPipeline:
         """
         if _looks_like_static_snapshot_asset(url):
             return "static_image_asset"
+        close_client = client is None
+        client = client or httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True)
         try:
-            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
-                first = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
-                first_status = _snapshot_http_status(first)
-                if first_status:
-                    return first_status
-                if _headers_indicate_static_asset(first.headers):
-                    return "static_image_asset"
-                delay = max(0.0, float(getattr(self.config, "image_snapshot_refresh_delay_seconds", 2.0)))
-                if delay:
-                    time.sleep(delay)
-                second = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
-                second_status = _snapshot_http_status(second)
-                if second_status:
-                    return second_status
-                if _headers_indicate_static_asset(second.headers):
-                    return "static_image_asset"
-                if _snapshot_responses_differ(first, second):
-                    return "active_image_snapshot_refreshing"
-                return "active_image_snapshot_static_unverified"
+            first = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+            first_status = _snapshot_http_status(first)
+            if first_status:
+                return first_status
+            if _headers_indicate_static_asset(first.headers):
+                return "static_image_asset"
+            delay = max(0.0, float(getattr(self.config, "image_snapshot_refresh_delay_seconds", 2.0)))
+            if delay:
+                time.sleep(delay)
+            second = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+            second_status = _snapshot_http_status(second)
+            if second_status:
+                return second_status
+            if _headers_indicate_static_asset(second.headers):
+                return "static_image_asset"
+            if _snapshot_responses_differ(first, second):
+                return "active_image_snapshot_refreshing"
+            return "active_image_snapshot_static_unverified"
         except Exception:
             return "dead_link"
+        finally:
+            if close_client and hasattr(client, "close"):
+                client.close()
 
     def _write_outputs(self, targets: list[TargetContext], target_map: dict[str, TargetContext], candidates: CandidateSet, v: ValidationSummary) -> OutputSummary:
+        self._emit_progress("output_writing_started", step="prepare")
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.candidates_dir.mkdir(parents=True, exist_ok=True)
@@ -155,6 +229,7 @@ class ReviewAndValidationPipeline:
         ]
         out = OutputSummary()
         if trusted:
+            self._emit_progress("output_writing_step", step="trusted_geojson", rows=len(trusted))
             out.trusted_geojson_created = True
             out.trusted_geojson_features_written = len(trusted)
             self._write_geojson(self.config.output_dir / "camera.geojson", trusted, trusted=True, target_map=target_map)
@@ -163,10 +238,12 @@ class ReviewAndValidationPipeline:
         elif (self.config.output_dir / "camera.geojson").exists():
             (self.config.output_dir / "camera.geojson").unlink()
         if review and self.config.allow_untrusted_review_output:
+            self._emit_progress("output_writing_step", step="untrusted_geojson", rows=len(review))
             out.untrusted_geojson_created = True
             out.untrusted_geojson_features_written = len(review)
             self._write_geojson(self.config.output_dir / "untrusted_camera_candidates.geojson", review, trusted=False, target_map=target_map)
             write_jsonl(self.candidates_dir / "untrusted_camera_candidates_source_rows.jsonl", [asdict(c) for c in review])
+        self._emit_progress("output_writing_step", step="candidate_table", rows=len(candidates.unique))
         table_path = self._write_candidate_table(candidates.unique)
         out.camera_candidates_table_csv = str(table_path)
         out.camera_candidates_table_rows = len(candidates.unique)
@@ -174,9 +251,13 @@ class ReviewAndValidationPipeline:
         write_json(self.logs_dir / "validation_summary.json", asdict(v))
         out.map_html = str(self._write_map())
         out.review_artifacts_zip = str(self.config.output_dir / "review_artifacts.zip")
+        self._emit_progress("output_writing_step", step="run_explanation")
         self._write_run_explanation(targets, candidates, v, out)
+        write_json(self.logs_dir / "output_summary.json", asdict(out))
+        self._emit_progress("artifact_packaging_started")
         out.review_artifacts_zip = str(self._package_review_artifacts())
         write_json(self.logs_dir / "output_summary.json", asdict(out))
+        self._emit_progress("artifact_packaging_complete", path=out.review_artifacts_zip)
         return out
 
     def _write_run_explanation(self, targets: list[TargetContext], candidates: CandidateSet, v: ValidationSummary, out: OutputSummary) -> None:
@@ -198,7 +279,15 @@ class ReviewAndValidationPipeline:
                 f"{len(candidates.coordinate_bearing)} candidate(s) had real coordinates and can be mapped; {missing_coordinates} remain table-only because no verified coordinate was extracted or geocoded.",
                 f"Trusted camera.geojson created: {out.trusted_geojson_created} ({out.trusted_geojson_features_written} feature(s)).",
                 f"Untrusted review GeoJSON created: {out.untrusted_geojson_created} ({out.untrusted_geojson_features_written} feature(s)).",
-                "Fast profile is review-only; use balanced/full validation when you want stream validation and trusted output authorization.",
+                (
+                    "Fast profile is review-only; use balanced/full validation when you want stream validation and trusted output authorization."
+                    if self.config.profile.value == "fast"
+                    else (
+                        "Balanced profile validated reachable HLS playlists and wrote trusted output for in-scope live candidates; use full profile for deeper segment checks."
+                        if self.config.profile.value == "balanced"
+                        else "Full profile performs the deepest configured validation, including HLS segment probing where available."
+                    )
+                ),
             ],
             "media_type_counts": media_counts,
             "source_provider_counts": provider_counts,
@@ -350,7 +439,11 @@ class ReviewAndValidationPipeline:
     def _package_review_artifacts(self):
         zpath = self.config.output_dir / "review_artifacts.zip"
         with ZipFile(zpath, "w", ZIP_DEFLATED) as z:
-            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "camera_inventory.jsonl", "cameras.md", "map.html", "camera_candidates_table.csv", "RUN_EXPLANATION.md"]:
+            for rel in [
+                "camera.geojson", "untrusted_camera_candidates.geojson", "camera_inventory.jsonl",
+                "cameras.md", "map.html", "camera_candidates_table.csv", "RUN_EXPLANATION.md",
+                "notebook_cli_combined.log", "notebook_progress_events.jsonl",
+            ]:
                 p = self.config.output_dir / rel
                 if p.exists():
                     z.write(p, rel)
@@ -361,6 +454,39 @@ class ReviewAndValidationPipeline:
                         if p.is_file():
                             z.write(p, str(p.relative_to(self.config.output_dir)))
         return zpath
+
+
+def _empty_validation_counts() -> dict[str, int]:
+    return {
+        "live": 0,
+        "dead": 0,
+        "offline": 0,
+        "restricted": 0,
+        "decode_failed": 0,
+        "static_image_asset": 0,
+        "unknown": 0,
+    }
+
+
+def _increment_validation_counts(counts: dict[str, int], status: str) -> None:
+    if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing"}:
+        counts["live"] += 1
+    elif status in {"dead_link", "offline_http", "active_playlist_dead_segments"}:
+        counts["dead"] += 1
+        counts["offline"] += 1
+    elif status == "restricted_http":
+        counts["dead"] += 1
+        counts["restricted"] += 1
+    elif status == "decode_failed":
+        counts["decode_failed"] += 1
+        counts["unknown"] += 1
+    elif status == "static_image_asset":
+        counts["dead"] += 1
+        counts["static_image_asset"] += 1
+    elif status in {"image_snapshot_not_image"}:
+        counts["dead"] += 1
+    else:
+        counts["unknown"] += 1
 
 
 def _looks_like_static_snapshot_asset(url: str) -> bool:
