@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import sys
 import threading
 from contextlib import nullcontext
 from pathlib import Path
@@ -21,6 +22,14 @@ import json
 
 app = typer.Typer(help="Simplified public camera discovery pipeline", no_args_is_help=True)
 console = Console()
+PROGRESS_EVENT_PREFIX = "__CAMERA_DISCOVERY_PROGRESS__ "
+
+
+def _emit_notebook_progress_event(event: str, payload: dict[str, Any] | None = None) -> None:
+    """Emit a machine-readable progress event for notebook-native rendering."""
+    message = {"event": event, "payload": payload or {}}
+    sys.stdout.write(PROGRESS_EVENT_PREFIX + json.dumps(message, default=str, sort_keys=True) + "\n")
+    sys.stdout.flush()
 
 
 def _make_progress(console: Console, *, enabled: bool) -> Progress:
@@ -40,7 +49,7 @@ def _make_progress(console: Console, *, enabled: bool) -> Progress:
 
 
 def _resolve_progress_mode(console: Console, *, enabled: bool, style: str = "auto") -> str:
-    """Return rich, plain, or off for progress rendering.
+    """Return rich, plain, notebook, or off for progress rendering.
 
     Rich live progress bars are used when stdout is attached to a real terminal
     or pseudo-terminal. Notebooks should run the CLI through a pseudo-terminal
@@ -50,8 +59,8 @@ def _resolve_progress_mode(console: Console, *, enabled: bool, style: str = "aut
     if not enabled:
         return "off"
     normalized = (style or "auto").strip().casefold()
-    if normalized not in {"auto", "rich", "plain"}:
-        raise typer.BadParameter("progress style must be one of: auto, rich, plain")
+    if normalized not in {"auto", "rich", "plain", "notebook"}:
+        raise typer.BadParameter("progress style must be one of: auto, rich, plain, notebook")
     if normalized == "auto":
         # FORCE_COLOR can make Rich consider a pipe terminal-like, which is
         # exactly what creates repeated live-render frames in notebooks. Require
@@ -226,6 +235,21 @@ def _make_plain_discovery_progress_callback(
     return callback
 
 
+def _make_notebook_discovery_progress_callback(lock: threading.Lock):
+    """Emit discovery progress events for a notebook-native renderer.
+
+    This avoids Rich live-render escape sequences in notebook subprocess output.
+    The notebook updates a single HTML progress panel in place instead of
+    printing one line for every refresh frame.
+    """
+
+    def callback(event: str, payload: dict[str, Any]) -> None:
+        with lock:
+            _emit_notebook_progress_event(event, payload)
+
+    return callback
+
+
 @app.callback()
 def main() -> None:
     """Camera discovery command group."""
@@ -241,7 +265,7 @@ def run(
     discovery_mode: str = typer.Option("both", "--discovery-mode", help="blind, directory, both, or direct"),
     block_pattern: Optional[list[str]] = typer.Option(None, "--block-pattern"),
     show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show progress while resolving, discovering, enriching coordinates, validating, and writing outputs."),
-    progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, or plain. Use rich with a pseudo-terminal for notebook progress bars."),
+    progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, plain, or notebook. Use notebook for stable in-place Jupyter/Colab progress bars."),
 ) -> None:
     """Run public-camera discovery for one or more locations in QUERY."""
     cfg = load_run_config(
@@ -275,6 +299,8 @@ def run(
             resolve_task = progress.add_task("Resolving targets", total=1)
         elif progress_mode == "plain":
             console.print("Progress: resolving targets...")
+        elif progress_mode == "notebook":
+            _emit_notebook_progress_event("target_resolution_started", {"completed": 0, "total": 1, "description": "Resolving targets"})
 
         targets = TargetResolver(cfg).resolve_all()
 
@@ -283,6 +309,8 @@ def run(
             progress.update(resolve_task, completed=1, description="Resolved targets")
         elif progress_mode == "plain":
             console.print(f"Progress: resolved {len(targets)} target(s).")
+        elif progress_mode == "notebook":
+            _emit_notebook_progress_event("target_resolution_complete", {"completed": len(targets), "total": max(1, len(targets)), "targets": len(targets)})
 
         state.targets = targets
         state.target = targets[0] if targets else None
@@ -310,6 +338,8 @@ def run(
                 target_tasks[target.target_id] = progress.add_task(f"Discovering {label}", total=None)
             elif progress_mode == "plain":
                 console.print(f"Progress: discovering {label}...")
+            elif progress_mode == "notebook":
+                _emit_notebook_progress_event("target_discovery_started", {"target_id": target.target_id, "target_label": label})
             target_progress_state[target.target_id] = {"total": 0, "completed": 0}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(runnable_targets))) as pool:
@@ -330,6 +360,8 @@ def run(
                         target_progress_state[target.target_id],
                         progress_lock,
                     )
+                elif progress_mode == "notebook":
+                    callback = _make_notebook_discovery_progress_callback(progress_lock)
                 engine = CandidateDiscoveryEngine(cfg, progress_callback=callback)
                 futures[pool.submit(engine.discover, target)] = target
             for future in concurrent.futures.as_completed(futures):
@@ -357,12 +389,16 @@ def run(
             validation_task = progress.add_task("Validating streams and writing outputs", total=1)
         elif progress_mode == "plain":
             console.print("Progress: validating streams and writing outputs...")
+        elif progress_mode == "notebook":
+            _emit_notebook_progress_event("validation_started", {"completed": 0, "total": 1, "description": "Validating streams and writing outputs"})
         validation, outputs = ReviewAndValidationPipeline(cfg).run(runnable_targets, merged)
         if progress_mode == "rich":
             assert progress is not None
             progress.update(validation_task, completed=1, description="Validation and outputs complete")
         elif progress_mode == "plain":
             console.print("Progress: validation and outputs complete.")
+        elif progress_mode == "notebook":
+            _emit_notebook_progress_event("validation_complete", {"completed": 1, "total": 1, "description": "Validation and outputs complete"})
     state.validation = validation
     state.outputs = outputs
     write_json(cfg.output_dir / "logs" / "run_summary.json", state.to_dict())
