@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from camera_discovery.core.models import RunConfig
 
-from .base import ChatMessage, LLMClient
+from .base import LLMClient
 from .bedrock import BedrockConverseClient
 from .ollama import OllamaClient
 from .openai_compatible import OpenAICompatibleClient
@@ -85,54 +84,3 @@ def build_candidate_review_client(config: RunConfig) -> LLMClient:
         _model("CAMERA_DISCOVERY_CANDIDATE_REVIEW_MODEL", config.candidate_review_model, config),
         timeout=config.candidate_review_timeout,
     )
-
-
-def preflight_llm_client(client: LLMClient) -> dict[str, Any]:
-    preflight = getattr(client, "preflight", None)
-    if callable(preflight):
-        result = preflight()
-        return result if isinstance(result, dict) else {"ok": bool(result), "model": getattr(client, "model", None)}
-    try:
-        raw = client.chat([ChatMessage("user", "Return exactly: ok")], temperature=0.0)  # type: ignore[name-defined]
-        return {"ok": bool(str(raw).strip()), "model": getattr(client, "model", None), "provider": type(client).__name__}
-    except Exception as exc:
-        return {"ok": False, "model": getattr(client, "model", None), "provider": type(client).__name__, "error_type": type(exc).__name__, "error": str(exc)[:1000]}
-
-
-def preflight_llm_services(config: RunConfig) -> dict[str, Any]:
-    stages = {
-        "target_intent": ("CAMERA_DISCOVERY_TARGET_INTENT_PROVIDER", "CAMERA_DISCOVERY_TARGET_INTENT_MODEL", config.target_intent_model, config.target_intent_timeout),
-        "geocoder_referee": ("CAMERA_DISCOVERY_GEOCODER_REFEREE_PROVIDER", "CAMERA_DISCOVERY_GEOCODER_REFEREE_MODEL", config.geocoder_referee_model, config.geocoder_referee_timeout),
-        "location_inference": ("CAMERA_DISCOVERY_LOCATION_INFERENCE_PROVIDER", "CAMERA_DISCOVERY_LOCATION_INFERENCE_MODEL", config.location_inference_model, config.location_inference_timeout),
-        "candidate_review": ("CAMERA_DISCOVERY_CANDIDATE_REVIEW_PROVIDER", "CAMERA_DISCOVERY_CANDIDATE_REVIEW_MODEL", config.candidate_review_model, config.candidate_review_timeout),
-    }
-    summary: dict[str, Any] = {"enabled": bool(getattr(config, "enable_llm_preflight", True)), "stages": {}}
-    if not summary["enabled"]:
-        summary["status"] = "skipped"
-        return summary
-    cache: dict[tuple[str, str | None], dict[str, Any]] = {}
-    for stage, (provider_var, model_var, configured_model, timeout) in stages.items():
-        if stage == "target_intent" and not bool(getattr(config, "enable_target_intent_llm", True)):
-            summary["stages"][stage] = {"ok": True, "status": "skipped", "reason": "target_intent_llm_disabled"}
-            continue
-        if stage == "geocoder_referee" and not bool(getattr(config, "enable_geocoder_referee_llm", True)):
-            summary["stages"][stage] = {"ok": True, "status": "skipped", "reason": "geocoder_referee_llm_disabled"}
-            continue
-        if stage == "location_inference" and not bool(getattr(config, "enable_llm_location_inference", True)):
-            summary["stages"][stage] = {"ok": True, "status": "skipped", "reason": "location_inference_disabled"}
-            continue
-        if stage == "candidate_review" and int(getattr(config, "max_candidate_reviews", 0)) <= 0:
-            summary["stages"][stage] = {"ok": True, "status": "skipped", "reason": "candidate_review_disabled"}
-            continue
-        provider = _provider(provider_var, config)
-        model = _model(model_var, configured_model, config)
-        key = (provider, model)
-        if key not in cache:
-            try:
-                client = build_llm_client(provider, model, timeout=timeout)
-                cache[key] = preflight_llm_client(client)
-            except Exception as exc:
-                cache[key] = {"ok": False, "provider": provider, "model": model, "error_type": type(exc).__name__, "error": str(exc)[:1000]}
-        summary["stages"][stage] = dict(cache[key], provider=provider, model=model)
-    summary["ok"] = all(bool(stage.get("ok")) for stage in summary["stages"].values())
-    return summary

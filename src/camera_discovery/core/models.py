@@ -32,9 +32,6 @@ class RunConfig:
     profile: RuntimeProfile = RuntimeProfile.FAST
     llm_provider: str = "ollama"
     llm_model: str | None = None
-    enable_llm_preflight: bool = True
-    enable_target_intent_llm: bool = True
-    enable_geocoder_referee_llm: bool = True
 
     target_intent_model: str | None = None
     target_intent_timeout: float = 45.0
@@ -80,6 +77,11 @@ class RunConfig:
     block_patterns: list[str] = field(default_factory=list)
     enable_candidate_geocoding: bool = True
     max_candidate_geocodes: int = 25
+
+    # Real image snapshot validation fetches image URLs twice with cache-busting
+    # headers/parameters and compares response freshness. It only runs when
+    # validation is enabled by the selected runtime profile.
+    image_snapshot_refresh_delay_seconds: float = 2.0
 
     @property
     def validation_enabled(self) -> bool:

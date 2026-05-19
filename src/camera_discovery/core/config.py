@@ -78,9 +78,6 @@ def load_run_config(
         profile=selected_profile,
         llm_provider=provider,
         llm_model=llm_model,
-        enable_llm_preflight=_bool_env("CAMERA_DISCOVERY_ENABLE_LLM_PREFLIGHT", True),
-        enable_target_intent_llm=_bool_env("CAMERA_DISCOVERY_ENABLE_TARGET_INTENT_LLM", True),
-        enable_geocoder_referee_llm=_bool_env("CAMERA_DISCOVERY_ENABLE_GEOCODER_REFEREE_LLM", True),
         target_intent_model=_default_target_intent_model(provider, llm_model),
         target_intent_attempts=max(1, _int_env("CAMERA_DISCOVERY_TARGET_INTENT_ATTEMPTS", 1)),
         target_intent_fallback_model=_default_target_intent_fallback_model(provider),
@@ -114,6 +111,7 @@ def load_run_config(
         block_patterns=block_patterns or _split_csv_env("CAMERA_DISCOVERY_BLOCK_PATTERNS"),
         enable_candidate_geocoding=_bool_env("CAMERA_DISCOVERY_ENABLE_CANDIDATE_GEOCODING", True),
         max_candidate_geocodes=_int_env("CAMERA_DISCOVERY_MAX_CANDIDATE_GEOCODES", 25),
+        image_snapshot_refresh_delay_seconds=max(0.0, _float_env("CAMERA_DISCOVERY_IMAGE_SNAPSHOT_REFRESH_DELAY_SECONDS", 2.0)),
     )
 
 

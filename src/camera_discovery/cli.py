@@ -14,7 +14,6 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn
 from camera_discovery.core.config import load_run_config
 from camera_discovery.core.models import CandidateSet, RunState, TrustPolicy
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
-from camera_discovery.llm.factory import preflight_llm_services
 from camera_discovery.services.review_validation_pipeline import ReviewAndValidationPipeline
 from camera_discovery.services.target_resolver import TargetResolver
 from camera_discovery.utils.io import write_json
@@ -221,28 +220,6 @@ def run(
     console.print(f"[bold]Target-intent model:[/bold] {cfg.target_intent_model}")
     console.print(f"[bold]Discovery mode:[/bold] {cfg.discovery_mode.value}")
     console.print(f"[bold]Sources file:[/bold] {cfg.sources_file}")
-
-    llm_preflight = preflight_llm_services(cfg)
-    write_json(cfg.output_dir / "logs" / "llm_preflight.json", llm_preflight)
-    if llm_preflight.get("enabled"):
-        stages = llm_preflight.get("stages", {}) if isinstance(llm_preflight.get("stages"), dict) else {}
-        failed = [name for name, status in stages.items() if not bool(status.get("ok"))]
-        if failed:
-            console.print(f"[yellow]LLM preflight warning:[/yellow] disabling failed LLM stages: {', '.join(failed)}")
-            for name in failed:
-                status = stages.get(name, {})
-                detail = status.get("error") or status.get("error_type") or "unknown error"
-                console.print(f"  - {name}: {detail}")
-            if "target_intent" in failed:
-                cfg.enable_target_intent_llm = False
-            if "geocoder_referee" in failed:
-                cfg.enable_geocoder_referee_llm = False
-            if "location_inference" in failed:
-                cfg.enable_llm_location_inference = False
-            if "candidate_review" in failed:
-                cfg.max_candidate_reviews = 0
-        else:
-            console.print("[bold]LLM preflight:[/bold] OK")
 
     progress_mode = _resolve_progress_mode(
         console,

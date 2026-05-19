@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import csv
 from dataclasses import asdict
-from urllib.parse import urljoin
+import time
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qsl
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import httpx
@@ -51,17 +52,23 @@ class ReviewAndValidationPipeline:
         rows = candidates.in_scope or candidates.review
         for c in rows:
             v.attempted += 1
-            status = self._validate_hls(c.stream_url)
+            status = self._validate_candidate(c)
             c.validation_status = status
-            if status in {"active_live_unknown", "active_live_verified"}:
+            if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing"}:
                 v.live += 1
                 c.trust_level = "trusted" if c.scope_status == "in_scope" else "untrusted"
-            elif status in {"dead_link", "offline_http", "restricted_http", "active_playlist_dead_segments"}:
+            elif status in {"dead_link", "offline_http", "restricted_http", "active_playlist_dead_segments", "static_image_asset", "image_snapshot_not_image"}:
                 v.dead += 1
                 c.trust_level = "rejected"
             else:
                 v.unknown += 1
                 c.trust_level = "untrusted"
+
+    def _validate_candidate(self, candidate: CameraCandidate) -> str:
+        media_type = str((candidate.source_metadata or {}).get("media_type") or "").casefold()
+        if media_type == "image_snapshot":
+            return self._validate_image_snapshot(candidate.stream_url)
+        return self._validate_hls(candidate.stream_url)
 
     def _validate_hls(self, url: str) -> str:
         try:
@@ -97,6 +104,38 @@ class ReviewAndValidationPipeline:
             if clean.endswith(".ts") or clean.endswith(".m3u8"):
                 return urljoin(playlist_url, stripped)
         return None
+
+    def _validate_image_snapshot(self, url: str) -> str:
+        """Validate that an image snapshot endpoint is a real image and appears refreshable.
+
+        This performs live HTTP checks. Static web assets are rejected; image
+        endpoints that return a valid image but do not change during the sampling
+        window remain untrusted/unknown rather than being promoted to live.
+        """
+        if _looks_like_static_snapshot_asset(url):
+            return "static_image_asset"
+        try:
+            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
+                first = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+                first_status = _snapshot_http_status(first)
+                if first_status:
+                    return first_status
+                if _headers_indicate_static_asset(first.headers):
+                    return "static_image_asset"
+                delay = max(0.0, float(getattr(self.config, "image_snapshot_refresh_delay_seconds", 2.0)))
+                if delay:
+                    time.sleep(delay)
+                second = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+                second_status = _snapshot_http_status(second)
+                if second_status:
+                    return second_status
+                if _headers_indicate_static_asset(second.headers):
+                    return "static_image_asset"
+                if _snapshot_responses_differ(first, second):
+                    return "active_image_snapshot_refreshing"
+                return "active_image_snapshot_static_unverified"
+        except Exception:
+            return "dead_link"
 
     def _write_outputs(self, targets: list[TargetContext], target_map: dict[str, TargetContext], candidates: CandidateSet, v: ValidationSummary) -> OutputSummary:
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -134,11 +173,9 @@ class ReviewAndValidationPipeline:
         write_jsonl(self.logs_dir / "validation_results.jsonl", [asdict(c) for c in candidates.unique])
         write_json(self.logs_dir / "validation_summary.json", asdict(v))
         out.map_html = str(self._write_map())
-        out.review_artifacts_zip = str(self.config.output_dir / "review_artifacts.zip")
-        self._write_run_explanation(targets, candidates, v, out)
-        write_json(self.logs_dir / "output_summary.json", asdict(out))
         out.review_artifacts_zip = str(self._package_review_artifacts())
         write_json(self.logs_dir / "output_summary.json", asdict(out))
+        self._write_run_explanation(targets, candidates, v, out)
         return out
 
     def _write_run_explanation(self, targets: list[TargetContext], candidates: CandidateSet, v: ValidationSummary, out: OutputSummary) -> None:
@@ -323,3 +360,66 @@ class ReviewAndValidationPipeline:
                         if p.is_file():
                             z.write(p, str(p.relative_to(self.config.output_dir)))
         return zpath
+
+
+def _looks_like_static_snapshot_asset(url: str) -> bool:
+    lower = url.casefold()
+    static_markers = (
+        "/services/thumb/", "/services/thumbs/", "/thumb/", "/thumbs/", "/thumbnail/", "/thumbnails/",
+        "favicon", "apple-touch-icon", "logo", "sprite", "placeholder", "avatar", "/icons/", "/icon/",
+        "/assets/", "/static/", "/template", "/banner", "seal_", "/seal", "retail",
+    )
+    return any(marker in lower for marker in static_markers)
+
+
+def _cache_busted_url(url: str) -> str:
+    parsed = urlparse(url)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    query.append(("_camera_discovery_refresh", str(time.time_ns())))
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(query), parsed.fragment))
+
+
+def _snapshot_http_status(response: httpx.Response) -> str | None:
+    if response.status_code in {401, 403}:
+        return "restricted_http"
+    if response.status_code >= 400:
+        return "offline_http"
+    content_type = response.headers.get("content-type", "").casefold()
+    body = response.content or b""
+    if not (content_type.startswith("image/") or _bytes_look_like_image(body)):
+        return "image_snapshot_not_image"
+    return None
+
+
+def _bytes_look_like_image(body: bytes) -> bool:
+    if len(body) < 8:
+        return False
+    return (
+        body.startswith(b"\xff\xd8\xff")
+        or body.startswith(b"\x89PNG\r\n\x1a\n")
+        or (body.startswith(b"RIFF") and body[8:12] == b"WEBP")
+        or body.startswith(b"GIF87a")
+        or body.startswith(b"GIF89a")
+    )
+
+
+def _headers_indicate_static_asset(headers: httpx.Headers) -> bool:
+    cache_control = headers.get("cache-control", "").casefold()
+    if "immutable" in cache_control:
+        return True
+    match = __import__("re").search(r"max-age=(\d+)", cache_control)
+    if match and int(match.group(1)) >= 86400:
+        return True
+    return False
+
+
+def _snapshot_responses_differ(first: httpx.Response, second: httpx.Response) -> bool:
+    first_etag = first.headers.get("etag")
+    second_etag = second.headers.get("etag")
+    if first_etag and second_etag and first_etag != second_etag:
+        return True
+    first_modified = first.headers.get("last-modified")
+    second_modified = second.headers.get("last-modified")
+    if first_modified and second_modified and first_modified != second_modified:
+        return True
+    return first.content != second.content
