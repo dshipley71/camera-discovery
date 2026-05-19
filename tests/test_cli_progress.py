@@ -22,9 +22,15 @@ def test_cli_progress_callback_tracks_source_rows():
         callback('source_rows_selected', {'target_label': 'California', 'selected_rows': 3, 'primary_rows': 3})
         callback('source_row_processed', {'target_label': 'California', 'accepted_total': 2, 'hls_count': 1, 'image_snapshot_count': 1})
         callback('source_row_processed', {'target_label': 'California', 'accepted_total': 3, 'hls_count': 2, 'image_snapshot_count': 1})
-        callback('discovery_complete', {'target_label': 'California', 'raw': 3, 'unique': 3, 'coordinate_bearing': 1})
+        callback('coordinate_enrichment_started', {'target_label': 'California', 'unique': 3, 'already_coordinate_bearing': 1})
+        callback('coordinate_candidate_processed', {'target_label': 'California', 'processed': 1, 'total': 3, 'coordinate_bearing': 1, 'metadata_enriched': 0, 'geocode_enriched': 0, 'llm_location_enriched': 0})
+        callback('coordinate_candidate_processed', {'target_label': 'California', 'processed': 2, 'total': 3, 'coordinate_bearing': 2, 'metadata_enriched': 1, 'geocode_enriched': 0, 'llm_location_enriched': 0})
+        callback('coordinate_enrichment_complete', {'target_label': 'California', 'total': 3, 'coordinate_bearing': 2, 'metadata_enriched': 1, 'geocode_enriched': 0, 'llm_location_enriched': 0})
+        callback('discovery_complete', {'target_label': 'California', 'raw': 3, 'unique': 3, 'coordinate_bearing': 2})
     assert state['total'] == 3
     assert state['completed'] == 3
+    assert state['coord_total'] == 3
+    assert state['coord_completed'] == 2
 
 
 def test_cli_plain_progress_callback_is_low_noise(tmp_path):
@@ -78,3 +84,21 @@ def test_cli_run_help_exposes_progress_toggle():
     assert '--progress' in result.stdout
     assert '--no-progress' in result.stdout
     assert '--progress-style' in result.stdout
+
+
+def test_rich_progress_callback_tracks_coordinate_enrichment():
+    console = Console(file=open('/tmp/camera_discovery_coordinate_progress_test.out', 'w'), force_terminal=False)
+    progress = Progress(console=console, transient=True, disable=True)
+    with progress:
+        task_id = progress.add_task('Discovering target', total=None)
+        state = {'total': 0, 'completed': 0}
+        callback = _make_discovery_progress_callback(progress, task_id, state, threading.Lock())
+        callback('coordinate_enrichment_started', {'target_label': 'California', 'unique': 500, 'already_coordinate_bearing': 117})
+        assert state['total'] == 500
+        assert state['completed'] == 0
+        callback('coordinate_candidate_processed', {'target_label': 'California', 'processed': 250, 'total': 500, 'coordinate_bearing': 220, 'metadata_enriched': 10, 'geocode_enriched': 30, 'llm_location_enriched': 20})
+        assert state['completed'] == 250
+        callback('coordinate_enrichment_complete', {'target_label': 'California', 'total': 500, 'coordinate_bearing': 360, 'metadata_enriched': 25, 'geocode_enriched': 80, 'llm_location_enriched': 40})
+        task = progress.tasks[task_id]
+        assert task.completed == 500
+        assert task.total == 500
