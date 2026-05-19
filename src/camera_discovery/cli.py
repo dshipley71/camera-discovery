@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 import typer
 from rich.console import Console
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 
 from camera_discovery.core.config import load_run_config
 from camera_discovery.core.models import CandidateSet, RunState, TrustPolicy
@@ -27,9 +27,11 @@ def _make_progress(console: Console, *, enabled: bool) -> Progress:
     return Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
         MofNCompleteColumn(),
         TimeElapsedColumn(),
+        TimeRemainingColumn(),
         console=console,
         transient=False,
         disable=not enabled,
@@ -40,10 +42,10 @@ def _make_progress(console: Console, *, enabled: bool) -> Progress:
 def _resolve_progress_mode(console: Console, *, enabled: bool, style: str = "auto") -> str:
     """Return rich, plain, or off for progress rendering.
 
-    Rich live progress bars are excellent in real terminals, but they become
-    hundreds of repeated lines when stdout is piped into notebooks or log
-    capture. In auto mode, use Rich only for interactive terminals and a
-    concise milestone renderer everywhere else.
+    Rich live progress bars are used when stdout is attached to a real terminal
+    or pseudo-terminal. Notebooks should run the CLI through a pseudo-terminal
+    when animated bars are desired; otherwise auto mode falls back to the
+    low-noise plain renderer to avoid repeated live-render frames in captured logs.
     """
     if not enabled:
         return "off"
@@ -92,9 +94,48 @@ def _make_discovery_progress_callback(
                 )
                 progress.update(task_id, total=state.get("total") or None, completed=state["completed"], description=description)
             elif event == "coordinate_enrichment_started":
-                progress.update(task_id, description=f"Enriching coordinates for {label}: {payload.get('unique', 0)} unique")
+                total = int(payload.get("unique") or 0)
+                state["coord_total"] = total
+                state["coord_completed"] = 0
+                state["total"] = total
+                state["completed"] = 0
+                progress.update(
+                    task_id,
+                    total=total or None,
+                    completed=0,
+                    description=f"Enriching coordinates for {label}: 0/{total} mapped {payload.get('already_coordinate_bearing', 0)}",
+                )
+            elif event == "coordinate_candidate_processed":
+                completed = int(payload.get("processed") or 0)
+                total = int(payload.get("total") or state.get("coord_total") or 0)
+                state["coord_completed"] = completed
+                state["completed"] = completed
+                description = (
+                    f"Enriching coordinates for {label}: {completed}/{total} "
+                    f"mapped {payload.get('coordinate_bearing', 0)} "
+                    f"| metadata {payload.get('metadata_enriched', 0)} "
+                    f"| geocoded {payload.get('geocode_enriched', 0)} "
+                    f"| LLM {payload.get('llm_location_enriched', 0)}"
+                )
+                progress.update(task_id, total=total or None, completed=completed, description=description)
+            elif event == "coordinate_enrichment_complete":
+                total = int(payload.get("total") or state.get("coord_total") or 0)
+                progress.update(
+                    task_id,
+                    total=total or None,
+                    completed=total,
+                    description=(
+                        f"Coordinates enriched for {label}: mapped {payload.get('coordinate_bearing', 0)}/{total} "
+                        f"| metadata {payload.get('metadata_enriched', 0)} "
+                        f"| geocoded {payload.get('geocode_enriched', 0)} "
+                        f"| LLM {payload.get('llm_location_enriched', 0)}"
+                    ),
+                )
             elif event == "scope_review_started":
-                progress.update(task_id, description=f"Scoping and reviewing {label}")
+                total = int(payload.get("unique") or state.get("coord_total") or 0)
+                state["total"] = total
+                state["completed"] = 0
+                progress.update(task_id, total=total or None, completed=0, description=f"Scoping and reviewing {label}")
             elif event == "discovery_complete":
                 total = max(1, state.get("total", 0), state.get("completed", 0))
                 state["total"] = total
@@ -199,8 +240,8 @@ def run(
     sources_file: Optional[Path] = typer.Option(None, "--sources-file"),
     discovery_mode: str = typer.Option("both", "--discovery-mode", help="blind, directory, both, or direct"),
     block_pattern: Optional[list[str]] = typer.Option(None, "--block-pattern"),
-    show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show progress while resolving, discovering, and writing outputs. Auto mode uses Rich bars in terminals and concise milestone lines in notebooks/logs."),
-    progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, or plain."),
+    show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show progress while resolving, discovering, enriching coordinates, validating, and writing outputs."),
+    progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, or plain. Use rich with a pseudo-terminal for notebook progress bars."),
 ) -> None:
     """Run public-camera discovery for one or more locations in QUERY."""
     cfg = load_run_config(
