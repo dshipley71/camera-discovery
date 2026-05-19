@@ -185,6 +185,12 @@ class TargetResolver:
         return [intent]
 
     def _call_target_intent_llm(self) -> str | None:
+        if not getattr(self.config, "enable_target_intent_llm", True):
+            write_json(
+                self.logs_dir / "target_intent_llm_error.json",
+                {"status": "skipped", "reason": "target_intent_llm_disabled_by_preflight"},
+            )
+            return None
         prompt = self._target_intent_prompt(self.config.query)
         system = ChatMessage("system", "Return compact strict JSON only. No prose.")
         user = ChatMessage("user", prompt)
@@ -370,7 +376,14 @@ class TargetResolver:
         """Ask an LLM to rank candidates semantically without overriding hard gates."""
         if not candidates:
             return
-        client = self.geocoder_referee_client or build_geocoder_referee_client(self.config)
+        if not getattr(self.config, "enable_geocoder_referee_llm", True):
+            write_json(target_logs / "geocoder_referee.json", {"status": "skipped", "reason": "geocoder_referee_llm_disabled_by_preflight"})
+            return
+        try:
+            client = self.geocoder_referee_client or build_geocoder_referee_client(self.config)
+        except Exception as exc:
+            write_json(target_logs / "geocoder_referee.json", {"status": "failed", "error_type": type(exc).__name__, "error": str(exc)[:1000]})
+            return
         payload = [
             {
                 "index": i,
@@ -384,14 +397,18 @@ class TargetResolver:
             }
             for i, c in enumerate(candidates[:12])
         ]
-        raw = client.chat(
-            [
-                ChatMessage("system", "Return strict JSON only. You are an advisory geocoder-candidate referee; you cannot verify geometry."),
-                ChatMessage("user", self._geocoder_referee_prompt(intent, payload)),
-            ],
-            temperature=0.0,
-        )
-        data = extract_json_object(raw)
+        try:
+            raw = client.chat(
+                [
+                    ChatMessage("system", "Return strict JSON only. You are an advisory geocoder-candidate referee; you cannot verify geometry."),
+                    ChatMessage("user", self._geocoder_referee_prompt(intent, payload)),
+                ],
+                temperature=0.0,
+            )
+            data = extract_json_object(raw)
+        except Exception as exc:
+            write_json(target_logs / "geocoder_referee.json", {"status": "failed", "error_type": type(exc).__name__, "error": str(exc)[:1000], "model": getattr(client, "model", None)})
+            return
         write_json(target_logs / "geocoder_referee_llm_raw.json", {"raw": raw, "model": getattr(client, "model", None)})
         write_json(target_logs / "geocoder_referee.json", data)
         rankings = data.get("rankings") if isinstance(data.get("rankings"), list) else []

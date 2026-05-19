@@ -134,9 +134,11 @@ class ReviewAndValidationPipeline:
         write_jsonl(self.logs_dir / "validation_results.jsonl", [asdict(c) for c in candidates.unique])
         write_json(self.logs_dir / "validation_summary.json", asdict(v))
         out.map_html = str(self._write_map())
+        out.review_artifacts_zip = str(self.config.output_dir / "review_artifacts.zip")
+        self._write_run_explanation(targets, candidates, v, out)
+        write_json(self.logs_dir / "output_summary.json", asdict(out))
         out.review_artifacts_zip = str(self._package_review_artifacts())
         write_json(self.logs_dir / "output_summary.json", asdict(out))
-        self._write_run_explanation(targets, candidates, v, out)
         return out
 
     def _write_run_explanation(self, targets: list[TargetContext], candidates: CandidateSet, v: ValidationSummary, out: OutputSummary) -> None:

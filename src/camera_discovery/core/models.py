@@ -32,6 +32,9 @@ class RunConfig:
     profile: RuntimeProfile = RuntimeProfile.FAST
     llm_provider: str = "ollama"
     llm_model: str | None = None
+    enable_llm_preflight: bool = True
+    enable_target_intent_llm: bool = True
+    enable_geocoder_referee_llm: bool = True
 
     target_intent_model: str | None = None
     target_intent_timeout: float = 45.0

@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import math
 import re
 import time
+import warnings
 from dataclasses import asdict
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+try:
+    from bs4 import XMLParsedAsHTMLWarning
+except Exception:  # pragma: no cover - compatibility with older BeautifulSoup releases
+    XMLParsedAsHTMLWarning = UserWarning
 
 from camera_discovery.core.models import CameraCandidate, CandidateSet, DiscoveryMode, RunConfig, TargetContext
 from camera_discovery.llm.base import ChatMessage, LLMClient
@@ -24,6 +30,7 @@ COORD_RE = re.compile(r"(?<!\d)([-+]?\d{1,2}\.\d{3,})\s*,\s*([-+]?\d{1,3}\.\d{3,
 JSON_FEED_HINT_RE = re.compile(r"(?:\.json(?:\?|$)|/api/|/feed|/feeds|/layer|/layers|camera|cameras|mapserver|featureserver)", re.I)
 MAP_LAYER_API_RE = re.compile(r"(?:/MapServer|/FeatureServer|/arcgis/|/api/cameras)", re.I)
 MAX_WORKERS = 8
+COORDINATE_CONFLICT_DISTANCE_MILES = 25.0
 URL_KEYS = {"url", "stream", "stream_url", "streamurl", "hls", "hls_url", "hlsurl", "video", "video_url", "src"}
 IMAGE_KEYS = {"image", "image_url", "imageurl", "snapshot", "snapshot_url", "snapshoturl", "thumbnail", "thumbnail_url", "thumbnailurl", "preview", "preview_url", "poster", "poster_url"}
 LAT_KEYS = {"lat", "latitude", "y", "data_lat", "data_latitude"}
@@ -413,7 +420,7 @@ class CandidateDiscoveryEngine:
         return rows
 
     def _parse_ddg(self, query: str, html: str) -> list[dict[str, str]]:
-        soup = BeautifulSoup(html, "html.parser")
+        soup = _html_soup(html)
         results: list[dict[str, str]] = []
         for anchor in soup.select("a.result__a")[: self.config.max_search_results_per_query]:
             url = self._clean(anchor.get("href") or "")
@@ -580,7 +587,7 @@ class CandidateDiscoveryEngine:
         extraction loses. It also filters obvious site assets such as logos,
         OpenGraph images, and map tiles so they do not become camera candidates.
         """
-        soup = BeautifulSoup(html, "html.parser")
+        soup = _html_soup(html)
         out: list[CameraCandidate] = []
         for tag in soup.select("img, source, video"):
             urls = _media_urls_from_html_tag(tag, url)
@@ -616,7 +623,7 @@ class CandidateDiscoveryEngine:
         return self._dedupe(out)
 
     def _extract_from_linked_feeds(self, url: str, row: dict[str, str], html: str, client: httpx.Client) -> list[CameraCandidate]:
-        soup = BeautifulSoup(html, "html.parser")
+        soup = _html_soup(html)
         hrefs: list[str] = []
         for tag in soup.select("a[href], link[href], script[src]"):
             href = tag.get("href") or tag.get("src") or ""
@@ -838,6 +845,7 @@ class CandidateDiscoveryEngine:
         Nominatim and remain review-only unless downstream trust rules validate
         them.
         """
+        original_coordinate_bearing = sum(1 for c in candidates if c.has_coordinates)
         metadata_enriched = 0
         geocode_attempted = 0
         geocode_enriched = 0
@@ -845,6 +853,8 @@ class CandidateDiscoveryEngine:
         llm_location_attempted = 0
         llm_location_enriched = 0
         llm_location_skipped = 0
+        coordinate_conflict_checked = 0
+        coordinate_conflicts_detected = 0
         diagnostics: list[dict[str, Any]] = []
         geocode_cache: dict[str, tuple[float, float, str] | None] = {}
         effective_max_geocodes = self._effective_candidate_geocode_limit(candidates, target)
@@ -853,6 +863,14 @@ class CandidateDiscoveryEngine:
         location_client: LLMClient | None = self.location_inference_client
         location_client_failed = False
 
+        def cached_geocode(query: str) -> tuple[float, float, str] | None:
+            if query not in geocode_cache:
+                geocode_cache[query] = self._geocode_candidate_location(query)
+            return geocode_cache[query]
+
+        # First pass: preserve the existing coordinate hierarchy. Do not spend the
+        # LLM budget until structured metadata/title geocoding has had a chance to
+        # enrich obvious rows.
         for candidate in candidates:
             if not candidate.has_coordinates:
                 lat_lon = self._candidate_lat_lon_from_existing_evidence(candidate)
@@ -866,124 +884,166 @@ class CandidateDiscoveryEngine:
                 continue
 
             query = self._candidate_geocode_query(candidate, target)
-            if query:
-                if geocode_attempted >= effective_max_geocodes:
-                    geocode_skipped += 1
-                else:
-                    geocode_attempted += 1
-                    if query not in geocode_cache:
-                        geocode_cache[query] = self._geocode_candidate_location(query)
-                    result = geocode_cache[query]
-                    if result is None:
-                        diagnostics.append({"stream_url": candidate.stream_url, "query": query, "stage": "metadata_geocode", "status": "not_resolved"})
-                    else:
+            if not query:
+                geocode_skipped += 1
+                continue
+            if geocode_attempted >= effective_max_geocodes:
+                geocode_skipped += 1
+                continue
+
+            geocode_attempted += 1
+            result = cached_geocode(query)
+            if result is None:
+                diagnostics.append({"stream_url": candidate.stream_url, "query": query, "stage": "metadata_geocode", "status": "not_resolved"})
+                continue
+            lat, lon, display_name = result
+            if _geocode_is_broad_target_level(query, display_name, target):
+                diagnostics.append({"stream_url": candidate.stream_url, "query": query, "stage": "metadata_geocode", "status": "rejected_broad_target_level_geocode", "display_name": display_name})
+                candidate.reasons.append("candidate_geocode_rejected_broad_target_level")
+                continue
+            scope_ok, scope_reason = self._geocode_result_passes_target_scope(lat, lon, display_name, target)
+            if not scope_ok:
+                candidate.reasons.append(scope_reason)
+                diagnostics.append({"stream_url": candidate.stream_url, "query": query, "stage": "metadata_geocode", "status": "outside_target_scope", "display_name": display_name, "scope_reason": scope_reason})
+                continue
+            self._assign_candidate_geocode(
+                candidate,
+                lat,
+                lon,
+                query,
+                display_name,
+                coordinate_source="candidate_geocoder",
+                reason="coordinates_geocoded_from_candidate_metadata",
+                metadata={"geocode_provider": "nominatim", "geocode_scope_status": scope_reason},
+            )
+            geocode_enriched += 1
+            diagnostics.append({"stream_url": candidate.stream_url, "query": query, "stage": "metadata_geocode", "status": "resolved", "display_name": display_name, "lat": lat, "lon": lon, "scope_reason": scope_reason})
+
+        if not getattr(self.config, "enable_llm_location_inference", False):
+            llm_location_skipped += sum(1 for c in candidates if not c.has_coordinates)
+        else:
+            llm_queue = sorted(
+                [c for c in candidates if _candidate_should_consider_llm_location_inference(c)],
+                key=_llm_location_inference_priority,
+                reverse=True,
+            )
+            for candidate in llm_queue:
+                if llm_location_attempted >= max_llm_location_inferences:
+                    llm_location_skipped += 1
+                    diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "skipped_max_llm_location_inferences"})
+                    continue
+                if candidate.has_coordinates and candidate.coordinate_source != "proximity_text":
+                    # Structured/source coordinates remain authoritative and are
+                    # not overwritten or second-guessed by LLM fallback inference.
+                    continue
+                if not _candidate_has_location_inference_evidence(candidate):
+                    llm_location_skipped += 1
+                    diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "skipped_no_location_like_evidence"})
+                    continue
+                if location_client_failed:
+                    llm_location_skipped += 1
+                    continue
+                if location_client is None:
+                    try:
+                        location_client = build_location_inference_client(self.config)
+                    except Exception as exc:
+                        location_client_failed = True
+                        llm_location_skipped += 1
+                        diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "client_unavailable", "error": repr(exc)})
+                        continue
+
+                llm_location_attempted += 1
+                inference = self._infer_candidate_location_names(candidate, target, location_client)
+                if inference.get("status") != "ok":
+                    diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", **inference})
+                    continue
+
+                accepted_or_checked = False
+                for row in inference.get("location_candidates", []):
+                    confidence = _float_or_none(row.get("confidence")) or 0.0
+                    if confidence < min_llm_confidence:
+                        continue
+                    if not _llm_location_evidence_supported(candidate, row):
+                        diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "unsupported_evidence", "candidate": row})
+                        continue
+                    if not _llm_location_candidate_is_specific(row, target):
+                        diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "rejected_broad_or_target_level_inference", "candidate": row})
+                        continue
+                    for inferred_query in self._llm_location_queries(row, target):
+                        if not inferred_query:
+                            continue
+                        result = cached_geocode(inferred_query)
+                        if result is None:
+                            diagnostics.append({"stream_url": candidate.stream_url, "query": inferred_query, "stage": "llm_location_inference", "status": "not_resolved", "candidate": row})
+                            continue
                         lat, lon, display_name = result
+                        if _geocode_is_broad_target_level(inferred_query, display_name, target):
+                            diagnostics.append({"stream_url": candidate.stream_url, "query": inferred_query, "stage": "llm_location_inference", "status": "rejected_broad_target_level_geocode", "display_name": display_name, "candidate": row})
+                            continue
                         scope_ok, scope_reason = self._geocode_result_passes_target_scope(lat, lon, display_name, target)
                         if not scope_ok:
-                            candidate.reasons.append(scope_reason)
-                            diagnostics.append({"stream_url": candidate.stream_url, "query": query, "stage": "metadata_geocode", "status": "outside_target_scope", "display_name": display_name, "scope_reason": scope_reason})
-                        else:
-                            self._assign_candidate_geocode(
-                                candidate,
-                                lat,
-                                lon,
-                                query,
-                                display_name,
-                                coordinate_source="candidate_geocoder",
-                                reason="coordinates_geocoded_from_candidate_metadata",
-                                metadata={"geocode_provider": "nominatim", "geocode_scope_status": scope_reason},
-                            )
-                            geocode_enriched += 1
-                            diagnostics.append({"stream_url": candidate.stream_url, "query": query, "stage": "metadata_geocode", "status": "resolved", "display_name": display_name, "lat": lat, "lon": lon, "scope_reason": scope_reason})
+                            diagnostics.append({"stream_url": candidate.stream_url, "query": inferred_query, "stage": "llm_location_inference", "status": "outside_target_scope", "display_name": display_name, "candidate": row, "scope_reason": scope_reason})
                             continue
-            else:
-                geocode_skipped += 1
 
-            if candidate.has_coordinates:
-                continue
+                        if candidate.has_coordinates and candidate.coordinate_source == "proximity_text":
+                            coordinate_conflict_checked += 1
+                            assert candidate.lat is not None and candidate.lon is not None
+                            distance = _haversine_miles(candidate.lat, candidate.lon, lat, lon)
+                            conflict = {
+                                "existing_coordinate_source": candidate.coordinate_source,
+                                "existing_lat": candidate.lat,
+                                "existing_lon": candidate.lon,
+                                "inferred_lat": lat,
+                                "inferred_lon": lon,
+                                "distance_miles": round(distance, 3),
+                                "threshold_miles": COORDINATE_CONFLICT_DISTANCE_MILES,
+                                "geocode_query": inferred_query,
+                                "geocoded_display_name": display_name,
+                                "llm_location_inference": row,
+                            }
+                            if distance > COORDINATE_CONFLICT_DISTANCE_MILES:
+                                candidate.source_metadata["coordinate_conflict"] = conflict
+                                candidate.reasons.append("coordinate_conflict_between_proximity_text_and_llm_geocode")
+                                coordinate_conflicts_detected += 1
+                                diagnostics.append({"stream_url": candidate.stream_url, "query": inferred_query, "stage": "llm_location_inference", "status": "coordinate_conflict_review", **conflict})
+                            else:
+                                candidate.source_metadata["coordinate_corroboration"] = conflict
+                                candidate.reasons.append("proximity_coordinate_corroborated_by_llm_url_geocode")
+                                diagnostics.append({"stream_url": candidate.stream_url, "query": inferred_query, "stage": "llm_location_inference", "status": "coordinate_corroborated", **conflict})
+                            accepted_or_checked = True
+                            break
 
-            if not getattr(self.config, "enable_llm_location_inference", False):
-                llm_location_skipped += 1
-                continue
-            if llm_location_attempted >= max_llm_location_inferences:
-                llm_location_skipped += 1
-                diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "skipped_max_llm_location_inferences"})
-                continue
-            if not _candidate_has_location_inference_evidence(candidate):
-                llm_location_skipped += 1
-                diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "skipped_no_location_like_evidence"})
-                continue
-            if location_client_failed:
-                llm_location_skipped += 1
-                continue
-            if location_client is None:
-                try:
-                    location_client = build_location_inference_client(self.config)
-                except Exception as exc:
-                    location_client_failed = True
-                    llm_location_skipped += 1
-                    diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "client_unavailable", "error": repr(exc)})
-                    continue
-
-            llm_location_attempted += 1
-            inference = self._infer_candidate_location_names(candidate, target, location_client)
-            if inference.get("status") != "ok":
-                diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", **inference})
-                continue
-
-            accepted = False
-            for row in inference.get("location_candidates", []):
-                confidence = _float_or_none(row.get("confidence")) or 0.0
-                if confidence < min_llm_confidence:
-                    continue
-                if not _llm_location_evidence_supported(candidate, row):
-                    diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "unsupported_evidence", "candidate": row})
-                    continue
-                for inferred_query in self._llm_location_queries(row, target):
-                    if not inferred_query:
-                        continue
-                    if inferred_query not in geocode_cache:
-                        geocode_cache[inferred_query] = self._geocode_candidate_location(inferred_query)
-                    result = geocode_cache[inferred_query]
-                    if result is None:
-                        diagnostics.append({"stream_url": candidate.stream_url, "query": inferred_query, "stage": "llm_location_inference", "status": "not_resolved", "candidate": row})
-                        continue
-                    lat, lon, display_name = result
-                    scope_ok, scope_reason = self._geocode_result_passes_target_scope(lat, lon, display_name, target)
-                    if not scope_ok:
-                        diagnostics.append({"stream_url": candidate.stream_url, "query": inferred_query, "stage": "llm_location_inference", "status": "outside_target_scope", "display_name": display_name, "candidate": row, "scope_reason": scope_reason})
-                        continue
-                    self._assign_candidate_geocode(
-                        candidate,
-                        lat,
-                        lon,
-                        inferred_query,
-                        display_name,
-                        coordinate_source="llm_url_location_nominatim",
-                        reason="coordinates_geocoded_from_llm_inferred_location_name",
-                        metadata={
-                            "geocode_provider": "nominatim",
-                            "geocode_scope_status": scope_reason,
-                            "llm_location_inference": row,
-                            "llm_location_inference_model": getattr(location_client, "model", None),
-                            "llm_location_inference_queries": self._llm_location_queries(row, target),
-                            "coordinate_precision": row.get("precision") or "place_or_intersection",
-                        },
-                    )
-                    llm_location_enriched += 1
-                    accepted = True
-                    diagnostics.append({"stream_url": candidate.stream_url, "query": inferred_query, "stage": "llm_location_inference", "status": "resolved", "display_name": display_name, "lat": lat, "lon": lon, "confidence": confidence, "scope_reason": scope_reason})
-                    break
-                if accepted:
-                    break
-            if not accepted:
-                diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "no_accepted_geocode", "inference": inference})
+                        self._assign_candidate_geocode(
+                            candidate,
+                            lat,
+                            lon,
+                            inferred_query,
+                            display_name,
+                            coordinate_source="llm_url_location_nominatim",
+                            reason="coordinates_geocoded_from_llm_inferred_location_name",
+                            metadata={
+                                "geocode_provider": "nominatim",
+                                "geocode_scope_status": scope_reason,
+                                "llm_location_inference": row,
+                                "llm_location_inference_model": getattr(location_client, "model", None),
+                                "llm_location_inference_queries": self._llm_location_queries(row, target),
+                                "coordinate_precision": row.get("precision") or "place_or_intersection",
+                            },
+                        )
+                        llm_location_enriched += 1
+                        accepted_or_checked = True
+                        diagnostics.append({"stream_url": candidate.stream_url, "query": inferred_query, "stage": "llm_location_inference", "status": "resolved", "display_name": display_name, "lat": lat, "lon": lon, "confidence": confidence, "scope_reason": scope_reason})
+                        break
+                    if accepted_or_checked:
+                        break
+                if not accepted_or_checked:
+                    diagnostics.append({"stream_url": candidate.stream_url, "stage": "llm_location_inference", "status": "no_accepted_geocode", "inference": inference})
 
         write_json(
             self.logs_dir / "candidate_coordinate_enrichment.json",
             {
                 "candidates": len(candidates),
-                "already_coordinate_bearing": sum(1 for c in candidates if c.has_coordinates) - metadata_enriched - geocode_enriched - llm_location_enriched,
+                "already_coordinate_bearing": original_coordinate_bearing,
                 "metadata_enriched": metadata_enriched,
                 "geocode_attempted": geocode_attempted,
                 "geocode_enriched": geocode_enriched,
@@ -991,13 +1051,15 @@ class CandidateDiscoveryEngine:
                 "llm_location_attempted": llm_location_attempted,
                 "llm_location_enriched": llm_location_enriched,
                 "llm_location_skipped": llm_location_skipped,
+                "coordinate_conflict_checked": coordinate_conflict_checked,
+                "coordinate_conflicts_detected": coordinate_conflicts_detected,
                 "enable_llm_location_inference": getattr(self.config, "enable_llm_location_inference", False),
                 "max_llm_location_inferences": max_llm_location_inferences,
                 "llm_location_inference_min_confidence": min_llm_confidence,
                 "max_candidate_geocodes": self.config.max_candidate_geocodes,
                 "effective_max_candidate_geocodes": effective_max_geocodes,
                 "enable_candidate_geocoding": self.config.enable_candidate_geocoding,
-                "diagnostics": diagnostics[:300],
+                "diagnostics": diagnostics[:500],
             },
         )
 
@@ -1189,8 +1251,12 @@ class CandidateDiscoveryEngine:
         for candidate in candidates:
             if candidate.has_coordinates and bbox:
                 if bbox["min_lat"] <= candidate.lat <= bbox["max_lat"] and bbox["min_lon"] <= candidate.lon <= bbox["max_lon"]:
-                    candidate.scope_status = "in_scope"
-                    candidate.reasons.append("coordinate_inside_verified_bbox")
+                    if isinstance(candidate.source_metadata.get("coordinate_conflict"), dict):
+                        candidate.scope_status = "review"
+                        candidate.reasons.append("coordinate_inside_bbox_but_conflict_requires_review")
+                    else:
+                        candidate.scope_status = "in_scope"
+                        candidate.reasons.append("coordinate_inside_verified_bbox")
                 else:
                     candidate.scope_status = "out_of_scope"
                     candidate.trust_level = "rejected"
@@ -1374,6 +1440,13 @@ class CandidateDiscoveryEngine:
 
 
 
+def _html_soup(text: str) -> BeautifulSoup:
+    """Parse HTML while suppressing XMLParsedAsHTMLWarning for XML-ish feeds."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+        return BeautifulSoup(text, "html.parser")
+
+
 def _looks_like_json_response(url: str, content_type: str, text: str) -> bool:
     ctype = content_type.casefold()
     if "json" in ctype:
@@ -1396,7 +1469,8 @@ def _record_media_urls(record: dict[str, Any], base_url: str) -> list[tuple[str,
             if _looks_like_hls(absolute) or key_norm in URL_KEYS and ".m3u8" in absolute.casefold():
                 urls.append((absolute, "hls"))
             elif _looks_like_image(absolute) or key_norm in IMAGE_KEYS:
-                urls.append((absolute, "image_snapshot"))
+                if not _looks_like_non_camera_asset(absolute):
+                    urls.append((absolute, "image_snapshot"))
     return _dedupe_media_urls(urls)
 
 
@@ -1520,7 +1594,7 @@ def _media_urls_from_attribute(value: str, base_url: str) -> list[tuple[str, str
     absolute = urljoin(base_url, value.strip())
     if _looks_like_hls(absolute):
         return [(absolute, "hls")]
-    if _looks_like_image(absolute):
+    if _looks_like_image(absolute) and not _looks_like_non_camera_asset(absolute):
         return [(absolute, "image_snapshot")]
     return []
 
@@ -1559,16 +1633,30 @@ def _first_nonempty(*values: Any) -> str | None:
 
 def _looks_like_non_camera_asset(url: str) -> bool:
     lower = url.casefold()
+    parsed = urlparse(url)
+    path = unquote(parsed.path).casefold()
+    name = path.rsplit("/", 1)[-1]
     asset_markers = (
-        "og-default", "open_graph", "opengraph", "favicon", "logo", "sprite", "placeholder",
-        "avatar", "basemap", "/dark_all/", "/light_all/", "/tile/", "/tiles/", "cartocdn.com",
-        "openstreetmap.org/", "leaflet", "mapbox", "googleapis.com", "gstatic.com",
+        "og-default", "open_graph", "opengraph", "favicon", "apple-touch-icon",
+        "logo", "site-logo", "seal", "sprite", "placeholder", "avatar",
+        "banner", "template", "template2014", "loading", "spinner", "button",
+        "basemap", "/dark_all/", "/light_all/", "/tile/", "/tiles/",
+        "cartocdn.com", "openstreetmap.org/", "leaflet", "mapbox",
+        "googleapis.com", "gstatic.com", "/assets/", "/static/",
     )
     if any(marker in lower for marker in asset_markers):
         return True
-    path = urlparse(url).path.casefold()
-    name = path.rsplit("/", 1)[-1]
-    if name in {"default.png", "default.jpg", "blank.png", "blank.jpg", "loading.gif"}:
+    generic_names = {
+        "default.png", "default.jpg", "blank.png", "blank.jpg", "loading.gif",
+        "icon.png", "icon.jpg", "camera-icon.png", "camera_icon.png",
+        "transparent.png", "pixel.png", "spacer.gif", "seal_dot.png",
+    }
+    if name in generic_names:
+        return True
+    stem = name.rsplit(".", 1)[0]
+    if re.fullmatch(r"(?:icon|icons|logo|seal|sprite|banner|placeholder|apple-touch-icon)(?:[-_@0-9a-z]*)?", stem):
+        return True
+    if re.search(r"/(?:css|js|img|images|assets|static|template|themes?)/", path) and not re.search(r"/(?:cam|camera|cameras|cctv|webcam|traffic|snapshot|snapshots)/", path):
         return True
     return False
 
@@ -1824,6 +1912,105 @@ def _specific_candidate_location_text(value: str, target: TargetContext) -> bool
         return False
     return any(ch.isalpha() for ch in text) and (has_specific_clue or not generic_camera_page)
 
+
+
+def _candidate_should_consider_llm_location_inference(candidate: CameraCandidate) -> bool:
+    if _candidate_media_type(candidate) != "hls" and _looks_like_non_camera_asset(candidate.stream_url):
+        return False
+    if candidate.has_coordinates and candidate.coordinate_source != "proximity_text":
+        return False
+    return _candidate_has_location_inference_evidence(candidate)
+
+
+def _llm_location_inference_priority(candidate: CameraCandidate) -> tuple[int, int, int, int, int]:
+    media_hls = 1 if _candidate_media_type(candidate) == "hls" else 0
+    missing_coords = 1 if not candidate.has_coordinates else 0
+    proximity_coord = 1 if candidate.coordinate_source == "proximity_text" else 0
+    slug_score = _location_slug_score(candidate.stream_url)
+    metadata_score = 1 if any(isinstance(v, str) and v.strip() for v in (candidate.title, candidate.location_text, candidate.source_metadata.get("source_name"))) else 0
+    return (media_hls, missing_coords, proximity_coord, slug_score, metadata_score)
+
+
+def _location_slug_score(url: str) -> int:
+    parsed = urlparse(url)
+    path = unquote(parsed.path)
+    score = 0
+    if re.search(r"\.m3u8(?:$|\?)", url, re.I):
+        score += 1
+    if re.search(r"\b(?:I|SR|US)[-_ ]?\d+\b", path, re.I):
+        score += 2
+    if re.search(r"\b(?:NB|SB|EB|WB|northbound|southbound|eastbound|westbound)\b", path, re.I):
+        score += 1
+    tokens = [t for t in re.split(r"[^A-Za-z0-9]+", path) if t]
+    human_tokens = [t for t in tokens if re.search(r"[A-Za-z]", t) and len(t) >= 4 and t.casefold() not in {"stream", "playlist", "camera", "cameras", "image", "images", "snapshot", "snapshots", "data", "static", "assets"}]
+    if human_tokens:
+        score += min(4, len(human_tokens))
+    return score
+
+
+def _llm_location_candidate_is_specific(row: dict[str, Any], target: TargetContext) -> bool:
+    precision = str(row.get("precision") or "").casefold()
+    if precision in {"state", "region", "country", "target"}:
+        return False
+    queries = [str(row.get("query") or "")]
+    variants = row.get("variants")
+    if isinstance(variants, list):
+        queries.extend(str(v) for v in variants if isinstance(v, str))
+    return any(_geocode_query_has_specific_place_component(q, target) for q in queries)
+
+
+def _geocode_query_has_specific_place_component(query: str, target: TargetContext) -> bool:
+    normalized = _normalize_place_text(query)
+    if not normalized:
+        return False
+    target_values = [_normalize_place_text(v) for v in (target.canonical_target, target.target_label, target.admin_region, target.country) if isinstance(v, str)]
+    if normalized in {v for v in target_values if v}:
+        return False
+    remainder = normalized
+    for value in sorted([v for v in target_values if v], key=len, reverse=True):
+        remainder = re.sub(rf"\b{re.escape(value)}\b", " ", remainder)
+    remainder_tokens = [t for t in remainder.split() if t not in {"united", "states", "usa", "state", "county", "province", "region"}]
+    if len(remainder_tokens) >= 1 and any(len(t) >= 3 for t in remainder_tokens):
+        return True
+    return bool(re.search(r"\b(?:I|SR|US)\s*-?\s*\d+\b|\b(?:at|near|and|@)\b|\b(?:Street|St|Road|Rd|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Highway|Hwy)\b", query, re.I))
+
+
+def _geocode_is_broad_target_level(query: str, display_name: str, target: TargetContext) -> bool:
+    query_norm = _normalize_place_text(query)
+    display_norm = _normalize_place_text(display_name)
+    target_values = [_normalize_place_text(v) for v in (target.canonical_target, target.target_label, target.admin_region, target.country) if isinstance(v, str)]
+    target_set = {v for v in target_values if v}
+    if query_norm in target_set or display_norm in target_set:
+        return True
+    broad_display_values = {
+        _normalize_place_text(", ".join([a, b]))
+        for a in target_set
+        for b in target_set
+        if a and b and a != b
+    }
+    if display_norm in broad_display_values:
+        return True
+    if not _geocode_query_has_specific_place_component(query, target):
+        return True
+    return False
+
+
+def _normalize_place_text(value: str | None) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.casefold()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius_miles = 3958.7613
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * radius_miles * math.asin(min(1.0, math.sqrt(a)))
 
 
 def _limited_scalar_metadata(metadata: dict[str, Any], *, max_items: int = 40, max_value_len: int = 500) -> dict[str, Any]:
