@@ -66,7 +66,7 @@ def load_geojson(path: Path) -> dict[str, Any]:
 
 
 def load_camera_rows(path: Path) -> list[dict[str, Any]]:
-    """Flatten camera GeoJSON features into rows suitable for notebook display."""
+    """Flatten camera GeoJSON features into rows suitable for tabular display."""
     return geojson_features_to_rows(load_geojson(path))
 
 

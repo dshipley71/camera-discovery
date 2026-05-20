@@ -26,6 +26,7 @@ def _cfg(tmp_path, **overrides):
         "llm_model": "gemma4:31b-cloud",
         "enable_candidate_geocoding": True,
         "enable_llm_location_inference": True,
+        "max_llm_location_inferences": 5,
         "llm_location_inference_min_confidence": 0.7,
         "max_candidate_geocodes": 5,
     }

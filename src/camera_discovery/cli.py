@@ -18,18 +18,12 @@ from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
 from camera_discovery.services.review_validation_pipeline import ReviewAndValidationPipeline
 from camera_discovery.services.target_resolver import TargetResolver
 from camera_discovery.utils.io import write_json
-import json
+from camera_discovery.core.progress_events import emit_progress_event
 
 app = typer.Typer(help="Simplified public camera discovery pipeline", no_args_is_help=True)
 console = Console()
-PROGRESS_EVENT_PREFIX = "__CAMERA_DISCOVERY_PROGRESS__ "
-
-
-def _emit_notebook_progress_event(event: str, payload: dict[str, Any] | None = None) -> None:
-    """Emit a machine-readable progress event for notebook-native rendering."""
-    message = {"event": event, "payload": payload or {}}
-    sys.stdout.write(PROGRESS_EVENT_PREFIX + json.dumps(message, default=str, sort_keys=True) + "\n")
-    sys.stdout.flush()
+def _emit_progress_stream_event(event: str, payload: dict[str, Any] | None = None) -> None:
+    emit_progress_event(event, payload)
 
 
 def _make_progress(console: Console, *, enabled: bool) -> Progress:
@@ -49,22 +43,20 @@ def _make_progress(console: Console, *, enabled: bool) -> Progress:
 
 
 def _resolve_progress_mode(console: Console, *, enabled: bool, style: str = "auto") -> str:
-    """Return rich, plain, notebook, or off for progress rendering.
+    """Return rich, plain, events, or off for progress rendering.
 
-    Rich live progress bars are used when stdout is attached to a real terminal
-    or pseudo-terminal. Notebooks should run the CLI through a pseudo-terminal
-    when animated bars are desired; otherwise auto mode falls back to the
-    low-noise plain renderer to avoid repeated live-render frames in captured logs.
+    Rich live progress bars are used only when stdout is attached to a real
+    terminal. The events mode emits machine-readable progress records for any
+    external UI adapter that wants to render stable progress without terminal
+    control sequences.
     """
     if not enabled:
         return "off"
     normalized = (style or "auto").strip().casefold()
-    if normalized not in {"auto", "rich", "plain", "notebook"}:
-        raise typer.BadParameter("progress style must be one of: auto, rich, plain, notebook")
+    if normalized not in {"auto", "rich", "plain", "events"}:
+        raise typer.BadParameter("progress style must be one of: auto, rich, plain, events")
     if normalized == "auto":
-        # FORCE_COLOR can make Rich consider a pipe terminal-like, which is
-        # exactly what creates repeated live-render frames in notebooks. Require
-        # both Rich terminal support and an actual TTY file descriptor for live bars.
+        # Require both Rich terminal support and an actual TTY file descriptor for live bars.
         file_is_tty = bool(getattr(console.file, "isatty", lambda: False)())
         return "rich" if console.is_terminal and file_is_tty else "plain"
     return normalized
@@ -167,7 +159,7 @@ def _make_plain_discovery_progress_callback(
     state: dict[str, int],
     lock: threading.Lock,
 ):
-    """Create a low-noise progress callback for notebooks, pipes, and logs."""
+    """Create a low-noise progress callback for pipes and logs."""
 
     def _bucket(completed: int, total: int) -> int:
         if total <= 0:
@@ -235,122 +227,15 @@ def _make_plain_discovery_progress_callback(
     return callback
 
 
-def _make_notebook_discovery_progress_callback(lock: threading.Lock):
-    """Emit discovery progress events for a notebook-native renderer.
-
-    This avoids Rich live-render escape sequences in notebook subprocess output.
-    The notebook updates a single HTML progress panel in place instead of
-    printing one line for every refresh frame.
-    """
+def _make_event_stream_discovery_progress_callback(lock: threading.Lock):
+    """Emit discovery progress events for external progress renderers."""
 
     def callback(event: str, payload: dict[str, Any]) -> None:
         with lock:
-            _emit_notebook_progress_event(event, payload)
+            _emit_progress_stream_event(event, payload)
 
     return callback
 
-
-
-
-def _make_rich_validation_progress_callback(progress: Progress, lock: threading.Lock):
-    tasks: dict[str, int] = {}
-    state: dict[str, Any] = {"counts": {}}
-
-    def _counts(payload: dict[str, Any]) -> str:
-        return (
-            f"live {payload.get('live', 0)} | dead {payload.get('dead', 0)} | "
-            f"restricted {payload.get('restricted', 0)} | decode {payload.get('decode_failed', 0)} | "
-            f"static {payload.get('static_image_asset', 0)} | unknown {payload.get('unknown', 0)}"
-        )
-
-    def callback(event: str, payload: dict[str, Any]) -> None:
-        with lock:
-            if event == "validation_candidates_selected":
-                state["selected"] = payload
-            elif event == "hls_validation_started":
-                total = int(payload.get("total") or 0)
-                tasks["hls"] = progress.add_task(f"Validating HLS playlists — {_counts(payload)}", total=total or 1)
-                if total == 0:
-                    progress.update(tasks["hls"], completed=1)
-            elif event == "hls_validation_processed":
-                task = tasks.get("hls")
-                if task is not None:
-                    progress.update(task, completed=int(payload.get("processed") or 0), description=f"Validating HLS playlists — {_counts(payload)}")
-            elif event == "hls_validation_complete":
-                task = tasks.get("hls")
-                if task is not None:
-                    total = int(payload.get("total") or 0)
-                    progress.update(task, completed=total or 1, description=f"HLS validation complete — {_counts(payload)}")
-            elif event == "image_validation_started":
-                total = int(payload.get("total") or 0)
-                tasks["image"] = progress.add_task(f"Validating image snapshots — {_counts(payload)}", total=total or 1)
-                if total == 0:
-                    progress.update(tasks["image"], completed=1)
-            elif event == "image_validation_processed":
-                task = tasks.get("image")
-                if task is not None:
-                    progress.update(task, completed=int(payload.get("processed") or 0), description=f"Validating image snapshots — {_counts(payload)}")
-            elif event == "image_validation_complete":
-                task = tasks.get("image")
-                if task is not None:
-                    total = int(payload.get("total") or 0)
-                    progress.update(task, completed=total or 1, description=f"Image validation complete — {_counts(payload)}")
-            elif event == "output_writing_started":
-                tasks["outputs"] = progress.add_task("Writing outputs", total=5)
-            elif event == "output_writing_step":
-                task = tasks.get("outputs")
-                if task is not None:
-                    completed = min(5, int(progress.tasks[task].completed) + 1)
-                    progress.update(task, completed=completed, description=f"Writing outputs — {payload.get('step', 'step')}")
-            elif event == "artifact_packaging_started":
-                task = tasks.get("outputs")
-                if task is not None:
-                    progress.update(task, completed=4, description="Packaging review artifacts")
-            elif event == "artifact_packaging_complete":
-                task = tasks.get("outputs")
-                if task is not None:
-                    progress.update(task, completed=5, description="Outputs packaged")
-    return callback
-
-
-def _make_plain_validation_progress_callback(console: Console, lock: threading.Lock):
-    state: dict[str, int] = {"hls_bucket": -1, "image_bucket": -1}
-
-    def _bucket(done: int, total: int) -> int:
-        return 10 if total <= 0 else min(10, int((done / total) * 10))
-
-    def callback(event: str, payload: dict[str, Any]) -> None:
-        with lock:
-            if event == "hls_validation_started":
-                console.print(f"Progress: validating HLS playlists ({payload.get('total', 0)} candidates)...")
-            elif event == "hls_validation_processed":
-                done = int(payload.get("processed") or 0); total = int(payload.get("total") or 0)
-                b = _bucket(done, total)
-                if b != state.get("hls_bucket"):
-                    state["hls_bucket"] = b
-                    console.print(f"Progress: HLS validation {done}/{total} · live {payload.get('live', 0)} · dead {payload.get('dead', 0)} · restricted {payload.get('restricted', 0)} · decode {payload.get('decode_failed', 0)}")
-            elif event == "image_validation_started":
-                console.print(f"Progress: validating image snapshots ({payload.get('total', 0)} candidates)...")
-            elif event == "image_validation_processed":
-                done = int(payload.get("processed") or 0); total = int(payload.get("total") or 0)
-                b = _bucket(done, total)
-                if b != state.get("image_bucket"):
-                    state["image_bucket"] = b
-                    console.print(f"Progress: image validation {done}/{total} · live {payload.get('live', 0)} · static {payload.get('static_image_asset', 0)} · unknown {payload.get('unknown', 0)}")
-            elif event == "output_writing_started":
-                console.print("Progress: writing outputs...")
-            elif event == "artifact_packaging_started":
-                console.print("Progress: packaging review artifacts...")
-            elif event == "artifact_packaging_complete":
-                console.print("Progress: review artifacts packaged.")
-    return callback
-
-
-def _make_notebook_validation_progress_callback(lock: threading.Lock):
-    def callback(event: str, payload: dict[str, Any]) -> None:
-        with lock:
-            _emit_notebook_progress_event(event, payload)
-    return callback
 
 @app.callback()
 def main() -> None:
@@ -367,7 +252,7 @@ def run(
     discovery_mode: str = typer.Option("both", "--discovery-mode", help="blind, directory, both, or direct"),
     block_pattern: Optional[list[str]] = typer.Option(None, "--block-pattern"),
     show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show progress while resolving, discovering, enriching coordinates, validating, and writing outputs."),
-    progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, plain, or notebook. Use notebook for stable in-place Jupyter/Colab progress bars."),
+    progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, plain, or events. Use events for machine-readable progress records consumed by external UIs."),
 ) -> None:
     """Run public-camera discovery for one or more locations in QUERY."""
     cfg = load_run_config(
@@ -401,8 +286,8 @@ def run(
             resolve_task = progress.add_task("Resolving targets", total=1)
         elif progress_mode == "plain":
             console.print("Progress: resolving targets...")
-        elif progress_mode == "notebook":
-            _emit_notebook_progress_event("target_resolution_started", {"completed": 0, "total": 1, "description": "Resolving targets"})
+        elif progress_mode == "events":
+            _emit_progress_stream_event("target_resolution_started", {"completed": 0, "total": 1, "description": "Resolving targets"})
 
         targets = TargetResolver(cfg).resolve_all()
 
@@ -411,8 +296,8 @@ def run(
             progress.update(resolve_task, completed=1, description="Resolved targets")
         elif progress_mode == "plain":
             console.print(f"Progress: resolved {len(targets)} target(s).")
-        elif progress_mode == "notebook":
-            _emit_notebook_progress_event("target_resolution_complete", {"completed": len(targets), "total": max(1, len(targets)), "targets": len(targets)})
+        elif progress_mode == "events":
+            _emit_progress_stream_event("target_resolution_complete", {"completed": len(targets), "total": max(1, len(targets)), "targets": len(targets)})
 
         state.targets = targets
         state.target = targets[0] if targets else None
@@ -440,8 +325,8 @@ def run(
                 target_tasks[target.target_id] = progress.add_task(f"Discovering {label}", total=None)
             elif progress_mode == "plain":
                 console.print(f"Progress: discovering {label}...")
-            elif progress_mode == "notebook":
-                _emit_notebook_progress_event("target_discovery_started", {"target_id": target.target_id, "target_label": label})
+            elif progress_mode == "events":
+                _emit_progress_stream_event("target_discovery_started", {"target_id": target.target_id, "target_label": label})
             target_progress_state[target.target_id] = {"total": 0, "completed": 0}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(runnable_targets))) as pool:
@@ -462,8 +347,8 @@ def run(
                         target_progress_state[target.target_id],
                         progress_lock,
                     )
-                elif progress_mode == "notebook":
-                    callback = _make_notebook_discovery_progress_callback(progress_lock)
+                elif progress_mode == "events":
+                    callback = _make_event_stream_discovery_progress_callback(progress_lock)
                 engine = CandidateDiscoveryEngine(cfg, progress_callback=callback)
                 futures[pool.submit(engine.discover, target)] = target
             for future in concurrent.futures.as_completed(futures):
@@ -486,27 +371,24 @@ def run(
             f"coordinate_bearing={len(merged.coordinate_bearing)} targets={len(per_target_sets)}"
         )
 
-        validation_callback = None
         if progress_mode == "rich":
             assert progress is not None
-            validation_callback = _make_rich_validation_progress_callback(progress, progress_lock)
+            validation_task = progress.add_task("Validating streams and writing outputs", total=1)
         elif progress_mode == "plain":
-            validation_callback = _make_plain_validation_progress_callback(console, progress_lock)
-        elif progress_mode == "notebook":
-            validation_callback = _make_notebook_validation_progress_callback(progress_lock)
-        validation, outputs = ReviewAndValidationPipeline(cfg, progress_callback=validation_callback).run(runnable_targets, merged)
+            console.print("Progress: validating streams and writing outputs...")
+        elif progress_mode == "events":
+            _emit_progress_stream_event("validation_started", {"completed": 0, "total": 1, "description": "Validating streams and writing outputs"})
+        validation, outputs = ReviewAndValidationPipeline(cfg).run(runnable_targets, merged)
+        if progress_mode == "rich":
+            assert progress is not None
+            progress.update(validation_task, completed=1, description="Validation and outputs complete")
+        elif progress_mode == "plain":
+            console.print("Progress: validation and outputs complete.")
+        elif progress_mode == "events":
+            _emit_progress_stream_event("validation_complete", {"completed": 1, "total": 1, "description": "Validation and outputs complete"})
     state.validation = validation
     state.outputs = outputs
     write_json(cfg.output_dir / "logs" / "run_summary.json", state.to_dict())
-    write_json(cfg.output_dir / "logs" / "output_summary.json", state.outputs.__dict__)
-    # Repackage once run-level diagnostics are written. Notebook-created logs are
-    # also included when present in the output directory.
-    try:
-        outputs.review_artifacts_zip = str(ReviewAndValidationPipeline(cfg)._package_review_artifacts())
-        state.outputs = outputs
-        write_json(cfg.output_dir / "logs" / "output_summary.json", state.outputs.__dict__)
-    except Exception as exc:
-        state.warnings.append(f"review_artifacts_repackage_failed: {exc!r}")
     console.print(
         f"[bold]Trusted GeoJSON:[/bold] {outputs.trusted_geojson_created} "
         f"features={outputs.trusted_geojson_features_written}"
