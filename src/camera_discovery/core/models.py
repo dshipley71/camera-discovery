@@ -67,7 +67,7 @@ class RunConfig:
     max_directory_pages: int = 8
     max_structured_endpoints_per_page: int = 20
     asset_host_promotion_threshold: int = 3
-    max_state_scale_candidate_geocodes: int = 250
+    max_state_scale_candidate_geocodes: int = 150
     http_timeout: float = 20.0
     user_agent: str = "camera-discovery/0.1 (+public-camera-research)"
     allow_untrusted_review_output: bool = True
@@ -76,7 +76,7 @@ class RunConfig:
     discovery_mode: DiscoveryMode = DiscoveryMode.BOTH
     block_patterns: list[str] = field(default_factory=list)
     enable_candidate_geocoding: bool = True
-    max_candidate_geocodes: int = 25
+    max_candidate_geocodes: int = 150
 
     # Real image snapshot validation fetches image URLs twice with cache-busting
     # headers/parameters and compares response freshness. It only runs when

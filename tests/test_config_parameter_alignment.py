@@ -11,6 +11,8 @@ _PARAMETER_ENV_VARS = [
     "CAMERA_DISCOVERY_MAX_LLM_LOCATION_INFERENCES",
     "CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS",
     "CAMERA_DISCOVERY_MAX_STREAMS",
+    "CAMERA_DISCOVERY_MAX_CANDIDATE_GEOCODES",
+    "CAMERA_DISCOVERY_MAX_STATE_SCALE_CANDIDATE_GEOCODES",
 ]
 
 
@@ -32,6 +34,8 @@ def test_candidate_budget_defaults_align_to_hls_plus_image_snapshot_caps(tmp_pat
     assert cfg.max_llm_location_inferences == 10
     assert cfg.max_candidate_reviews == 10
     assert cfg.max_streams == 10
+    assert cfg.max_candidate_geocodes == 10
+    assert cfg.max_state_scale_candidate_geocodes == 10
 
 
 def test_candidate_budget_explicit_overrides_are_still_honored(tmp_path, monkeypatch):
@@ -41,12 +45,16 @@ def test_candidate_budget_explicit_overrides_are_still_honored(tmp_path, monkeyp
     monkeypatch.setenv("CAMERA_DISCOVERY_MAX_TOTAL_CANDIDATES", "5")
     monkeypatch.setenv("CAMERA_DISCOVERY_MAX_LLM_LOCATION_INFERENCES", "4")
     monkeypatch.setenv("CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS", "2")
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_CANDIDATE_GEOCODES", "6")
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_STATE_SCALE_CANDIDATE_GEOCODES", "9")
 
     cfg = load_run_config("Get cameras from Example City", tmp_path)
 
     assert cfg.max_total_candidates == 5
     assert cfg.max_llm_location_inferences == 4
     assert cfg.max_candidate_reviews == 2
+    assert cfg.max_candidate_geocodes == 6
+    assert cfg.max_state_scale_candidate_geocodes == 9
 
 
 def test_run_config_builtin_defaults_are_aligned():
@@ -57,3 +65,5 @@ def test_run_config_builtin_defaults_are_aligned():
     assert cfg.max_llm_location_inferences == expected
     assert cfg.max_candidate_reviews == expected
     assert cfg.max_streams == expected
+    assert cfg.max_candidate_geocodes == expected
+    assert cfg.max_state_scale_candidate_geocodes == expected

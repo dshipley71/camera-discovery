@@ -104,14 +104,14 @@ def load_run_config(
         max_directory_pages=max(1, _int_env("CAMERA_DISCOVERY_MAX_DIRECTORY_PAGES", 8)),
         max_structured_endpoints_per_page=max(1, _int_env("CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", 20)),
         asset_host_promotion_threshold=max(2, _int_env("CAMERA_DISCOVERY_ASSET_HOST_PROMOTION_THRESHOLD", 3)),
-        max_state_scale_candidate_geocodes=max(0, _int_env("CAMERA_DISCOVERY_MAX_STATE_SCALE_CANDIDATE_GEOCODES", 250)),
+        max_state_scale_candidate_geocodes=max(0, _int_env("CAMERA_DISCOVERY_MAX_STATE_SCALE_CANDIDATE_GEOCODES", max_total_candidates)),
         http_timeout=_float_env("CAMERA_DISCOVERY_HTTP_TIMEOUT", 20.0),
         seed_urls=seed_urls or [],
         sources_file=Path(configured_sources_file).expanduser() if configured_sources_file else None,
         discovery_mode=selected_discovery_mode,
         block_patterns=block_patterns or _split_csv_env("CAMERA_DISCOVERY_BLOCK_PATTERNS"),
         enable_candidate_geocoding=_bool_env("CAMERA_DISCOVERY_ENABLE_CANDIDATE_GEOCODING", True),
-        max_candidate_geocodes=_int_env("CAMERA_DISCOVERY_MAX_CANDIDATE_GEOCODES", 25),
+        max_candidate_geocodes=max(0, _int_env("CAMERA_DISCOVERY_MAX_CANDIDATE_GEOCODES", max_total_candidates)),
         image_snapshot_refresh_delay_seconds=max(0.0, _float_env("CAMERA_DISCOVERY_IMAGE_SNAPSHOT_REFRESH_DELAY_SECONDS", 2.0)),
     )
 
