@@ -69,9 +69,10 @@ def load_run_config(
     )
     selected_discovery_mode = DiscoveryMode((discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE", "both")).strip().lower())
     configured_sources_file = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
-    max_total_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_TOTAL_CANDIDATES", 200))
     max_hls_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_HLS_CANDIDATES", 100))
     max_image_snapshot_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES", 50))
+    default_candidate_budget = max_hls_candidates + max_image_snapshot_candidates
+    max_total_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_TOTAL_CANDIDATES", default_candidate_budget))
     return RunConfig(
         query=query,
         output_dir=Path(output_dir),
@@ -89,10 +90,10 @@ def load_run_config(
         location_inference_timeout=_float_env("CAMERA_DISCOVERY_LOCATION_INFERENCE_TIMEOUT", 45.0),
         candidate_review_timeout=_float_env("CAMERA_DISCOVERY_CANDIDATE_REVIEW_TIMEOUT", 45.0),
         enable_llm_location_inference=_bool_env("CAMERA_DISCOVERY_ENABLE_LLM_LOCATION_INFERENCE", True),
-        max_llm_location_inferences=max(0, _int_env("CAMERA_DISCOVERY_MAX_LLM_LOCATION_INFERENCES", 25)),
+        max_llm_location_inferences=max(0, _int_env("CAMERA_DISCOVERY_MAX_LLM_LOCATION_INFERENCES", max_total_candidates)),
         llm_location_inference_min_confidence=max(0.0, min(1.0, _float_env("CAMERA_DISCOVERY_LOCATION_INFERENCE_MIN_CONFIDENCE", 0.70))),
         candidate_review_batch_size=max(1, _int_env("CAMERA_DISCOVERY_CANDIDATE_REVIEW_BATCH_SIZE", 8)),
-        max_candidate_reviews=max(0, _int_env("CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS", 50)),
+        max_candidate_reviews=max(0, _int_env("CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS", max_total_candidates)),
         max_search_queries=_int_env("CAMERA_DISCOVERY_MAX_SEARCH_QUERIES", 4),
         max_search_results_per_query=_int_env("CAMERA_DISCOVERY_MAX_SEARCH_RESULTS_PER_QUERY", 5),
         max_pages=_int_env("CAMERA_DISCOVERY_MAX_PAGES", 25),

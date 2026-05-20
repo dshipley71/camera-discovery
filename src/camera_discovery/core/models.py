@@ -47,23 +47,23 @@ class RunConfig:
     location_inference_model: str | None = None
     location_inference_timeout: float = 45.0
     enable_llm_location_inference: bool = True
-    max_llm_location_inferences: int = 25
+    max_llm_location_inferences: int = 150
     llm_location_inference_min_confidence: float = 0.70
 
     candidate_review_model: str | None = None
     candidate_review_timeout: float = 45.0
     candidate_review_batch_size: int = 8
-    max_candidate_reviews: int = 50
+    max_candidate_reviews: int = 150
 
     max_search_queries: int = 4
     max_search_results_per_query: int = 5
     max_pages: int = 25
     max_hls_candidates: int = 100
     max_image_snapshot_candidates: int = 50
-    max_total_candidates: int = 200
+    max_total_candidates: int = 150
     # Deprecated: superseded by max_hls_candidates, max_image_snapshot_candidates,
     # and max_total_candidates. Kept for compatibility with older callers.
-    max_streams: int = 200
+    max_streams: int = 150
     max_directory_pages: int = 8
     max_structured_endpoints_per_page: int = 20
     asset_host_promotion_threshold: int = 3

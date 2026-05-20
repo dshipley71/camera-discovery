@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+from camera_discovery.core.config import load_run_config
+from camera_discovery.core.models import RunConfig
+
+
+_PARAMETER_ENV_VARS = [
+    "CAMERA_DISCOVERY_MAX_HLS_CANDIDATES",
+    "CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES",
+    "CAMERA_DISCOVERY_MAX_TOTAL_CANDIDATES",
+    "CAMERA_DISCOVERY_MAX_LLM_LOCATION_INFERENCES",
+    "CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS",
+    "CAMERA_DISCOVERY_MAX_STREAMS",
+]
+
+
+def _clear_parameter_env(monkeypatch):
+    for name in _PARAMETER_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_candidate_budget_defaults_align_to_hls_plus_image_snapshot_caps(tmp_path, monkeypatch):
+    _clear_parameter_env(monkeypatch)
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_HLS_CANDIDATES", "7")
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES", "3")
+
+    cfg = load_run_config("Get cameras from Example City", tmp_path)
+
+    assert cfg.max_hls_candidates == 7
+    assert cfg.max_image_snapshot_candidates == 3
+    assert cfg.max_total_candidates == 10
+    assert cfg.max_llm_location_inferences == 10
+    assert cfg.max_candidate_reviews == 10
+    assert cfg.max_streams == 10
+
+
+def test_candidate_budget_explicit_overrides_are_still_honored(tmp_path, monkeypatch):
+    _clear_parameter_env(monkeypatch)
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_HLS_CANDIDATES", "7")
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES", "3")
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_TOTAL_CANDIDATES", "5")
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_LLM_LOCATION_INFERENCES", "4")
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS", "2")
+
+    cfg = load_run_config("Get cameras from Example City", tmp_path)
+
+    assert cfg.max_total_candidates == 5
+    assert cfg.max_llm_location_inferences == 4
+    assert cfg.max_candidate_reviews == 2
+
+
+def test_run_config_builtin_defaults_are_aligned():
+    cfg = RunConfig(query="Get cameras from Example City", output_dir="out")
+    expected = cfg.max_hls_candidates + cfg.max_image_snapshot_candidates
+
+    assert cfg.max_total_candidates == expected
+    assert cfg.max_llm_location_inferences == expected
+    assert cfg.max_candidate_reviews == expected
+    assert cfg.max_streams == expected
