@@ -146,14 +146,11 @@ class ReviewAndValidationPipeline:
             c for c in candidates.unique
             if c.trust_level == "trusted" and c.scope_status == "in_scope" and c.has_coordinates and c.target_id in trusted_allowed
         ]
-        review = [
-            c for c in candidates.unique
-            if c.has_coordinates
-            and c not in trusted
-            and c.trust_level != "rejected"
-            and c.scope_status != "out_of_scope"
-        ]
+        trusted_keys = {(c.stream_url, c.target_id) for c in trusted}
+        coordinate_bearing = [c for c in candidates.unique if c.has_coordinates]
+        review = [c for c in coordinate_bearing if (c.stream_url, c.target_id) not in trusted_keys]
         out = OutputSummary()
+        out.coordinate_bearing_candidates = len(coordinate_bearing)
         if trusted:
             out.trusted_geojson_created = True
             out.trusted_geojson_features_written = len(trusted)
@@ -167,6 +164,10 @@ class ReviewAndValidationPipeline:
             out.untrusted_geojson_features_written = len(review)
             self._write_geojson(self.config.output_dir / "untrusted_camera_candidates.geojson", review, trusted=False, target_map=target_map)
             write_jsonl(self.candidates_dir / "untrusted_camera_candidates_source_rows.jsonl", [asdict(c) for c in review])
+        elif (self.config.output_dir / "untrusted_camera_candidates.geojson").exists():
+            (self.config.output_dir / "untrusted_camera_candidates.geojson").unlink()
+        out.coordinate_bearing_geojson_features_written = out.trusted_geojson_features_written + out.untrusted_geojson_features_written
+        out.coordinate_bearing_without_geojson = max(0, out.coordinate_bearing_candidates - out.coordinate_bearing_geojson_features_written)
         table_path = self._write_candidate_table(candidates.unique)
         out.camera_candidates_table_csv = str(table_path)
         out.camera_candidates_table_rows = len(candidates.unique)
@@ -195,18 +196,26 @@ class ReviewAndValidationPipeline:
             "plain_language_summary": [
                 f"Resolved {len(targets)} target(s): " + ", ".join(t.canonical_target or t.target_label or t.target_id for t in targets),
                 f"Found {len(candidates.unique)} unique candidate camera record(s).",
-                f"{len(candidates.coordinate_bearing)} candidate(s) had real coordinates and can be mapped; {missing_coordinates} remain table-only because no verified coordinate was extracted or geocoded.",
+                f"{out.coordinate_bearing_candidates} candidate(s) had real coordinates; {missing_coordinates} remain table-only because no verified coordinate was extracted or geocoded.",
                 f"Trusted camera.geojson created: {out.trusted_geojson_created} ({out.trusted_geojson_features_written} feature(s)).",
                 f"Untrusted review GeoJSON created: {out.untrusted_geojson_created} ({out.untrusted_geojson_features_written} feature(s)).",
+                f"Coordinate-bearing GeoJSON coverage: {out.coordinate_bearing_geojson_features_written}/{out.coordinate_bearing_candidates} feature(s) written; {out.coordinate_bearing_without_geojson} coordinate-bearing candidate(s) were not written to a GeoJSON artifact.",
                 "Fast profile is review-only; use balanced/full validation when you want stream validation and trusted output authorization.",
             ],
             "media_type_counts": media_counts,
             "source_provider_counts": provider_counts,
+            "geojson_metrics": {
+                "coordinate_bearing_candidates": out.coordinate_bearing_candidates,
+                "trusted_geojson_features": out.trusted_geojson_features_written,
+                "untrusted_geojson_features": out.untrusted_geojson_features_written,
+                "coordinate_bearing_geojson_features_written": out.coordinate_bearing_geojson_features_written,
+                "coordinate_bearing_without_geojson": out.coordinate_bearing_without_geojson,
+            },
             "validation": asdict(v),
             "outputs": asdict(out),
             "interpretation": {
                 "camera_geojson": "Trusted, validated, in-scope coordinate-bearing camera inventory. Not written when validation is disabled or no trusted records exist.",
-                "untrusted_camera_candidates_geojson": "Coordinate-bearing candidates kept for review/map analysis. These are not trusted inventory.",
+                "untrusted_camera_candidates_geojson": "Every coordinate-bearing candidate not written to trusted camera.geojson. These are not trusted inventory and may include rejected, out-of-scope, unknown, or review-only records for audit/map analysis.",
                 "camera_candidates_table_csv": "All non-rejected review candidates, including rows without coordinates that cannot be mapped yet.",
                 "map_html": "Interactive map for coordinate-bearing trusted/untrusted GeoJSON only.",
             },
@@ -234,6 +243,7 @@ class ReviewAndValidationPipeline:
             "name",
             "target_label",
             "location_text",
+            "location_display",
             "camera_type",
             "camera_id",
             "stream_url",
@@ -244,6 +254,8 @@ class ReviewAndValidationPipeline:
             "geocoded_query",
             "geocoded_display_name",
             "thumbnail_url",
+            "camera_refresh_rate",
+            "map_refresh_rate_seconds",
             "media_type",
             "trust_level",
             "validation_status",
@@ -261,11 +273,13 @@ class ReviewAndValidationPipeline:
             writer.writeheader()
             for row in visible:
                 metadata = row.source_metadata or {}
+                media_type = metadata.get("media_type")
                 writer.writerow(
                     {
                         "name": row.title or metadata.get("source_name") or "Camera candidate",
                         "target_label": row.target_label,
                         "location_text": row.location_text,
+                        "location_display": _camera_location_display(row, None),
                         "camera_type": metadata.get("camera_type"),
                         "camera_id": metadata.get("camera_id") or metadata.get("id"),
                         "stream_url": row.stream_url,
@@ -276,7 +290,9 @@ class ReviewAndValidationPipeline:
                         "geocoded_query": row.geocoded_query,
                         "geocoded_display_name": row.geocoded_display_name,
                         "thumbnail_url": metadata.get("snapshot_url") or metadata.get("thumbnail_url") or metadata.get("image_url"),
-                        "media_type": metadata.get("media_type"),
+                        "camera_refresh_rate": _camera_refresh_rate(metadata),
+                        "map_refresh_rate_seconds": self.config.image_snapshot_refresh_delay_seconds if media_type == "image_snapshot" else None,
+                        "media_type": media_type,
                         "trust_level": row.trust_level,
                         "validation_status": row.validation_status,
                         "scope_status": row.scope_status,
@@ -302,17 +318,30 @@ class ReviewAndValidationPipeline:
             target = target_map.get(c.target_id or "")
             props = asdict(c)
             metadata = c.source_metadata or {}
+            media_type = metadata.get("media_type") or ("hls" if ".m3u8" in c.stream_url.casefold() else None)
+            snapshot_url = metadata.get("snapshot_url") or metadata.get("thumbnail_url") or metadata.get("image_url")
+            if media_type == "image_snapshot" and not snapshot_url:
+                snapshot_url = c.stream_url
+            camera_refresh_rate = _camera_refresh_rate(metadata)
+            map_refresh_rate = self.config.image_snapshot_refresh_delay_seconds if media_type == "image_snapshot" else None
             props.update(
                 {
+                    "name": c.title or metadata.get("source_name") or "Camera candidate",
+                    "location_display": _camera_location_display(c, target),
                     "camera_type": metadata.get("camera_type"),
                     "camera_id": metadata.get("camera_id") or metadata.get("id"),
-                    "media_type": metadata.get("media_type"),
-                    "snapshot_url": metadata.get("snapshot_url") or metadata.get("thumbnail_url") or metadata.get("image_url"),
-                    "trust_level": "trusted" if trusted else "untrusted",
+                    "media_type": media_type,
+                    "snapshot_url": snapshot_url,
+                    "thumbnail_url": snapshot_url,
+                    "camera_refresh_rate": camera_refresh_rate,
+                    "map_refresh_rate_seconds": map_refresh_rate,
+                    "image_snapshot_refresh_delay_seconds": map_refresh_rate,
+                    "trust_level": "trusted" if trusted else (c.trust_level or "untrusted"),
                     "output_policy": "trusted" if trusted else "review_only",
                     "review_required": not trusted,
                     "trusted_inventory_candidate": trusted,
                     "trusted_geojson_candidate": trusted,
+                    "untrusted_reason": None if trusted else _untrusted_reason(c, target),
                     "target_bbox_trusted": bool(target and target.bbox_verified),
                     "target_id": c.target_id,
                     "target_label": c.target_label,
@@ -361,6 +390,63 @@ class ReviewAndValidationPipeline:
                         if p.is_file():
                             z.write(p, str(p.relative_to(self.config.output_dir)))
         return zpath
+
+
+def _camera_location_display(candidate: CameraCandidate, target: TargetContext | None) -> str | None:
+    metadata = candidate.source_metadata or {}
+    for value in [
+        candidate.location_text,
+        candidate.geocoded_display_name,
+        metadata.get("location"),
+        metadata.get("location_text"),
+        metadata.get("road"),
+        metadata.get("route"),
+        metadata.get("intersection"),
+        metadata.get("city"),
+        metadata.get("county"),
+        candidate.title,
+    ]:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if target:
+        for value in [target.canonical_target, target.target_label]:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _camera_refresh_rate(metadata: dict) -> str | int | float | None:
+    for key in (
+        "camera_refresh_rate",
+        "refresh_rate",
+        "refresh_rate_seconds",
+        "refresh_interval",
+        "refresh_interval_seconds",
+        "update_interval",
+        "update_interval_seconds",
+    ):
+        value = metadata.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _untrusted_reason(candidate: CameraCandidate, target: TargetContext | None) -> str:
+    reasons: list[str] = []
+    if candidate.trust_level == "rejected":
+        reasons.append("candidate trust_level is rejected")
+    if candidate.scope_status == "out_of_scope":
+        reasons.append("candidate scope_status is out_of_scope")
+    if candidate.validation_status:
+        reasons.append(f"validation_status={candidate.validation_status}")
+    if candidate.llm_semantic_decision and candidate.llm_semantic_decision != "in_scope":
+        reasons.append(f"llm_semantic_decision={candidate.llm_semantic_decision}")
+    if target and not target.bbox_verified:
+        reasons.append("target bbox is not verified for trusted output")
+    reasons.extend(candidate.reasons)
+    if not reasons:
+        reasons.append("not selected for trusted GeoJSON")
+    return "; ".join(dict.fromkeys(str(reason) for reason in reasons if reason))
 
 
 def _looks_like_static_snapshot_asset(url: str) -> bool:

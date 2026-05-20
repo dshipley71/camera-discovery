@@ -252,6 +252,9 @@ class OutputSummary:
     trusted_geojson_features_written: int = 0
     untrusted_geojson_created: bool = False
     untrusted_geojson_features_written: int = 0
+    coordinate_bearing_candidates: int = 0
+    coordinate_bearing_geojson_features_written: int = 0
+    coordinate_bearing_without_geojson: int = 0
     review_artifacts_zip: str | None = None
     map_html: str | None = None
     camera_candidates_table_csv: str | None = None

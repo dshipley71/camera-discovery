@@ -26,6 +26,8 @@ TABLE_COLUMNS = [
     "stream_url",
     "source_url",
     "thumbnail_url",
+    "camera_refresh_rate",
+    "map_refresh_rate_seconds",
     "trust_level",
     "validation_status",
     "scope_status",
@@ -70,6 +72,32 @@ def load_camera_rows(path: Path) -> list[dict[str, Any]]:
     return geojson_features_to_rows(load_geojson(path))
 
 
+def load_camera_map_geojson(output_dir: Path, geojson_path: Path | None = None) -> tuple[dict[str, Any], str | None, list[Path]]:
+    """Load one explicit camera GeoJSON or merge trusted and untrusted map files."""
+    if geojson_path is not None:
+        data = load_geojson(geojson_path)
+        return data, geojson_path.name, [geojson_path]
+
+    selected_paths = [output_dir / filename for filename in CAMERA_GEOJSON_FILENAMES if (output_dir / filename).exists() and (output_dir / filename).stat().st_size > 0]
+    if not selected_paths:
+        return {"type": "FeatureCollection", "features": []}, None, []
+    if len(selected_paths) == 1:
+        data = load_geojson(selected_paths[0])
+        return data, selected_paths[0].name, selected_paths
+
+    features: list[dict[str, Any]] = []
+    for path in selected_paths:
+        data = load_geojson(path)
+        for feature in data.get("features") or []:
+            if not isinstance(feature, dict):
+                continue
+            props = feature.setdefault("properties", {})
+            if isinstance(props, dict):
+                props.setdefault("source_geojson", path.name)
+            features.append(feature)
+    return {"type": "FeatureCollection", "features": features}, " + ".join(path.name for path in selected_paths), selected_paths
+
+
 def geojson_features_to_rows(geojson: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten GeoJSON features into stable table rows without changing trust state."""
     rows: list[dict[str, Any]] = []
@@ -85,7 +113,7 @@ def geojson_features_to_rows(geojson: dict[str, Any]) -> list[dict[str, Any]]:
             "feature_index": index,
             "name": _first_text(props, "name", "title", "camera_name", "source_name") or f"Camera {index + 1}",
             "target_label": props.get("target_label") or props.get("target_id"),
-            "location_text": props.get("location_text") or props.get("source_metadata", {}).get("source_scope_hint") if isinstance(props.get("source_metadata"), dict) else props.get("location_text"),
+            "location_text": _first_text(props, "location_display", "location_text", "geocoded_display_name", "source_scope_hint"),
             "camera_type": _first_text(props, "camera_type", "type", "category"),
             "camera_id": _first_text(props, "camera_id", "id"),
             "media_type": _first_text(props, "media_type"),
@@ -94,6 +122,8 @@ def geojson_features_to_rows(geojson: dict[str, Any]) -> list[dict[str, Any]]:
             "stream_url": props.get("stream_url"),
             "source_url": props.get("source_url"),
             "thumbnail_url": find_thumbnail_url(props),
+            "camera_refresh_rate": props.get("camera_refresh_rate"),
+            "map_refresh_rate_seconds": props.get("map_refresh_rate_seconds"),
             "trust_level": props.get("trust_level"),
             "validation_status": props.get("validation_status"),
             "scope_status": props.get("scope_status"),
@@ -137,9 +167,7 @@ def write_embedded_camera_map(
     to play the stream URL with hls.js or native browser video support.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    selected = geojson_path or select_camera_geojson(output_dir)
-    geojson = load_geojson(selected) if selected else {"type": "FeatureCollection", "features": []}
-    source_name = selected.name if selected else None
+    geojson, source_name, selected_paths = load_camera_map_geojson(output_dir, geojson_path)
     html = _camera_map_html(geojson, source_name)
     path = output_dir / output_name
     path.write_text(html, encoding="utf-8")
@@ -147,10 +175,13 @@ def write_embedded_camera_map(
         output_dir / "logs" / "camera_map_status.json",
         {
             "map_html": str(path),
-            "source_geojson": str(selected) if selected else None,
+            "source_geojson": str(selected_paths[0]) if len(selected_paths) == 1 else None,
+            "source_geojson_files": [str(path) for path in selected_paths],
             "features": len(geojson.get("features") or []),
             "has_video_playback_button": True,
             "has_refreshing_snapshot_viewer": True,
+            "has_camera_type_legend": True,
+            "marker_colors": {"hls": "green", "image_snapshot": "yellow", "other": "blue"},
             "thumbnail_fields_supported": list(THUMBNAIL_KEYS),
         },
     )
@@ -201,12 +232,16 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
   <style>
     html, body, #map {{ height: 100%; margin: 0; }}
     .status {{ position: absolute; z-index: 999; left: 10px; top: 10px; background: white; padding: 8px 10px; border-radius: 8px; box-shadow: 0 1px 8px rgba(0,0,0,.25); font-family: sans-serif; max-width: 420px; }}
+    .map-legend {{ position: absolute; z-index: 999; right: 10px; bottom: 22px; background: white; padding: 8px 10px; border-radius: 8px; box-shadow: 0 1px 8px rgba(0,0,0,.25); font-family: sans-serif; font-size: 12px; }}
+    .legend-title {{ font-weight: 700; margin-bottom: 5px; }}
+    .legend-row {{ display: flex; align-items: center; gap: 6px; margin: 3px 0; }}
+    .swatch {{ display: inline-block; width: 12px; height: 12px; border-radius: 999px; border: 1px solid rgba(0,0,0,.35); }}
     .popup {{ width: 300px; font-family: sans-serif; }}
     .popup h3 {{ margin: 0 0 6px 0; font-size: 15px; }}
     .popup table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
     .popup td {{ vertical-align: top; border-top: 1px solid #eee; padding: 3px 2px; }}
     .popup td:first-child {{ font-weight: 600; color: #444; width: 88px; }}
-    .thumb {{ width: 100%; max-height: 170px; object-fit: cover; border-radius: 8px; border: 1px solid #ddd; margin: 6px 0; }}
+    .thumb {{ width: 100%; max-height: 170px; object-fit: cover; border-radius: 8px; border: 1px solid #ddd; margin: 6px 0; background: #000; }}
     .no-thumb {{ padding: 12px; border: 1px dashed #bbb; color: #666; border-radius: 8px; text-align: center; margin: 6px 0; }}
     .play {{ width: 100%; padding: 8px; border: 0; border-radius: 8px; background: #1565c0; color: white; cursor: pointer; font-weight: 700; }}
     .play:hover {{ background: #0d47a1; }}
@@ -221,6 +256,12 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
 </head>
 <body>
   <div class='status' id='status'>Loading {title}...</div>
+  <div class='map-legend' aria-label='Camera color legend'>
+    <div class='legend-title'>Camera type</div>
+    <div class='legend-row'><span class='swatch' style='background:green'></span><span>HLS video</span></div>
+    <div class='legend-row'><span class='swatch' style='background:gold'></span><span>Image snapshot</span></div>
+    <div class='legend-row'><span class='swatch' style='background:royalblue'></span><span>Other / future</span></div>
+  </div>
   <div id='map'></div>
   <div class='video-modal' id='videoModal'>
     <div class='video-card'>
@@ -252,6 +293,65 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       return url + sep + '_camera_discovery_ts=' + Date.now();
     }}
     let snapshotTimer = null;
+    let popupPreviewHlsPlayers = [];
+    function normalizedMediaType(props, stream, thumb) {{
+      const mediaType = firstValue(props, ['media_type']);
+      if (mediaType) return mediaType;
+      const lower = String(stream || '').toLowerCase();
+      if (lower.includes('.m3u8')) return 'hls';
+      if (thumb || /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(lower)) return 'image_snapshot';
+      return 'other';
+    }}
+    function markerColor(mediaType) {{
+      if (mediaType === 'image_snapshot') return 'gold';
+      if (mediaType === 'hls' || mediaType === 'hls_stream' || mediaType === 'video' || mediaType === 'unknown') return 'green';
+      return 'royalblue';
+    }}
+    function markerStyle(feature) {{
+      const p = feature.properties || {{}};
+      const stream = p.stream_url || '';
+      const thumb = firstValue(p, {json.dumps(list(THUMBNAIL_KEYS))});
+      const color = markerColor(normalizedMediaType(p, stream, thumb));
+      return {{ radius: 7, weight: 2, color: '#222', fillColor: color, fillOpacity: .82 }};
+    }}
+    function stopPopupPreviews() {{
+      for (const item of popupPreviewHlsPlayers) {{
+        try {{ if (item.hls) item.hls.destroy(); }} catch (err) {{}}
+        try {{ if (item.video) {{ item.video.pause(); item.video.removeAttribute('src'); item.video.load(); }} }} catch (err) {{}}
+      }}
+      popupPreviewHlsPlayers = [];
+    }}
+    function initPopupPreviews(container) {{
+      stopPopupPreviews();
+      if (!container) return;
+      for (const video of container.querySelectorAll('video.hls-thumb[data-stream]')) {{
+        const url = video.getAttribute('data-stream');
+        if (!url) continue;
+        if (url.toLowerCase().includes('.m3u8') && window.Hls && Hls.isSupported()) {{
+          const hls = new Hls({{ lowLatencyMode: true }});
+          hls.loadSource(url);
+          hls.attachMedia(video);
+          popupPreviewHlsPlayers.push({{ video, hls }});
+        }} else {{
+          video.src = url;
+          popupPreviewHlsPlayers.push({{ video, hls: null }});
+        }}
+        video.play().catch(() => {{}});
+      }}
+    }}
+    function previewHtml(mediaType, stream, thumb) {{
+      if (mediaType === 'image_snapshot') {{
+        const imageUrl = thumb || stream;
+        return imageUrl ? `<img class="thumb" src="${{esc(cacheBust(imageUrl))}}" alt="Current camera image" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{{className:'no-thumb',innerText:'Snapshot unavailable'}}))">` : `<div class="no-thumb">No snapshot URL in GeoJSON</div>`;
+      }}
+      if (thumb) {{
+        return `<img class="thumb" src="${{esc(cacheBust(thumb))}}" alt="Camera thumbnail" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{{className:'no-thumb',innerText:'Thumbnail unavailable'}}))">`;
+      }}
+      if (stream && String(stream).toLowerCase().includes('.m3u8')) {{
+        return `<video class="thumb hls-thumb" data-stream="${{esc(stream)}}" muted autoplay playsinline></video>`;
+      }}
+      return `<div class="no-thumb">No thumbnail URL in GeoJSON</div>`;
+    }}
     function popupHtml(feature) {{
       const p = feature.properties || {{}};
       const coords = feature.geometry && Array.isArray(feature.geometry.coordinates) ? feature.geometry.coordinates : [];
@@ -261,20 +361,27 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       const thumb = firstValue(p, {json.dumps(list(THUMBNAIL_KEYS))});
       const stream = p.stream_url || '';
       const source = p.source_url || '';
-      const mediaType = firstValue(p, ['media_type']) || (String(stream).toLowerCase().includes('.m3u8') ? 'hls' : (thumb || /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(stream) ? 'image_snapshot' : 'unknown'));
+      const mediaType = normalizedMediaType(p, stream, thumb);
       const cameraType = firstValue(p, ['camera_type', 'type', 'category']) || '';
       const cameraId = firstValue(p, ['camera_id', 'id']) || '';
-      const thumbHtml = thumb ? `<img class="thumb" src="${{esc(cacheBust(thumb))}}" alt="Camera thumbnail" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{{className:'no-thumb',innerText:'Thumbnail unavailable'}}))">` : `<div class="no-thumb">No thumbnail URL in GeoJSON</div>`;
+      const locationText = firstValue(p, ['location_display', 'location_text', 'geocoded_display_name', 'source_scope_hint']) || '';
+      const cameraRefreshRate = firstValue(p, ['camera_refresh_rate', 'refresh_rate', 'refresh_rate_seconds', 'refresh_interval', 'refresh_interval_seconds']) || '';
+      const mapRefreshRate = firstValue(p, ['map_refresh_rate_seconds', 'image_snapshot_refresh_delay_seconds']) || '';
+      const thumbHtml = previewHtml(mediaType, stream, thumb);
       const buttonLabel = mediaType === 'image_snapshot' ? '↻ Open refreshing snapshot' : '▶ Play video';
-      const playHtml = stream ? `<button class="play" onclick='playCamera(${{JSON.stringify(stream)}}, ${{JSON.stringify(name)}}, ${{JSON.stringify(mediaType)}})'>${{buttonLabel}}</button>` : '';
+      const playHtml = stream ? `<button class="play" onclick='playCamera(${{JSON.stringify(stream)}}, ${{JSON.stringify(name)}}, ${{JSON.stringify(mediaType)}}, ${{JSON.stringify(mapRefreshRate)}})'>${{buttonLabel}}</button>` : '';
       const sourceHtml = source ? `<a href="${{esc(source)}}" target="_blank" rel="noopener">source</a>` : '';
       const streamHtml = stream ? `<a href="${{esc(stream)}}" target="_blank" rel="noopener">media</a>` : '';
+      const snapshotRows = mediaType === 'image_snapshot' ? `
+        <tr><td>Camera Refresh Rate</td><td>${{esc(cameraRefreshRate || 'null')}}</td></tr>
+        <tr><td>Map Refresh Rate</td><td>${{esc(mapRefreshRate || 'null')}}</td></tr>` : '';
       return `<div class="popup"><h3>${{esc(name)}}</h3>${{thumbHtml}}${{playHtml}}<table>
         <tr><td>Target</td><td>${{esc(p.target_label || p.target_id || '')}}</td></tr>
-        <tr><td>Location</td><td>${{esc(p.location_text || '')}}</td></tr>
+        <tr><td>Location</td><td>${{esc(locationText)}}</td></tr>
         <tr><td>Camera type</td><td>${{esc(cameraType)}}</td></tr>
         <tr><td>Camera ID</td><td>${{esc(cameraId)}}</td></tr>
         <tr><td>Media type</td><td>${{esc(mediaType)}}</td></tr>
+        ${{snapshotRows}}
         <tr><td>Lat/Lon</td><td>${{esc(lat)}}, ${{esc(lon)}}</td></tr>
         <tr><td>Trust</td><td>${{esc(p.trust_level || '')}}</td></tr>
         <tr><td>Validation</td><td>${{esc(p.validation_status || '')}}</td></tr>
@@ -283,7 +390,7 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
         <tr><td>Links</td><td>${{sourceHtml}} ${{streamHtml}}</td></tr>
       </table></div>`;
     }}
-    function playCamera(url, title, mediaType) {{
+    function playCamera(url, title, mediaType, refreshSeconds) {{
       const modal = document.getElementById('videoModal');
       const video = document.getElementById('cameraVideo');
       const snapshot = document.getElementById('snapshotViewer');
@@ -298,7 +405,8 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       if (mediaType === 'image_snapshot' || /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(url)) {{
         snapshot.src = cacheBust(url);
         snapshot.style.display = 'block';
-        snapshotTimer = setInterval(() => {{ snapshot.src = cacheBust(url); }}, 15000);
+        const refreshMs = Math.max(1000, Number(refreshSeconds || 15) * 1000);
+        snapshotTimer = setInterval(() => {{ snapshot.src = cacheBust(url); }}, refreshMs);
       }} else {{
         video.style.display = 'block';
         if (url.toLowerCase().includes('.m3u8') && window.Hls && Hls.isSupported()) {{
@@ -323,10 +431,12 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       modal.style.display = 'none';
     }}
     document.getElementById('videoModal').addEventListener('click', e => {{ if (e.target.id === 'videoModal') closeVideo(); }});
+    map.on('popupopen', e => initPopupPreviews(e.popup && e.popup.getElement ? e.popup.getElement() : null));
+    map.on('popupclose', () => stopPopupPreviews());
 
     const layer = L.geoJSON(CAMERA_GEOJSON, {{
       onEachFeature: (feature, layer) => layer.bindPopup(popupHtml(feature), {{ maxWidth: 340 }}),
-      pointToLayer: (feature, latlng) => L.circleMarker(latlng, {{ radius: 7, weight: 2, fillOpacity: .75 }})
+      pointToLayer: (feature, latlng) => L.circleMarker(latlng, markerStyle(feature))
     }}).addTo(map);
     const count = (CAMERA_GEOJSON.features || []).length;
     if (count && layer.getBounds().isValid()) map.fitBounds(layer.getBounds(), {{ padding: [24, 24] }});
