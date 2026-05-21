@@ -1,33 +1,30 @@
 # 03 — TargetResolver Agent
 
-Build `TargetResolver.resolve() -> TargetContext`.
+Maintain `TargetResolver.resolve_all() -> list[TargetContext]` and the backward-compatible `resolve()` first-target helper.
 
-## LLM Advisory Stages
+## LLM advisory duties
 
-1. Target intent extraction.
-2. Geocoder query expansion.
-3. Geocoder candidate referee/ranking.
+1. Extract target intent as strict JSON.
+2. Generate target/geocoder query variants.
+3. Rank/referee geocoder candidates semantically.
 
-## Deterministic Authority
+## Deterministic authority
 
-- bbox validity
-- bbox plausibility
-- admin/country match
-- scope/result-type compatibility
-- geometry trust policy
+Only deterministic code may verify:
 
-The LLM can rank geocoder candidates, but deterministic hard rejections remain final.
+- bbox validity and coordinate ranges;
+- bbox plausibility by scope type;
+- admin/country match;
+- scope/result-type compatibility;
+- selected target geometry status;
+- target trust policy.
 
-Never trust LLM bbox/coordinates. Store them only as review hints.
+LLM bbox/coordinate hints must be stored only as unverified review hints. They cannot set `bbox_verified=True`.
+
+## Failure behavior
+
+A failed target-intent LLM call can fall back to the deterministic target-clause parser so review-only `fast` runs can still proceed. This fallback preserves the real user query; it must not fabricate geography.
 
 ## Multi-location requirement
 
-Users may specify one or more places/locations in a single query. The application must not collapse multi-location queries into a single combined target. It must extract and process each requested target independently:
-
-```text
-Get me all cameras from London, England and New York, New York
-→ Target 1: London, England
-→ Target 2: New York, New York
-```
-
-Each target must receive a stable `target_id`, target-specific target-resolution diagnostics, target-specific candidate discovery artifacts, and target metadata on every candidate and GeoJSON feature. Final trusted and untrusted outputs may be merged, but each feature must preserve `target_id`, `target_label`, and `target_index`.
+Do not collapse multiple requested locations into one target. Write top-level diagnostics and per-target diagnostics under `logs/targets/<target_id>/`.

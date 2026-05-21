@@ -1,28 +1,30 @@
 # 08 — Tests Agent
 
-Create tests that validate package configuration, deterministic verification boundaries, artifact contracts, and notebook validity without introducing production fallback providers.
+Tests should validate package configuration, deterministic trust boundaries, source policy, browser capture routing, JSON metadata extraction, output contracts, and notebook validity without adding production bypasses.
 
-## Test Policy
+## Test policy
 
-The production application always requires a real LLM provider. Tests must not add production code paths that bypass the provider requirement.
+The production application requires real provider configuration for live LLM calls. Tests may use unit-level mocks/fakes only to exercise deterministic contracts. Do not add production code paths that silently bypass provider requirements.
 
-Use one of these approaches:
+Do not create fake camera inventories, fake streams, fabricated coordinates, synthetic validation success, or simulated runtime success as evidence of discovery quality.
 
-1. Static/unit tests that inspect configuration, provider selection, artifact schemas, and deterministic trust-gate behavior.
-2. Optional integration tests that run only when real provider credentials are configured in the environment.
-3. Notebook JSON validation.
+## Required test areas
 
-## Required Test Areas
-
-- LLM provider factory requires one of: Ollama/Ollama Cloud, OpenAI-compatible, Bedrock.
-- Missing or unsupported provider fails fast with a clear configuration error.
-- Stage-specific model overrides inherit the real provider connection settings.
-- LLM target geometry is never treated as verified geometry.
-- LLM geocoder referee scores cannot override deterministic hard rejections.
-- LLM candidate semantic review cannot validate stream liveness or authorize trusted output.
-- Fast mode writes review artifacts only.
-- Balanced/Full modes can write trusted output only after deterministic gates pass.
-- Notebook validates.
+- provider factory supports Ollama/Ollama Cloud, OpenAI-compatible, and Bedrock;
+- stage-specific provider/model overrides inherit common connection behavior;
+- LLM target geometry is never trusted geometry;
+- LLM location inference cannot supply coordinates;
+- LLM geocoder referee cannot override deterministic hard rejections;
+- LLM candidate semantic review cannot validate media or authorize trusted output;
+- source registry allowed/blocked parsing and global blocked-pattern enforcement;
+- `both` mode parallel row discovery and provenance preservation;
+- browser capture backend selection, budgets, and diagnostics;
+- JSON endpoint metadata extraction and preservation;
+- image snapshots are treated as refreshing images, not videos;
+- fast mode writes review artifacts only;
+- balanced/full modes write trusted output only after deterministic gates pass;
+- empty trusted files are not created;
+- notebook JSON validates.
 
 Run:
 

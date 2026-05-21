@@ -1,22 +1,67 @@
-# Notebook Agent
+# 07 — Notebook Agent
 
-Provide a working live-test notebook.
+Maintain `notebooks/camera_discovery_live_test.ipynb` as a live-test notebook for the real application.
 
-Notebook must show:
+Notebook-specific helper/display code belongs in the notebook, not in `src/`.
 
-- runtime profile
-- provider/model settings for all advisory LLM hooks
-- target-resolution diagnostics
-- geocoder referee diagnostics
-- candidate semantic-review diagnostics
-- trusted/untrusted output counts
-- artifact locations
+## Notebook must show
 
-Do not run `git pull`. Do not hard-code stale external source state.
+- query, profile, output directory, discovery mode, and source file;
+- provider/model settings for all advisory LLM stages;
+- target-resolution diagnostics;
+- geocoder-referee diagnostics;
+- candidate discovery summary;
+- browser capture summary;
+- coordinate enrichment diagnostics;
+- candidate semantic-review diagnostics;
+- trusted/untrusted output counts;
+- artifact links;
+- candidate table and embedded map.
 
-## GeoJSON Review Table and Map
+Do not run `git pull`. Do not hard-code stale external source state. Do not add fake camera feeds, fake coordinates, or simulated validation results.
 
-The Colab notebook must load `camera.geojson` first and fall back to `untrusted_camera_candidates.geojson` or `untrusted_camera.geojson`. It must display a table containing camera name/title, target label, location text, stream URL, source URL, latitude, longitude, trust level, validation status, scope status, discovery method, review flag, and thumbnail URL when available.
+## GeoJSON selection
 
-The notebook must also render an interactive Leaflet map with all GeoJSON camera locations. Marker popups must show GeoJSON metadata, an optional thumbnail image when a thumbnail/snapshot URL exists, and a **Play video** button that attempts to play the candidate stream URL using hls.js or native browser playback. The map must work in Colab by embedding the selected GeoJSON into the HTML rather than relying only on relative fetches.
+The notebook and map utilities should load camera features in this order or merge available files when appropriate:
 
+```text
+camera.geojson
+untrusted_camera_candidates.geojson
+untrusted_camera.geojson
+```
+
+If no GeoJSON exists, show a clear message and leave run diagnostics visible.
+
+## Table display
+
+Display camera rows with fields such as:
+
+```text
+name/title
+target_label
+location_text
+location_display
+camera_type
+camera_id
+media_type
+stream_url
+source_url
+latitude
+longitude
+thumbnail_url
+camera_refresh_rate
+map_refresh_rate_seconds
+trust_level
+validation_status
+scope_status
+discovery_method
+review_required
+```
+
+`camera_candidates_table.csv` is written by the application output pipeline and should be displayed when available.
+
+## Map display
+
+Render an embedded Leaflet map that works in Colab by embedding GeoJSON in the HTML. Popups should include GeoJSON metadata, thumbnail/snapshot images when present, source/media links, and a playback attempt button for HLS/native video. Image snapshot candidates should display snapshot refresh information when available.
+
+Remote playback can fail because of browser/CORS restrictions; do not treat playback failure alone as proof that a stream is invalid.

@@ -1,6 +1,6 @@
 # 01 — Core Data Contracts Agent
 
-Create canonical dataclasses:
+Maintain canonical dataclasses in `src/camera_discovery/core/models.py`:
 
 - `RunConfig`
 - `TargetIntent`
@@ -12,23 +12,48 @@ Create canonical dataclasses:
 - `OutputSummary`
 - `RunState`
 
-`RunState` must be the single source of truth. All artifacts should be projections of `RunState`.
+`RunState` is the single run snapshot. Artifacts are projections of service state, not separate truth sources.
 
-Add advisory LLM fields:
+## Required contract fields
 
-- geocoder candidate LLM rank/reason/recommendation
-- camera candidate LLM semantic decision/reason/confidence
+Target and candidate contracts must preserve:
 
-Do not allow these fields to imply verified geometry or trusted stream validation.
+```text
+target_id
+target_index
+target_label
+canonical_target
+scope_type
+bbox
+bbox_verified
+geometry_status
+trust_policy
+stream_url
+source_url
+discovery_method
+source_metadata
+lat/lon
+coordinate_source
+scope_status
+validation_status
+trust_level
+reasons
+```
+
+LLM advisory fields must remain advisory:
+
+```text
+llm_rank
+llm_relevance_score
+llm_referee_recommendation
+llm_referee_reason
+llm_semantic_decision
+llm_semantic_confidence
+llm_semantic_reason
+```
+
+Do not let advisory fields imply verified geometry, accepted coordinates, validated streams, or trusted output.
 
 ## Multi-location requirement
 
-Users may specify one or more places/locations in a single query. The application must not collapse multi-location queries into a single combined target. It must extract and process each requested target independently:
-
-```text
-Get me all cameras from London, England and New York, New York
-→ Target 1: London, England
-→ Target 2: New York, New York
-```
-
-Each target must receive a stable `target_id`, target-specific target-resolution diagnostics, target-specific candidate discovery artifacts, and target metadata on every candidate and GeoJSON feature. Final trusted and untrusted outputs may be merged, but each feature must preserve `target_id`, `target_label`, and `target_index`.
+Every candidate and GeoJSON feature must preserve `target_id`, `target_label`, and `target_index`. Merged outputs are allowed only when target provenance remains explicit.

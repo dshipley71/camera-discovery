@@ -1,24 +1,20 @@
-# 04 — Candidate Discovery Engine Agent
+# 04 — CandidateDiscoveryEngine Agent
 
-## Role
+`CandidateDiscoveryEngine` is the single discovery service. Keep discovery providers as input adapters inside this service.
 
-Implement `CandidateDiscoveryEngine`, the single discovery service in the simplified architecture. Do not reintroduce many separate discovery agents. Keep discovery providers as input adapters inside this service.
+## Discovery providers
 
-## Discovery Providers
-
-Implement three deterministic source providers:
+Current providers:
 
 ```text
-BlindSearchSourceProvider      query-driven public search
-DirectorySourceProvider        user-approved SOURCES.md entries
-DirectUrlSourceProvider        user-provided --seed-url values
+BlindSearchSourceProvider-equivalent logic  query-driven DuckDuckGo HTML search
+DirectorySourceProvider                     enabled user-approved SOURCES.md entries
+DirectUrlSourceProvider                     user-provided --seed-url values
 ```
 
-The provider outputs are normalized into the same candidate extraction path.
+`both` mode discovers directory rows and blind-search rows in parallel, then merges them into the same extraction path.
 
-## Discovery Modes
-
-Support:
+## Discovery modes
 
 ```text
 blind       = blind search only
@@ -27,7 +23,7 @@ both        = blind search + SOURCES.md allowed sources
 direct      = seed URLs only
 ```
 
-CLI and config must expose:
+CLI/config exposes:
 
 ```bash
 --discovery-mode blind|directory|both|direct
@@ -44,13 +40,9 @@ CAMERA_DISCOVERY_SOURCES_FILE=SOURCES.md
 CAMERA_DISCOVERY_BLOCK_PATTERNS=
 ```
 
-## SOURCES.md Format
-
-Implement a human-editable Markdown registry:
+## SOURCES.md format
 
 ```markdown
-# SOURCES.md
-
 ## Allowed Sources
 
 | name | url | type | scope_hint | enabled | notes |
@@ -62,108 +54,78 @@ Implement a human-editable Markdown registry:
 |---|---|
 ```
 
-Allowed source `type` values:
+Allowed source `type` values parsed by the current code:
 
 ```text
 page
 feed
 direct_hls
 site
+dynamic
 ```
 
-## Source Policy Rule
+## Extraction duties
 
-Allowed sources are mode-specific. Blocked sources are global.
+For every accepted source row, support generic extraction from:
+
+- direct HLS `.m3u8` URLs;
+- static text/HTML for HLS and image snapshot URLs;
+- structured HTML image/source tags;
+- JSON responses and JSON-like page state;
+- linked JSON/API/feed/map-layer endpoints;
+- GeoJSON and ArcGIS-style features;
+- browser network capture/rendered HTML for dynamic pages.
+
+Preserve structured metadata such as `camera_id`, `camera_name`, `camera_type`, `raw_camera_type`, location fields, route/direction, owner/agency, refresh-rate fields, `json_endpoint_url`, `json_record_path`, and `json_record_schema_hint`.
+
+## Browser capture
+
+Browser capture is optional and budgeted. Static extraction runs first. Use Playwright by default and CloakBrowser only when `CAMERA_DISCOVERY_BROWSER_BACKEND=cloakbrowser`.
+
+Required diagnostics include:
 
 ```text
-Allowed Sources → used only by directory/both modes
-Blocked Sources → applied to blind, directory, both, and direct modes
+logs/page_discovery_signals.jsonl
+logs/browser_capture_decisions.jsonl
+logs/browser_capture_results.jsonl
+logs/browser_capture_errors.jsonl
+logs/browser_capture_summary.json
 ```
 
-Blocked patterns must be applied to:
+## Coordinate and scope duties
 
-- blind search result URLs,
-- directory source URLs,
-- direct seed URLs,
-- fetched page URLs,
-- extracted stream URLs,
-- final candidate rows.
+Coordinates must come from source evidence or Nominatim geocoding. Optional LLM location inference may produce geocoder query strings only, never coordinates.
 
-## Candidate Extraction
-
-For every accepted source row:
-
-1. If it is a direct HLS URL, create a candidate directly.
-2. If it is a page/feed/site URL, fetch it and extract `.m3u8` links.
-3. Deduplicate stream URLs.
-4. Preserve source provenance in each candidate.
-5. Apply deterministic coordinate/bbox scope gates.
-6. Use LLM semantic review only as an advisory ranker/reviewer.
-
-## Candidate Metadata
-
-Every candidate should carry:
+Apply deterministic scope gates before final output:
 
 ```text
-target_id
-target_label
-stream_url
-source_url
-discovery_method
-source_provider
-source_kind
-source_name
-source_scope_hint
-source_notes
-scope_status
-trust_level
-reasons
+in_scope
+out_of_scope
+review
+unknown
 ```
 
-## Guardrails
+LLM semantic review does not validate stream liveness and does not authorize trusted output.
 
-- Do not let the directory provider become a separate orchestration layer.
-- Do not let blind search read allowed sources from `SOURCES.md`.
-- Do apply blocked patterns globally even when directory mode is disabled.
-- Do not auto-edit `SOURCES.md`.
-- Do not treat directory sources as trusted camera evidence; they are discovery inputs only.
-- Do not bypass deterministic validation/trust gates.
-
-## Required Artifacts
+## Required artifacts
 
 ```text
 logs/source_policy_summary.json
 logs/blocked_source_rows.jsonl
 logs/search_queries.json
 logs/search_results.jsonl
+logs/candidate_coordinate_enrichment.json
+logs/candidate_semantic_review.json
 candidates/<target_id>/agentic_candidates.jsonl
 candidates/<target_id>/agentic_candidates_unique.jsonl
 logs/targets/<target_id>/candidate_discovery_summary.json
 ```
 
-## Acceptance Tests
+## Guardrails
 
-Add tests proving:
-
-- `SOURCES.md` allowed-source rows parse correctly.
-- `SOURCES.md` blocked patterns parse correctly.
-- `DirectorySourceProvider` emits enabled allowed rows.
-- disabled allowed rows are skipped.
-- blocked allowed rows are skipped.
-- direct seed URLs respect global blocked patterns.
-- blind search result selection respects global blocked patterns even when directory mode is not used.
-- `both` mode merges blind and directory rows before candidate extraction.
-
-
-## Required Generic Extractors
-
-The discovery engine must support blind search even when `SOURCES.md` has no allowed sources.  For every selected public URL, it should attempt generic extraction in this order:
-
-- direct HLS `.m3u8` URLs;
-- JSON endpoints;
-- JavaScript configuration blobs containing camera records;
-- map-layer/feed records, including GeoJSON features;
-- image snapshot camera metadata;
-- HLS URLs where available.
-
-Camera-type terms such as `traffic cameras` are candidate intent, not target geography.
+- Do not let blind search read allowed rows from `SOURCES.md`.
+- Do apply blocked patterns globally.
+- Do not auto-edit `SOURCES.md`.
+- Do not treat directory sources as trusted evidence.
+- Do not bypass deterministic validation/trust gates.
+- Do not add source-specific agency/domain logic.

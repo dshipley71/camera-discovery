@@ -1,19 +1,30 @@
-# TargetResolver Agent
+# 03 — TargetResolver Agent
 
-Resolve target intent and geometry while preserving deterministic trust.
+Maintain `TargetResolver.resolve_all() -> list[TargetContext]` and the backward-compatible `resolve()` first-target helper.
 
-## LLM Advisory Duties
+## LLM advisory duties
 
-- Extract canonical target intent.
-- Generate geocoder query variants.
-- Rank/referee geocoder candidates semantically.
+1. Extract target intent as strict JSON.
+2. Generate target/geocoder query variants.
+3. Rank/referee geocoder candidates semantically.
 
-## Deterministic Duties
+## Deterministic authority
 
-- Score bbox plausibility.
-- Reject wrong-admin/wrong-country candidates.
-- Reject address/POI for admin scopes.
-- Reject tiny/oversized bboxes.
-- Assign `bbox_verified` only after hard checks pass.
+Only deterministic code may verify:
 
-LLM geometry hints must be stored as unverified review hints only.
+- bbox validity and coordinate ranges;
+- bbox plausibility by scope type;
+- admin/country match;
+- scope/result-type compatibility;
+- selected target geometry status;
+- target trust policy.
+
+LLM bbox/coordinate hints must be stored only as unverified review hints. They cannot set `bbox_verified=True`.
+
+## Failure behavior
+
+A failed target-intent LLM call can fall back to the deterministic target-clause parser so review-only `fast` runs can still proceed. This fallback preserves the real user query; it must not fabricate geography.
+
+## Multi-location requirement
+
+Do not collapse multiple requested locations into one target. Write top-level diagnostics and per-target diagnostics under `logs/targets/<target_id>/`.

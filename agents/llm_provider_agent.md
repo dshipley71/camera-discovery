@@ -1,18 +1,35 @@
 # 02 — LLM Provider Agent
 
-Implement a shared LLM provider factory.
+Maintain one shared provider factory in `src/camera_discovery/llm/factory.py`.
 
-Providers:
+Supported provider values:
 
-- `ollama` / `ollama-cloud`: `/api/chat`
-- `openai-compatible`: `/v1/chat/completions`
-- `bedrock`: Bedrock Runtime Converse API
+```text
+ollama
+ollama-cloud
+openai
+openai-compatible
+openai_compatible
+bedrock
+```
 
-Factory functions:
+Factory functions currently used by the services:
 
-- `build_llm_client`
-- `build_target_intent_client`
-- `build_geocoder_referee_client`
-- `build_candidate_review_client`
+```text
+build_llm_client
+build_target_intent_client
+build_geocoder_referee_client
+build_location_inference_client
+build_candidate_review_client
+```
 
-Do not create separate custom connection paths per stage. All stages share provider/base URL/API key behavior.
+Provider/model overrides must use the same factory path. Do not create stage-specific custom connection logic.
+
+Connection settings:
+
+- Ollama Cloud uses `OLLAMA_BASE_URL` or `https://ollama.com` and `OLLAMA_API_KEY`.
+- Local Ollama uses `OLLAMA_BASE_URL` or `http://localhost:11434`.
+- OpenAI-compatible uses `OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_API_KEY`, and `/chat/completions`.
+- Bedrock uses AWS credentials and `AWS_REGION` / `AWS_DEFAULT_REGION`.
+
+Never log secrets.
