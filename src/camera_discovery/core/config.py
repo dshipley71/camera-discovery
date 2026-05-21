@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 
 from .models import DiscoveryMode, RunConfig, RuntimeProfile
 
+_ALLOWED_BROWSER_BACKENDS = {"playwright", "cloakbrowser"}
+
 
 def _int_env(name: str, default: int) -> int:
     try:
@@ -45,6 +47,15 @@ def _default_target_intent_fallback_model(provider: str) -> str | None:
         return "qwen3.5:4b"
     return None
 
+
+
+
+def _browser_backend_env() -> str:
+    backend = os.getenv("CAMERA_DISCOVERY_BROWSER_BACKEND", "playwright").strip().lower()
+    if backend not in _ALLOWED_BROWSER_BACKENDS:
+        allowed = ", ".join(sorted(_ALLOWED_BROWSER_BACKENDS))
+        raise ValueError(f"Invalid CAMERA_DISCOVERY_BROWSER_BACKEND={backend!r}; expected one of: {allowed}")
+    return backend
 
 def load_run_config(
     query: str,
@@ -104,6 +115,7 @@ def load_run_config(
         max_directory_pages=max(1, _int_env("CAMERA_DISCOVERY_MAX_DIRECTORY_PAGES", 8)),
         max_structured_endpoints_per_page=max(1, _int_env("CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", 20)),
         enable_browser_capture=_bool_env("CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE", True),
+        browser_backend=_browser_backend_env(),
         browser_capture_timeout_ms=max(1000, _int_env("CAMERA_DISCOVERY_BROWSER_CAPTURE_TIMEOUT_MS", 15000)),
         browser_capture_min_score=max(0, _int_env("CAMERA_DISCOVERY_BROWSER_CAPTURE_MIN_SCORE", 3)),
         max_browser_capture_pages=max(0, _int_env("CAMERA_DISCOVERY_MAX_BROWSER_CAPTURE_PAGES", 20)),

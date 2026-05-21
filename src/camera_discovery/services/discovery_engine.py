@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import warnings
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse
@@ -139,6 +140,7 @@ class BrowserCaptureDecision:
     source_name: str = ""
     static_candidate_count: int = 0
     budget_remaining: dict[str, int] | None = None
+    browser_backend: str = "playwright"
 
     def to_log_record(self) -> dict[str, Any]:
         return asdict(self)
@@ -162,6 +164,7 @@ class BrowserCaptureResult:
             "phase": phase,
             "url": self.url,
             "backend": self.backend,
+            "browser_backend": self.backend,
             "source_provider": row.get("source_provider"),
             "source_kind": row.get("source_kind"),
             "source_name": row.get("source_name") or row.get("title"),
@@ -248,7 +251,8 @@ class CandidateDiscoveryEngine:
         self._browser_capture_host_failures: dict[str, int] = {}
         self._browser_capture_summary: dict[str, Any] = {
             "enabled": self.config.enable_browser_capture,
-            "backend": "playwright",
+            "backend": self.config.browser_backend,
+            "browser_backend": self.config.browser_backend,
             "rows_considered": 0,
             "rows_selected": 0,
             "rows_skipped": 0,
@@ -651,6 +655,7 @@ class CandidateDiscoveryEngine:
             source_provider=decision.source_provider,
             source_kind=decision.source_kind,
             score=decision.score,
+            browser_backend=self.config.browser_backend,
             reasons=decision.reasons,
         )
         try:
@@ -674,6 +679,7 @@ class CandidateDiscoveryEngine:
             candidates=result.total_browser_candidates,
             hls_urls=len(result.captured_hls_urls or []),
             json_urls=len(result.captured_json_urls or []),
+            browser_backend=result.backend,
             timed_out=result.timed_out,
             error=bool(result.error),
         )
@@ -882,6 +888,7 @@ class CandidateDiscoveryEngine:
             source_name=row.get("source_name") or row.get("title") or "",
             static_candidate_count=static_candidate_count,
             budget_remaining=self._browser_budget_remaining(row.get("source_provider") or "unknown", urlparse(row.get("url") or "").netloc.casefold()),
+            browser_backend=self.config.browser_backend,
         )
 
     def _reserve_browser_capture(self, row: dict[str, str], phase: str, score: int, reasons: list[str], static_candidate_count: int) -> BrowserCaptureDecision:
@@ -914,6 +921,7 @@ class CandidateDiscoveryEngine:
                     source_name=row.get("source_name") or row.get("title") or "",
                     static_candidate_count=static_candidate_count,
                     budget_remaining=self._browser_budget_remaining(source_provider, host),
+                    browser_backend=self.config.browser_backend,
                 )
             self._browser_capture_counts["total"] += 1
             self._browser_capture_counts[source_provider] = self._browser_capture_counts.get(source_provider, 0) + 1
@@ -931,6 +939,7 @@ class CandidateDiscoveryEngine:
                 source_name=row.get("source_name") or row.get("title") or "",
                 static_candidate_count=static_candidate_count,
                 budget_remaining=self._browser_budget_remaining(source_provider, host),
+                browser_backend=self.config.browser_backend,
             )
 
     def _browser_budget_remaining(self, source_provider: str, host: str) -> dict[str, int]:
@@ -986,6 +995,48 @@ class CandidateDiscoveryEngine:
             write_jsonl(self.logs_dir / "browser_capture_errors.jsonl", [error_record], append=True)
             write_jsonl(self.logs_dir / "playwright_network_capture_errors.jsonl", [error_record], append=True)
 
+    def _browser_backend_install_hint(self) -> str:
+        if self.config.browser_backend == "cloakbrowser":
+            return "Install with: pip install -e .[cloakbrowser]"
+        return "Install with: pip install -e .[playwright] and run: python -m playwright install chromium"
+
+    @contextmanager
+    def _browser_capture_session(self):
+        backend = self.config.browser_backend
+        browser = None
+        if backend == "cloakbrowser":
+            try:
+                from cloakbrowser import launch
+            except ImportError as exc:
+                raise ImportError(f"CloakBrowser backend selected but cloakbrowser is not installed. {self._browser_backend_install_hint()}") from exc
+            browser = launch(headless=True)
+            try:
+                yield browser
+            finally:
+                try:
+                    if browser is not None:
+                        browser.close()
+                except Exception:
+                    pass
+            return
+        if backend == "playwright":
+            try:
+                from playwright.sync_api import sync_playwright
+            except ImportError as exc:
+                raise ImportError(f"Playwright backend selected but playwright is not installed. {self._browser_backend_install_hint()}") from exc
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                try:
+                    yield browser
+                finally:
+                    try:
+                        if browser is not None:
+                            browser.close()
+                    except Exception:
+                        pass
+            return
+        raise ValueError(f"Unsupported browser backend: {backend!r}")
+
     def _extract_from_dynamic_page(
         self,
         url: str,
@@ -996,23 +1047,15 @@ class CandidateDiscoveryEngine:
         return_result: bool = False,
     ) -> list[CameraCandidate] | tuple[list[CameraCandidate], BrowserCaptureResult]:
         start = time.monotonic()
-        try:
-            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:
-            result = BrowserCaptureResult(url=url, error=repr(exc))
-            self._record_browser_summary(row.get("source_provider") or "unknown", attempted=True, error=True)
-            return ([], result) if return_result else []
+        backend = self.config.browser_backend
 
         collected_hls: set[str] = set()
         collected_json: set[str] = set()
         network_events: list[dict[str, Any]] = []
         rendered_html = ""
         timed_out = False
-        browser = None
         try:
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
+            with self._browser_capture_session() as browser:
                 page = browser.new_page(user_agent=self.config.user_agent)
 
                 def collect_url(candidate_url: str, content_type: str = "", event_type: str = "network") -> None:
@@ -1036,21 +1079,18 @@ class CandidateDiscoveryEngine:
                     if self.config.browser_capture_settle_ms:
                         page.wait_for_timeout(min(self.config.browser_capture_settle_ms, 1500))
                 rendered_html = page.content()
-        except PlaywrightTimeoutError as exc:
-            timed_out = True
-            result = BrowserCaptureResult(url=url, elapsed_ms=int((time.monotonic() - start) * 1000), timed_out=True, error=repr(exc), network_events_sample=network_events)
-            self._record_browser_failure(url, row, result)
-            return ([], result) if return_result else []
         except Exception as exc:
-            result = BrowserCaptureResult(url=url, elapsed_ms=int((time.monotonic() - start) * 1000), error=repr(exc), network_events_sample=network_events)
+            timed_out = "timeout" in exc.__class__.__name__.casefold()
+            result = BrowserCaptureResult(
+                url=url,
+                backend=backend,
+                elapsed_ms=int((time.monotonic() - start) * 1000),
+                timed_out=timed_out,
+                error=repr(exc),
+                network_events_sample=network_events,
+            )
             self._record_browser_failure(url, row, result)
             return ([], result) if return_result else []
-        finally:
-            try:
-                if browser is not None:
-                    browser.close()
-            except Exception:
-                pass
 
         out: list[CameraCandidate] = []
         for stream_url in sorted(collected_hls):
@@ -1089,6 +1129,7 @@ class CandidateDiscoveryEngine:
         out = self._dedupe(out)
         result = BrowserCaptureResult(
             url=url,
+            backend=backend,
             captured_hls_urls=sorted(collected_hls),
             captured_json_urls=sorted(collected_json),
             rendered_html_candidates=sum(1 for c in out if c.discovery_method == "browser_rendered_html"),
@@ -1101,7 +1142,7 @@ class CandidateDiscoveryEngine:
         return (out, result) if return_result else out
 
     def _apply_browser_metadata(self, candidate: CameraCandidate, capture_url: str, decision: BrowserCaptureDecision | None, method: str) -> None:
-        candidate.source_metadata["browser_backend"] = "playwright"
+        candidate.source_metadata["browser_backend"] = self.config.browser_backend
         candidate.source_metadata["browser_capture_url"] = capture_url
         candidate.source_metadata["browser_capture_reason"] = ",".join((decision.reasons if decision else [])[:10])
         candidate.source_metadata.setdefault("discovery_method", method)
@@ -2022,7 +2063,7 @@ class CandidateDiscoveryEngine:
             "rejected": len(cs.rejected),
             "llm_semantic_reviewed": sum(1 for candidate in cs.unique if candidate.llm_semantic_decision),
             "browser_capture_enabled": self.config.enable_browser_capture,
-            "browser_backend": "playwright",
+            "browser_backend": self.config.browser_backend,
             "browser_rows_considered": self._browser_capture_summary.get("rows_considered", 0),
             "browser_rows_selected": self._browser_capture_summary.get("rows_selected", 0),
             "browser_pages_attempted": self._browser_capture_summary.get("pages_attempted", 0),
@@ -2042,6 +2083,7 @@ class CandidateDiscoveryEngine:
             pages_attempted=self._browser_capture_summary.get("pages_attempted", 0),
             candidates=self._browser_capture_summary.get("candidates", 0),
             errors=self._browser_capture_summary.get("errors", 0),
+            browser_backend=self.config.browser_backend,
         )
         write_json(target_logs / "candidate_discovery_summary.json", summary)
         if target.target_index == 0:

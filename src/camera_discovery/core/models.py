@@ -71,6 +71,7 @@ class RunConfig:
     # extraction runs first; these limits prevent dynamic rendering from consuming
     # an entire discovery run.
     enable_browser_capture: bool = True
+    browser_backend: str = "playwright"
     browser_capture_timeout_ms: int = 15000
     browser_capture_min_score: int = 3
     max_browser_capture_pages: int = 20
