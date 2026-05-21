@@ -1,3 +1,5 @@
+> **Source-alignment note:** This is a historical Codex implementation prompt retained for traceability. The current runtime documentation is in the root `README.md`, `docs/runtime_configuration.md`, `docs/output_artifacts.md`, and the source-aligned agent docs. Do not treat this prompt as the authoritative description of the current code if it conflicts with `src/camera_discovery/`.
+
 # Codex Prompt — Optional CloakBrowser Backend for Camera Discovery
 
 You are working in the `camera-discovery` repository. Integrate CloakBrowser as an optional browser-capture backend while keeping Playwright as the default backend. Use the existing browser-capture implementation and the existing Google Colab notebook workflow as the foundation. Make the smallest coherent change set possible.

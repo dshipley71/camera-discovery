@@ -1,9 +1,12 @@
-# Documentation
+# Documentation Index
 
-This folder contains project-level guidance imported from the agent blueprint and aligned with the runnable application source.
+This folder contains source-aligned project documentation for the current `camera-discovery` implementation.
 
-- `project_structure.md` — intended repository layout and module responsibilities.
-- `acceptance.md` — acceptance criteria for the clean-base implementation.
-- `sources_blueprint.md` — blueprint reference for the managed source registry.
+- `project_structure.md` — module layout and responsibility boundaries.
+- `runtime_configuration.md` — CLI options, provider settings, budgets, and runtime environment variables.
+- `output_artifacts.md` — trusted/review outputs and diagnostic files.
+- `acceptance.md` — behavior and validation criteria aligned with the implemented source code.
+- `sources_blueprint.md` — `SOURCES.md` schema and source-policy behavior.
+- `codex_prompt_*.md` — historical implementation prompts retained for traceability. They are references, not the primary runtime documentation.
 
-The root `AGENTS.md` and files under `agents/` are coding-agent instructions. The `src/` tree is the runnable application implementation.
+The root `README.md` is the primary user/developer guide. The files under `agents/` are coding-agent instructions that should stay aligned with `src/camera_discovery/`.

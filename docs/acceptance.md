@@ -1,46 +1,56 @@
 # Acceptance Criteria
 
-The implementation is accepted when:
+The implementation is accepted when the documentation and code agree on the following behavior.
 
-1. `TargetResolver` uses LLM target intent and geocoder referee as advisory signals only.
-2. `CandidateDiscoveryEngine` uses LLM semantic review without stream validation authority.
-3. `ReviewAndValidationPipeline` owns validation, trusted/untrusted output, map, and artifact packaging.
-4. Geometry verification is deterministic.
-5. Stream validation is deterministic/tool-based.
-6. Trusted `camera.geojson` is never created from LLM-only evidence.
-7. Fast mode writes review artifacts only.
-8. Balanced/Full modes can write trusted output only after deterministic gates pass.
-9. Ollama/Ollama Cloud, OpenAI-compatible, and Bedrock providers are supported. An LLM provider is required.
-10. Compile, tests, and notebook validation pass.
+## Architecture and trust boundary
 
-## Multi-location requirement
+1. The application is organized around `TargetResolver`, `CandidateDiscoveryEngine`, and `ReviewAndValidationPipeline`.
+2. `RunState` remains the canonical run snapshot written to `logs/run_summary.json`.
+3. LLMs are advisory evidence interpreters for target intent, geocoder referee ranking, candidate location-name inference, and candidate semantic review.
+4. Deterministic code remains the authority for geometry verification, coordinate acceptance, stream/image validation, trusted-output authorization, and artifact writing.
+5. No trusted `camera.geojson` is created from LLM-only geometry, LLM-only coordinates, LLM-only stream judgments, or LLM-only semantic review.
 
-Users may specify one or more places/locations in a single query. The application must not collapse multi-location queries into a single combined target. It must extract and process each requested target independently:
+## Target resolution
 
-```text
-Get me all cameras from London, England and New York, New York
-→ Target 1: London, England
-→ Target 2: New York, New York
-```
+1. Multi-location queries are split into independent targets.
+2. Every target has stable `target_id`, `target_index`, `target_label`, scope fields, target-specific diagnostics, and a trust policy.
+3. LLM-provided bbox/coordinate hints are stored only as unverified review hints.
+4. Geocoder candidates are deterministically rejected for invalid/missing/implausible bboxes, wrong admin hints, wrong result types for broad scopes, or invalid coordinate ranges.
+5. The LLM geocoder referee cannot revive deterministic-rejected candidates.
 
-Each target must receive a stable `target_id`, target-specific target-resolution diagnostics, target-specific candidate discovery artifacts, and target metadata on every candidate and GeoJSON feature. Final trusted and untrusted outputs may be merged, but each feature must preserve `target_id`, `target_label`, and `target_index`.
+## Discovery
 
-## Colab Table and Map Acceptance
+1. `blind`, `directory`, `both`, and `direct` modes work through the same normalized extraction path.
+2. In `both` mode, directory rows and blind-search rows are discovered in parallel before extraction.
+3. `SOURCES.md` allowed rows are used only in `directory` and `both`; blocked rows are global deny rules for all modes.
+4. Direct HLS seed/source URLs become candidates without browser capture.
+5. Static extraction handles HLS URLs, image snapshot URLs, HTML image/source tags, JSON responses, linked JSON/API/feed/map-layer endpoints, GeoJSON features, ArcGIS-style records, and JavaScript config blobs.
+6. Browser capture is optional, budgeted, logged, and available through Playwright by default or CloakBrowser when configured.
+7. JSON endpoint metadata is preserved into candidates, tables, GeoJSON, and maps when available.
+8. Candidate budgets separately account for HLS, image snapshot, and total candidates.
 
-The notebook is acceptable when it can:
+## Coordinates and scope
 
-- load `camera.geojson` or fall back to `untrusted_camera_candidates.geojson`,
-- display a camera table with URL, target, location, latitude, longitude, trust, validation, and source fields,
-- write `camera_candidates_table.csv`,
-- render a Leaflet map with all GeoJSON camera locations,
-- show marker popups with GeoJSON metadata,
-- show a thumbnail image when a thumbnail/snapshot URL is present,
-- provide a **Play video** button in each popup that attempts HLS playback through hls.js.
+1. Candidate coordinates come from source records, URL/metadata evidence, or Nominatim geocoding.
+2. Optional LLM location inference can produce geocoder query strings only; it cannot return coordinates.
+3. Candidate geocoder results are checked against verified target bbox when available.
+4. Candidates without coordinates remain in `camera_candidates_table.csv` and JSONL diagnostics but are not written to GeoJSON.
+5. Candidates outside a verified bbox are rejected.
+6. Candidates with coordinates but without verified target geometry remain review-only.
 
-## Coordinate Enrichment Acceptance
+## Validation and output
 
-- extract coordinates from JSON, GeoJSON, ArcGIS map-layer records, JavaScript config objects, URL query parameters, and source metadata;
-- optionally geocode specific candidate location text with a real geocoder when coordinates are missing;
-- never synthesize coordinates;
-- write `camera_candidates_table.csv` even when no GeoJSON can be created;
-- write GeoJSON only for candidates with real coordinates.
+1. `fast` profile disables validation and blocks trusted output.
+2. `balanced` profile validates HLS playlist responses and image snapshots with real HTTP checks.
+3. `full` profile additionally checks first HLS segment/variant reachability through the current `ffprobe_enabled` code path.
+4. Image snapshot validation rejects obvious static assets and non-image responses and marks unchanged image endpoints as untrusted/static-unverified rather than trusted.
+5. Trusted outputs are created only when trusted candidates exist; empty trusted files are not created.
+6. `camera_candidates_table.csv`, `map.html`, `RUN_EXPLANATION.md`, `review_artifacts.zip`, validation diagnostics, and output summaries are written when output writing runs.
+7. The map merges trusted and untrusted GeoJSON when both exist, includes a camera type/trust legend, supports thumbnail/snapshot display, and provides HLS/native playback attempts.
+
+## Tests and notebook
+
+1. `PYTHONPATH=src python -m compileall src` passes.
+2. `PYTHONPATH=src python -m pytest -q` passes in an environment with required optional dependencies available or skips optional integrations explicitly.
+3. The notebook remains valid JSON and keeps notebook-specific helper code inside the notebook.
+4. Tests and docs do not introduce synthetic camera inventories, fake streams, fabricated coordinates, fake validation results, or hard-coded real-world target/source behavior.

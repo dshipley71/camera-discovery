@@ -1,3 +1,5 @@
+> **Source-alignment note:** This is a historical Codex implementation prompt retained for traceability. The current runtime documentation is in the root `README.md`, `docs/runtime_configuration.md`, `docs/output_artifacts.md`, and the source-aligned agent docs. Do not treat this prompt as the authoritative description of the current code if it conflicts with `src/camera_discovery/`.
+
 # Codex Prompt — Browser-Capture Expansion for Camera Discovery
 
 You are working in the `camera-discovery` repository. Implement browser-capture expansion with minimal source-code and notebook changes. Follow the repository's `AGENTS.md` and all implementation notes. Do not skip verification. Do not invent functions, modules, classes, or CLI flags without first confirming the current source structure.
