@@ -67,7 +67,9 @@ class ReviewAndValidationPipeline:
     def _validate_candidate(self, candidate: CameraCandidate) -> str:
         media_type = str((candidate.source_metadata or {}).get("media_type") or "").casefold()
         if media_type == "image_snapshot":
-            return self._validate_image_snapshot(candidate.stream_url)
+            return self._validate_image_snapshot(candidate.stream_url, candidate.source_metadata or {})
+        if media_type and media_type not in {"hls", "hls_stream", "video", "unknown"} and ".m3u8" not in candidate.stream_url.casefold():
+            return "not_validated_media_type"
         return self._validate_hls(candidate.stream_url)
 
     def _validate_hls(self, url: str) -> str:
@@ -105,7 +107,7 @@ class ReviewAndValidationPipeline:
                 return urljoin(playlist_url, stripped)
         return None
 
-    def _validate_image_snapshot(self, url: str) -> str:
+    def _validate_image_snapshot(self, url: str, metadata: dict | None = None) -> str:
         """Validate that an image snapshot endpoint is a real image and appears refreshable.
 
         This performs live HTTP checks. Static web assets are rejected; image
@@ -122,7 +124,8 @@ class ReviewAndValidationPipeline:
                     return first_status
                 if _headers_indicate_static_asset(first.headers):
                     return "static_image_asset"
-                delay = max(0.0, float(getattr(self.config, "image_snapshot_refresh_delay_seconds", 2.0)))
+                delay_value = _camera_refresh_rate_seconds(metadata or {})
+                delay = max(0.0, float(delay_value if delay_value is not None else getattr(self.config, "image_snapshot_refresh_delay_seconds", 2.0)))
                 if delay:
                     time.sleep(delay)
                 second = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
@@ -245,7 +248,19 @@ class ReviewAndValidationPipeline:
             "location_text",
             "location_display",
             "camera_type",
+            "raw_camera_type",
             "camera_id",
+            "route",
+            "direction",
+            "city",
+            "county",
+            "district",
+            "owner",
+            "agency",
+            "json_endpoint_url",
+            "json_record_path",
+            "json_record_schema_hint",
+            "geocode_query_basis",
             "stream_url",
             "source_url",
             "latitude",
@@ -281,7 +296,19 @@ class ReviewAndValidationPipeline:
                         "location_text": row.location_text,
                         "location_display": _camera_location_display(row, None),
                         "camera_type": metadata.get("camera_type"),
+                        "raw_camera_type": metadata.get("raw_camera_type"),
                         "camera_id": metadata.get("camera_id") or metadata.get("id"),
+                        "route": metadata.get("route") or metadata.get("road"),
+                        "direction": metadata.get("direction"),
+                        "city": metadata.get("city"),
+                        "county": metadata.get("county"),
+                        "district": metadata.get("district") or metadata.get("region"),
+                        "owner": metadata.get("owner"),
+                        "agency": metadata.get("agency"),
+                        "json_endpoint_url": metadata.get("json_endpoint_url"),
+                        "json_record_path": metadata.get("json_record_path"),
+                        "json_record_schema_hint": metadata.get("json_record_schema_hint"),
+                        "geocode_query_basis": "; ".join(metadata.get("geocode_query_basis") or []) if isinstance(metadata.get("geocode_query_basis"), list) else metadata.get("geocode_query_basis"),
                         "stream_url": row.stream_url,
                         "source_url": row.source_url,
                         "latitude": row.lat,
@@ -291,7 +318,7 @@ class ReviewAndValidationPipeline:
                         "geocoded_display_name": row.geocoded_display_name,
                         "thumbnail_url": metadata.get("snapshot_url") or metadata.get("thumbnail_url") or metadata.get("image_url"),
                         "camera_refresh_rate": _camera_refresh_rate(metadata),
-                        "map_refresh_rate_seconds": self.config.image_snapshot_refresh_delay_seconds if media_type == "image_snapshot" else None,
+                        "map_refresh_rate_seconds": _camera_map_refresh_rate_seconds(metadata, self.config.image_snapshot_refresh_delay_seconds) if media_type == "image_snapshot" else None,
                         "media_type": media_type,
                         "trust_level": row.trust_level,
                         "validation_status": row.validation_status,
@@ -323,13 +350,28 @@ class ReviewAndValidationPipeline:
             if media_type == "image_snapshot" and not snapshot_url:
                 snapshot_url = c.stream_url
             camera_refresh_rate = _camera_refresh_rate(metadata)
-            map_refresh_rate = self.config.image_snapshot_refresh_delay_seconds if media_type == "image_snapshot" else None
+            map_refresh_rate = _camera_map_refresh_rate_seconds(metadata, self.config.image_snapshot_refresh_delay_seconds) if media_type == "image_snapshot" else None
             props.update(
                 {
                     "name": c.title or metadata.get("source_name") or "Camera candidate",
                     "location_display": _camera_location_display(c, target),
                     "camera_type": metadata.get("camera_type"),
+                    "raw_camera_type": metadata.get("raw_camera_type"),
                     "camera_id": metadata.get("camera_id") or metadata.get("id"),
+                    "camera_name": metadata.get("camera_name"),
+                    "route": metadata.get("route") or metadata.get("road"),
+                    "direction": metadata.get("direction"),
+                    "intersection": metadata.get("intersection"),
+                    "cross_street": metadata.get("cross_street"),
+                    "city": metadata.get("city"),
+                    "county": metadata.get("county"),
+                    "district": metadata.get("district") or metadata.get("region"),
+                    "camera_status": metadata.get("camera_status"),
+                    "owner": metadata.get("owner"),
+                    "agency": metadata.get("agency"),
+                    "json_endpoint_url": metadata.get("json_endpoint_url"),
+                    "json_record_path": metadata.get("json_record_path"),
+                    "json_record_schema_hint": metadata.get("json_record_schema_hint"),
                     "media_type": media_type,
                     "snapshot_url": snapshot_url,
                     "thumbnail_url": snapshot_url,
@@ -358,17 +400,27 @@ class ReviewAndValidationPipeline:
     def _write_cameras_md(self, rows: list[CameraCandidate]) -> None:
         lines = [
             "# Trusted Camera Inventory\n",
-            "| Name | Location | Latitude | Longitude | Stream URL | Source URL |",
-            "|---|---|---|---|---|---|",
+            "<!-- Legacy columns: | Name | Location | Latitude | Longitude | Stream URL | Source URL | -->",
+            "| Name | Location | Camera Type | Camera ID | Media Type | Refresh Rate | Latitude | Longitude | Stream/Media URL | Source URL |",
+            "|---|---|---|---|---|---|---|---|---|---|",
         ]
         for r in rows:
-            name = (r.title or "Camera").replace("|", "\\|")
-            location = (r.location_text or "").replace("|", "\\|")
-            lat = str(r.lat) if r.lat is not None else ""
-            lon = str(r.lon) if r.lon is not None else ""
-            stream = r.stream_url.replace("|", "\\|")
-            source = (r.source_url or "").replace("|", "\\|")
-            lines.append(f"| {name} | {location} | {lat} | {lon} | {stream} | {source} |")
+            metadata = r.source_metadata or {}
+            media_type = metadata.get("media_type") or ("hls" if ".m3u8" in r.stream_url.casefold() else "")
+            values = [
+                r.title or metadata.get("camera_name") or "Camera",
+                _camera_location_display(r, None) or "",
+                metadata.get("camera_type") or "",
+                metadata.get("camera_id") or metadata.get("id") or "",
+                media_type or "",
+                _camera_refresh_rate(metadata) or "",
+                str(r.lat) if r.lat is not None else "",
+                str(r.lon) if r.lon is not None else "",
+                r.stream_url,
+                r.source_url or metadata.get("json_endpoint_url") or "",
+            ]
+            escaped = [str(value).replace("|", "\\|") for value in values]
+            lines.append("| " + " | ".join(escaped) + " |")
         (self.config.output_dir / "cameras.md").write_text(
             "\n".join(lines) + "\n", encoding="utf-8"
         )
@@ -396,18 +448,25 @@ def _camera_location_display(candidate: CameraCandidate, target: TargetContext |
     metadata = candidate.source_metadata or {}
     for value in [
         candidate.location_text,
+        metadata.get("location_display"),
         candidate.geocoded_display_name,
         metadata.get("location"),
         metadata.get("location_text"),
+        metadata.get("intersection"),
+        metadata.get("cross_street"),
         metadata.get("road"),
         metadata.get("route"),
-        metadata.get("intersection"),
+        metadata.get("direction"),
         metadata.get("city"),
         metadata.get("county"),
+        metadata.get("district"),
+        metadata.get("camera_name"),
         candidate.title,
     ]:
         if isinstance(value, str) and value.strip():
             return value.strip()
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
     if target:
         for value in [target.canonical_target, target.target_label]:
             if isinstance(value, str) and value.strip():
@@ -418,17 +477,51 @@ def _camera_location_display(candidate: CameraCandidate, target: TargetContext |
 def _camera_refresh_rate(metadata: dict) -> str | int | float | None:
     for key in (
         "camera_refresh_rate",
-        "refresh_rate",
         "refresh_rate_seconds",
+        "refresh_rate",
         "refresh_interval",
         "refresh_interval_seconds",
         "update_interval",
         "update_interval_seconds",
+        "currentImageUpdateFrequency",
+        "referenceImageUpdateFrequency",
+        "currentimageupdatefrequency",
+        "referenceimageupdatefrequency",
+        "updateFrequency",
+        "update_frequency",
+        "image_snapshot_refresh_delay_seconds",
+        "map_refresh_rate_seconds",
     ):
         value = metadata.get(key)
         if value not in (None, ""):
             return value
     return None
+
+
+def _camera_refresh_rate_seconds(metadata: dict) -> float | None:
+    value = _camera_refresh_rate(metadata)
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    text = str(value).strip()
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    import re
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m)\b", text, re.I)
+    if match:
+        amount = float(match.group(1))
+        return amount * 60 if match.group(2).casefold().startswith("m") else amount
+    return None
+
+
+def _camera_map_refresh_rate_seconds(metadata: dict, default_seconds: float) -> float | int | str | None:
+    value = _camera_refresh_rate_seconds(metadata)
+    if value is None:
+        return default_seconds
+    return int(value) if float(value).is_integer() else value
 
 
 def _untrusted_reason(candidate: CameraCandidate, target: TargetContext | None) -> str:

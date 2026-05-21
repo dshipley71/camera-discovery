@@ -181,7 +181,9 @@ def write_embedded_camera_map(
             "has_video_playback_button": True,
             "has_refreshing_snapshot_viewer": True,
             "has_camera_type_legend": True,
-            "marker_colors": {"hls": "green", "image_snapshot": "yellow", "other": "blue"},
+            "has_trust_shape_legend": True,
+            "marker_shapes": {"trusted": "star", "untrusted_review": "circle"},
+            "marker_colors": {"traffic": "green", "weather": "deepskyblue", "transit": "purple", "public": "royalblue", "image_snapshot": "gold", "hls": "green", "other": "royalblue", "unknown": "gray"},
             "thumbnail_fields_supported": list(THUMBNAIL_KEYS),
         },
     )
@@ -220,7 +222,8 @@ def _first_text(mapping: dict[str, Any], *keys: str) -> str | None:
 def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
     data = json.dumps(geojson, ensure_ascii=False)
     title = escape(source_name or "No GeoJSON selected")
-    return f"""<!doctype html>
+    thumbnail_keys_json = json.dumps(list(THUMBNAIL_KEYS))
+    template = """<!doctype html>
 <html>
 <head>
   <meta charset='utf-8'>
@@ -230,37 +233,46 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
   <script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>
   <script src='https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js'></script>
   <style>
-    html, body, #map {{ height: 100%; margin: 0; }}
-    .status {{ position: absolute; z-index: 999; left: 10px; top: 10px; background: white; padding: 8px 10px; border-radius: 8px; box-shadow: 0 1px 8px rgba(0,0,0,.25); font-family: sans-serif; max-width: 420px; }}
-    .map-legend {{ position: absolute; z-index: 999; right: 10px; bottom: 22px; background: white; padding: 8px 10px; border-radius: 8px; box-shadow: 0 1px 8px rgba(0,0,0,.25); font-family: sans-serif; font-size: 12px; }}
-    .legend-title {{ font-weight: 700; margin-bottom: 5px; }}
-    .legend-row {{ display: flex; align-items: center; gap: 6px; margin: 3px 0; }}
-    .swatch {{ display: inline-block; width: 12px; height: 12px; border-radius: 999px; border: 1px solid rgba(0,0,0,.35); }}
-    .popup {{ width: 300px; font-family: sans-serif; }}
-    .popup h3 {{ margin: 0 0 6px 0; font-size: 15px; }}
-    .popup table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
-    .popup td {{ vertical-align: top; border-top: 1px solid #eee; padding: 3px 2px; }}
-    .popup td:first-child {{ font-weight: 600; color: #444; width: 88px; }}
-    .thumb {{ width: 100%; max-height: 170px; object-fit: cover; border-radius: 8px; border: 1px solid #ddd; margin: 6px 0; background: #000; }}
-    .no-thumb {{ padding: 12px; border: 1px dashed #bbb; color: #666; border-radius: 8px; text-align: center; margin: 6px 0; }}
-    .play {{ width: 100%; padding: 8px; border: 0; border-radius: 8px; background: #1565c0; color: white; cursor: pointer; font-weight: 700; }}
-    .play:hover {{ background: #0d47a1; }}
-    .video-modal {{ display: none; position: fixed; z-index: 2000; inset: 0; background: rgba(0,0,0,.82); align-items: center; justify-content: center; }}
-    .video-card {{ width: min(94vw, 920px); background: #111; color: white; border-radius: 12px; padding: 12px; box-shadow: 0 4px 24px rgba(0,0,0,.5); }}
-    .video-card header {{ display: flex; justify-content: space-between; gap: 10px; align-items: center; font-family: sans-serif; }}
-    .close {{ background: #444; color: white; border: 0; padding: 6px 10px; border-radius: 6px; cursor: pointer; }}
-    video {{ width: 100%; max-height: 72vh; margin-top: 10px; background: black; }}
-    .snapshot-live {{ width: 100%; max-height: 72vh; object-fit: contain; margin-top: 10px; background: #000; }}
-    .stream-link {{ color: #90caf9; word-break: break-all; font-size: 12px; }}
+    html, body, #map { height: 100%; margin: 0; }
+    .status { position: absolute; z-index: 999; left: 10px; top: 10px; background: white; padding: 8px 10px; border-radius: 8px; box-shadow: 0 1px 8px rgba(0,0,0,.25); font-family: sans-serif; max-width: 420px; }
+    .map-legend { position: absolute; z-index: 999; right: 10px; bottom: 22px; background: white; padding: 8px 10px; border-radius: 8px; box-shadow: 0 1px 8px rgba(0,0,0,.25); font-family: sans-serif; font-size: 12px; }
+    .legend-title { font-weight: 700; margin-bottom: 5px; }
+    .legend-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+    .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 999px; border: 1px solid rgba(0,0,0,.35); }
+    .shape-swatch { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; font-size:14px; line-height:14px; color:#222; }
+    .star-marker { width:16px; height:16px; line-height:16px; text-align:center; font-size:16px; font-weight:900; text-shadow:0 0 2px #222; transform: translate(-8px, -8px); }
+    .popup { width: 320px; font-family: sans-serif; }
+    .popup h3 { margin: 0 0 6px 0; font-size: 15px; }
+    .popup table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .popup td { vertical-align: top; border-top: 1px solid #eee; padding: 3px 2px; }
+    .popup td:first-child { font-weight: 600; color: #444; width: 100px; }
+    .popup details { margin-top: 6px; font-size: 12px; }
+    .thumb { width: 100%; max-height: 170px; object-fit: cover; border-radius: 8px; border: 1px solid #ddd; margin: 6px 0; background: #000; }
+    .no-thumb { padding: 12px; border: 1px dashed #bbb; color: #666; border-radius: 8px; text-align: center; margin: 6px 0; }
+    .play { width: 100%; padding: 8px; border: 0; border-radius: 8px; background: #1565c0; color: white; cursor: pointer; font-weight: 700; }
+    .play:hover { background: #0d47a1; }
+    .video-modal { display: none; position: fixed; z-index: 2000; inset: 0; background: rgba(0,0,0,.82); align-items: center; justify-content: center; }
+    .video-card { width: min(94vw, 920px); background: #111; color: white; border-radius: 12px; padding: 12px; box-shadow: 0 4px 24px rgba(0,0,0,.5); }
+    .video-card header { display: flex; justify-content: space-between; gap: 10px; align-items: center; font-family: sans-serif; }
+    .close { background: #444; color: white; border: 0; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+    video { width: 100%; max-height: 72vh; margin-top: 10px; background: black; }
+    .snapshot-live { width: 100%; max-height: 72vh; object-fit: contain; margin-top: 10px; background: #000; }
+    .stream-link { color: #90caf9; word-break: break-all; font-size: 12px; }
   </style>
 </head>
 <body>
-  <div class='status' id='status'>Loading {title}...</div>
-  <div class='map-legend' aria-label='Camera color legend'>
-    <div class='legend-title'>Camera type</div>
-    <div class='legend-row'><span class='swatch' style='background:green'></span><span>HLS video</span></div>
-    <div class='legend-row'><span class='swatch' style='background:gold'></span><span>Image snapshot</span></div>
-    <div class='legend-row'><span class='swatch' style='background:royalblue'></span><span>Other / future</span></div>
+  <div class='status' id='status'>Loading __TITLE__...</div>
+  <div class='map-legend' aria-label='Camera color legend and marker shape legend'>
+    <div class='legend-title'>Marker shape</div>
+    <div class='legend-row'><span class='shape-swatch'>★</span><span>Trusted</span></div>
+    <div class='legend-row'><span class='shape-swatch'>●</span><span>Untrusted / review</span></div>
+    <div class='legend-title' style='margin-top:6px'>Camera color legend</div>
+    <div class='legend-row'><span class='swatch' style='background:green'></span><span>Traffic / HLS video fallback</span></div>
+    <div class='legend-row'><span class='swatch' style='background:deepskyblue'></span><span>Weather</span></div>
+    <div class='legend-row'><span class='swatch' style='background:purple'></span><span>Transit</span></div>
+    <div class='legend-row'><span class='swatch' style='background:gold'></span><span>Image snapshot fallback</span></div>
+    <div class='legend-row'><span class='swatch' style='background:royalblue'></span><span>Public / other</span></div>
+    <div class='legend-row'><span class='swatch' style='background:gray'></span><span>Unknown</span></div>
   </div>
   <div id='map'></div>
   <div class='video-modal' id='videoModal'>
@@ -272,176 +284,179 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
     </div>
   </div>
   <script>
-    const CAMERA_GEOJSON = {data};
+    const CAMERA_GEOJSON = __DATA__;
+    const THUMBNAIL_KEYS = __THUMBNAIL_KEYS__;
     let activeHls = null;
     const map = L.map('map').setView([39, -98], 4);
-    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{ maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }}).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
 
-    function esc(value) {{
-      return String(value ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
-    }}
-    function getMetadata(props) {{ return props && typeof props.source_metadata === 'object' && props.source_metadata !== null ? props.source_metadata : {{}}; }}
-    function firstValue(props, keys) {{
+    function esc(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function getMetadata(props) { return props && typeof props.source_metadata === 'object' && props.source_metadata !== null ? props.source_metadata : {}; }
+    function firstValue(props, keys) {
       const meta = getMetadata(props);
-      for (const k of keys) {{ if (props && props[k]) return props[k]; }}
-      for (const k of keys) {{ if (meta && meta[k]) return meta[k]; }}
+      for (const k of keys) { if (props && props[k] !== undefined && props[k] !== null && props[k] !== '') return props[k]; }
+      for (const k of keys) { if (meta && meta[k] !== undefined && meta[k] !== null && meta[k] !== '') return meta[k]; }
       return '';
-    }}
-    function cacheBust(url) {{
-      if (!url || url.startsWith('data:')) return url;
-      const sep = url.includes('?') ? '&' : '?';
-      return url + sep + '_camera_discovery_ts=' + Date.now();
-    }}
+    }
+    function cacheBust(url) { if (!url || url.startsWith('data:')) return url; const sep = url.includes('?') ? '&' : '?'; return url + sep + '_camera_discovery_ts=' + Date.now(); }
     let snapshotTimer = null;
     let popupPreviewHlsPlayers = [];
-    function normalizedMediaType(props, stream, thumb) {{
+    function normalizedMediaType(props, stream, thumb) {
       const mediaType = firstValue(props, ['media_type']);
-      if (mediaType) return mediaType;
+      if (mediaType) return String(mediaType).toLowerCase();
       const lower = String(stream || '').toLowerCase();
       if (lower.includes('.m3u8')) return 'hls';
-      if (thumb || /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(lower)) return 'image_snapshot';
+      if (thumb || /\.(jpg|jpeg|png|webp)(\?|$)/i.test(lower)) return 'image_snapshot';
       return 'other';
-    }}
-    function markerColor(mediaType) {{
-      if (mediaType === 'image_snapshot') return 'gold';
-      if (mediaType === 'hls' || mediaType === 'hls_stream' || mediaType === 'video' || mediaType === 'unknown') return 'green';
+    }
+    function cameraColorCategory(props, mediaType) {
+      const raw = String(firstValue(props, ['camera_type', 'raw_camera_type', 'type', 'category']) || '').toLowerCase();
+      if (raw.includes('traffic') || raw.includes('road') || raw.includes('highway') || raw.includes('cctv')) return 'traffic';
+      if (raw.includes('weather') || raw.includes('wx')) return 'weather';
+      if (raw.includes('transit') || raw.includes('rail') || raw.includes('bus') || raw.includes('train')) return 'transit';
+      if (raw.includes('public') || raw.includes('tour')) return 'public';
+      if (raw.includes('camera') || raw.includes('webcam')) return 'public';
+      if (mediaType === 'image_snapshot') return 'image_snapshot';
+      if (mediaType === 'hls' || mediaType === 'hls_stream' || mediaType === 'video') return 'traffic';
+      return raw ? 'other' : 'unknown';
+    }
+    function markerColor(category) {
+      if (category === 'traffic') return 'green';
+      if (category === 'weather') return 'deepskyblue';
+      if (category === 'transit') return 'purple';
+      if (category === 'image_snapshot') return 'gold';
+      if (category === 'unknown') return 'gray';
       return 'royalblue';
-    }}
-    function markerStyle(feature) {{
-      const p = feature.properties || {{}};
+    }
+    function trustedStarIcon(color) { return L.divIcon({ className: '', html: `<div class="star-marker" style="color:${esc(color)}">★</div>`, iconSize: [16,16], iconAnchor: [8,8] }); }
+    function markerForFeature(feature, latlng) {
+      const p = feature.properties || {};
       const stream = p.stream_url || '';
-      const thumb = firstValue(p, {json.dumps(list(THUMBNAIL_KEYS))});
-      const color = markerColor(normalizedMediaType(p, stream, thumb));
-      return {{ radius: 7, weight: 2, color: '#222', fillColor: color, fillOpacity: .82 }};
-    }}
-    function stopPopupPreviews() {{
-      for (const item of popupPreviewHlsPlayers) {{
-        try {{ if (item.hls) item.hls.destroy(); }} catch (err) {{}}
-        try {{ if (item.video) {{ item.video.pause(); item.video.removeAttribute('src'); item.video.load(); }} }} catch (err) {{}}
-      }}
+      const thumb = firstValue(p, THUMBNAIL_KEYS);
+      const mediaType = normalizedMediaType(p, stream, thumb);
+      const color = markerColor(cameraColorCategory(p, mediaType));
+      if (String(p.trust_level || '').toLowerCase() === 'trusted' || p.trusted_geojson_candidate === true) return L.marker(latlng, { icon: trustedStarIcon(color) });
+      return L.circleMarker(latlng, { radius: 7, weight: 2, color: '#222', fillColor: color, fillOpacity: .82 });
+    }
+    function stopPopupPreviews() {
+      for (const item of popupPreviewHlsPlayers) { try { if (item.hls) item.hls.destroy(); } catch (err) {} try { if (item.video) { item.video.pause(); item.video.removeAttribute('src'); item.video.load(); } } catch (err) {} }
       popupPreviewHlsPlayers = [];
-    }}
-    function initPopupPreviews(container) {{
+    }
+    function initPopupPreviews(container) {
       stopPopupPreviews();
       if (!container) return;
-      for (const video of container.querySelectorAll('video.hls-thumb[data-stream]')) {{
+      for (const video of container.querySelectorAll('video.hls-thumb[data-stream]')) {
         const url = video.getAttribute('data-stream');
         if (!url) continue;
-        if (url.toLowerCase().includes('.m3u8') && window.Hls && Hls.isSupported()) {{
-          const hls = new Hls({{ lowLatencyMode: true }});
-          hls.loadSource(url);
-          hls.attachMedia(video);
-          popupPreviewHlsPlayers.push({{ video, hls }});
-        }} else {{
-          video.src = url;
-          popupPreviewHlsPlayers.push({{ video, hls: null }});
-        }}
-        video.play().catch(() => {{}});
-      }}
-    }}
-    function previewHtml(mediaType, stream, thumb) {{
-      if (mediaType === 'image_snapshot') {{
-        const imageUrl = thumb || stream;
-        return imageUrl ? `<img class="thumb" src="${{esc(cacheBust(imageUrl))}}" alt="Current camera image" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{{className:'no-thumb',innerText:'Snapshot unavailable'}}))">` : `<div class="no-thumb">No snapshot URL in GeoJSON</div>`;
-      }}
-      if (thumb) {{
-        return `<img class="thumb" src="${{esc(cacheBust(thumb))}}" alt="Camera thumbnail" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{{className:'no-thumb',innerText:'Thumbnail unavailable'}}))">`;
-      }}
-      if (stream && String(stream).toLowerCase().includes('.m3u8')) {{
-        return `<video class="thumb hls-thumb" data-stream="${{esc(stream)}}" muted autoplay playsinline></video>`;
-      }}
+        if (url.toLowerCase().includes('.m3u8') && window.Hls && Hls.isSupported()) { const hls = new Hls({ lowLatencyMode: true }); hls.loadSource(url); hls.attachMedia(video); popupPreviewHlsPlayers.push({ video, hls }); }
+        else { video.src = url; popupPreviewHlsPlayers.push({ video, hls: null }); }
+        video.play().catch(() => {});
+      }
+    }
+    function previewHtml(mediaType, stream, thumb) {
+      if (mediaType === 'image_snapshot') { const imageUrl = thumb || stream; return imageUrl ? `<img class="thumb" src="${esc(cacheBust(imageUrl))}" alt="Current camera image" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'no-thumb',innerText:'Snapshot unavailable'}))">` : `<div class="no-thumb">No snapshot URL in GeoJSON</div>`; }
+      if (thumb) return `<img class="thumb" src="${esc(cacheBust(thumb))}" alt="Camera thumbnail" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'no-thumb',innerText:'Thumbnail unavailable'}))">`;
+      if (stream && String(stream).toLowerCase().includes('.m3u8')) return `<video class="thumb hls-thumb" data-stream="${esc(stream)}" muted autoplay playsinline></video>`;
       return `<div class="no-thumb">No thumbnail URL in GeoJSON</div>`;
-    }}
-    function popupHtml(feature) {{
-      const p = feature.properties || {{}};
+    }
+    function linkHtml(label, url) { return url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label)}</a>` : ''; }
+    function detailRow(label, value) { if (value === undefined || value === null || value === '') return ''; return `<tr><td>${esc(label)}</td><td>${esc(value)}</td></tr>`; }
+    function popupHtml(feature) {
+      const p = feature.properties || {};
       const coords = feature.geometry && Array.isArray(feature.geometry.coordinates) ? feature.geometry.coordinates : [];
       const lon = p.lon ?? coords[0] ?? '';
       const lat = p.lat ?? coords[1] ?? '';
       const name = firstValue(p, ['name', 'title', 'camera_name', 'source_name']) || 'Camera candidate';
-      const thumb = firstValue(p, {json.dumps(list(THUMBNAIL_KEYS))});
-      const stream = p.stream_url || '';
-      const source = p.source_url || '';
+      const thumb = firstValue(p, THUMBNAIL_KEYS);
+      const stream = p.stream_url || firstValue(p, ['media_url', 'stream_url']) || '';
+      const source = p.source_url || firstValue(p, ['json_endpoint_url']) || '';
       const mediaType = normalizedMediaType(p, stream, thumb);
       const cameraType = firstValue(p, ['camera_type', 'type', 'category']) || '';
+      const rawCameraType = firstValue(p, ['raw_camera_type']) || '';
       const cameraId = firstValue(p, ['camera_id', 'id']) || '';
       const locationText = firstValue(p, ['location_display', 'location_text', 'geocoded_display_name', 'source_scope_hint']) || '';
       const cameraRefreshRate = firstValue(p, ['camera_refresh_rate', 'refresh_rate', 'refresh_rate_seconds', 'refresh_interval', 'refresh_interval_seconds']) || '';
       const mapRefreshRate = firstValue(p, ['map_refresh_rate_seconds', 'image_snapshot_refresh_delay_seconds']) || '';
+      const sourceEndpoint = firstValue(p, ['json_endpoint_url']) || source;
+      const snapshot = firstValue(p, ['snapshot_url', 'current_image_url', 'currentImageURL']);
+      const thumbnail = thumb || firstValue(p, ['thumbnail_url', 'reference_image_url', 'referenceImageURL', 'referenceImage1URL']);
       const thumbHtml = previewHtml(mediaType, stream, thumb);
-      const buttonLabel = mediaType === 'image_snapshot' ? '↻ Open refreshing snapshot' : '▶ Play video';
-      const playHtml = stream ? `<button class="play" onclick='playCamera(${{JSON.stringify(stream)}}, ${{JSON.stringify(name)}}, ${{JSON.stringify(mediaType)}}, ${{JSON.stringify(mapRefreshRate)}})'>${{buttonLabel}}</button>` : '';
-      const sourceHtml = source ? `<a href="${{esc(source)}}" target="_blank" rel="noopener">source</a>` : '';
-      const streamHtml = stream ? `<a href="${{esc(stream)}}" target="_blank" rel="noopener">media</a>` : '';
-      const snapshotRows = mediaType === 'image_snapshot' ? `
-        <tr><td>Camera Refresh Rate</td><td>${{esc(cameraRefreshRate || 'null')}}</td></tr>
-        <tr><td>Map Refresh Rate</td><td>${{esc(mapRefreshRate || 'null')}}</td></tr>` : '';
-      return `<div class="popup"><h3>${{esc(name)}}</h3>${{thumbHtml}}${{playHtml}}<table>
-        <tr><td>Target</td><td>${{esc(p.target_label || p.target_id || '')}}</td></tr>
-        <tr><td>Location</td><td>${{esc(locationText)}}</td></tr>
-        <tr><td>Camera type</td><td>${{esc(cameraType)}}</td></tr>
-        <tr><td>Camera ID</td><td>${{esc(cameraId)}}</td></tr>
-        <tr><td>Media type</td><td>${{esc(mediaType)}}</td></tr>
-        ${{snapshotRows}}
-        <tr><td>Lat/Lon</td><td>${{esc(lat)}}, ${{esc(lon)}}</td></tr>
-        <tr><td>Trust</td><td>${{esc(p.trust_level || '')}}</td></tr>
-        <tr><td>Validation</td><td>${{esc(p.validation_status || '')}}</td></tr>
-        <tr><td>Scope</td><td>${{esc(p.scope_status || '')}}</td></tr>
-        <tr><td>Discovery</td><td>${{esc(p.discovery_method || '')}}</td></tr>
-        <tr><td>Links</td><td>${{sourceHtml}} ${{streamHtml}}</td></tr>
-      </table></div>`;
-    }}
-    function playCamera(url, title, mediaType, refreshSeconds) {{
+      const buttonLabel = mediaType === 'image_snapshot' ? '↻ Open refreshing snapshot' : '▶ Play media';
+      const playHtml = stream ? `<button class="play" onclick='playCamera(${JSON.stringify(stream)}, ${JSON.stringify(name)}, ${JSON.stringify(mediaType)}, ${JSON.stringify(mapRefreshRate)})'>${buttonLabel}</button>` : '';
+      const linkBits = [
+        linkHtml(sourceEndpoint && String(sourceEndpoint).toLowerCase().includes('.json') ? 'source JSON' : 'source page', sourceEndpoint),
+        linkHtml('media', stream),
+        snapshot && snapshot !== stream ? linkHtml('snapshot', snapshot) : '',
+        thumbnail && thumbnail !== stream && thumbnail !== snapshot ? linkHtml('thumbnail/reference', thumbnail) : '',
+      ].filter(Boolean).join(' ');
+      const details = ['route','road','direction','intersection','cross_street','city','county','district','region','camera_status','owner','agency','coordinate_source','geocoded_query','json_record_path','json_record_schema_hint']
+        .map(k => detailRow(k.replaceAll('_',' '), firstValue(p, [k])))
+        .join('');
+      return `<div class="popup"><h3>${esc(name)}</h3>${thumbHtml}${playHtml}<table>
+        ${detailRow('Target', p.target_label || p.target_id || '')}
+        ${detailRow('Location', locationText)}
+        ${detailRow('Camera type', cameraType)}
+        ${detailRow('Raw type', rawCameraType)}
+        ${detailRow('Camera ID', cameraId)}
+        ${detailRow('Media type', mediaType)}
+        ${detailRow('Camera Refresh Rate', cameraRefreshRate)}
+        ${detailRow('Map Refresh Rate', mapRefreshRate)}
+        ${detailRow('Lat/Lon', `${lat}, ${lon}`)}
+        ${detailRow('Trust', p.trust_level || '')}
+        ${detailRow('Validation', p.validation_status || '')}
+        ${detailRow('Scope', p.scope_status || '')}
+        ${detailRow('Discovery', p.discovery_method || '')}
+        <tr><td>Links</td><td>${linkBits}</td></tr>
+      </table>${details ? `<details><summary>Source metadata</summary><table>${details}</table></details>` : ''}</div>`;
+    }
+    function playCamera(url, title, mediaType, refreshSeconds) {
       const modal = document.getElementById('videoModal');
       const video = document.getElementById('cameraVideo');
       const snapshot = document.getElementById('snapshotViewer');
       document.getElementById('videoTitle').innerText = title || 'Camera media';
-      document.getElementById('streamLink').innerHTML = `<a href="${{esc(url)}}" target="_blank" rel="noopener">${{esc(url)}}</a>`;
-      if (activeHls) {{ activeHls.destroy(); activeHls = null; }}
-      if (snapshotTimer) {{ clearInterval(snapshotTimer); snapshotTimer = null; }}
+      document.getElementById('streamLink').innerHTML = `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>`;
+      if (activeHls) { activeHls.destroy(); activeHls = null; }
+      if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null; }
       video.pause(); video.removeAttribute('src'); video.load();
       video.style.display = 'none';
       snapshot.style.display = 'none';
       snapshot.removeAttribute('src');
-      if (mediaType === 'image_snapshot' || /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(url)) {{
+      if (mediaType === 'image_snapshot' || /\.(jpg|jpeg|png|webp)(\?|$)/i.test(url)) {
         snapshot.src = cacheBust(url);
         snapshot.style.display = 'block';
         const refreshMs = Math.max(1000, Number(refreshSeconds || 15) * 1000);
-        snapshotTimer = setInterval(() => {{ snapshot.src = cacheBust(url); }}, refreshMs);
-      }} else {{
+        snapshotTimer = setInterval(() => { snapshot.src = cacheBust(url); }, refreshMs);
+      } else {
         video.style.display = 'block';
-        if (url.toLowerCase().includes('.m3u8') && window.Hls && Hls.isSupported()) {{
-          activeHls = new Hls({{ lowLatencyMode: true }});
-          activeHls.loadSource(url);
-          activeHls.attachMedia(video);
-        }} else {{
-          video.src = url;
-        }}
-        video.play().catch(() => {{}});
-      }}
+        if (url.toLowerCase().includes('.m3u8') && window.Hls && Hls.isSupported()) { activeHls = new Hls({ lowLatencyMode: true }); activeHls.loadSource(url); activeHls.attachMedia(video); }
+        else { video.src = url; }
+        video.play().catch(() => {});
+      }
       modal.style.display = 'flex';
-    }}
-    function closeVideo() {{
+    }
+    function closeVideo() {
       const modal = document.getElementById('videoModal');
       const video = document.getElementById('cameraVideo');
       const snapshot = document.getElementById('snapshotViewer');
-      if (activeHls) {{ activeHls.destroy(); activeHls = null; }}
-      if (snapshotTimer) {{ clearInterval(snapshotTimer); snapshotTimer = null; }}
+      if (activeHls) { activeHls.destroy(); activeHls = null; }
+      if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null; }
       video.pause(); video.removeAttribute('src'); video.load();
       snapshot.removeAttribute('src');
       modal.style.display = 'none';
-    }}
-    document.getElementById('videoModal').addEventListener('click', e => {{ if (e.target.id === 'videoModal') closeVideo(); }});
+    }
+    document.getElementById('videoModal').addEventListener('click', e => { if (e.target.id === 'videoModal') closeVideo(); });
     map.on('popupopen', e => initPopupPreviews(e.popup && e.popup.getElement ? e.popup.getElement() : null));
     map.on('popupclose', () => stopPopupPreviews());
 
-    const layer = L.geoJSON(CAMERA_GEOJSON, {{
-      onEachFeature: (feature, layer) => layer.bindPopup(popupHtml(feature), {{ maxWidth: 340 }}),
-      pointToLayer: (feature, latlng) => L.circleMarker(latlng, markerStyle(feature))
-    }}).addTo(map);
+    const layer = L.geoJSON(CAMERA_GEOJSON, {
+      onEachFeature: (feature, layer) => layer.bindPopup(popupHtml(feature), { maxWidth: 360 }),
+      pointToLayer: (feature, latlng) => markerForFeature(feature, latlng)
+    }).addTo(map);
     const count = (CAMERA_GEOJSON.features || []).length;
-    if (count && layer.getBounds().isValid()) map.fitBounds(layer.getBounds(), {{ padding: [24, 24] }});
-    document.getElementById('status').innerText = count ? `Loaded {title}: ${{count}} camera feature(s)` : 'No camera GeoJSON features found';
+    if (count && layer.getBounds().isValid()) map.fitBounds(layer.getBounds(), { padding: [24, 24] });
+    document.getElementById('status').innerText = count ? `Loaded __TITLE__: ${count} camera feature(s)` : 'No camera GeoJSON features found';
   </script>
 </body>
 </html>
 """
+    return template.replace("__DATA__", data).replace("__TITLE__", title).replace("__THUMBNAIL_KEYS__", thumbnail_keys_json)
