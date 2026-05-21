@@ -114,6 +114,30 @@ JSON_METADATA_KEYS = {
     "route",
     "road",
     "direction",
+    "camera_direction",
+    "facing",
+    "bearing",
+    "heading",
+    "azimuth",
+    "orientation",
+    "latitude",
+    "lat",
+    "longitude",
+    "lon",
+    "lng",
+    "x",
+    "y",
+    "coordinates",
+    "geometry",
+    "date",
+    "time",
+    "timestamp",
+    "datetime",
+    "last_updated",
+    "last_update",
+    "last_refresh",
+    "capture_time",
+    "captured_at",
     "agency",
     "owner",
     "operator",
@@ -126,6 +150,35 @@ JSON_METADATA_KEYS = {
     "refresh_interval",
     "refresh_seconds",
     "update_interval",
+}
+
+LATITUDE_KEYS = {"lat", "latitude", "cameralat", "cameralatitude", "gpslat", "gpslatitude"}
+LONGITUDE_KEYS = {"lon", "lng", "long", "longitude", "cameralon", "cameralng", "cameralongitude", "gpslon", "gpslng", "gpslongitude"}
+# Use x/y only when they appear as a pair and plausibly represent lon/lat.
+X_LONGITUDE_KEYS = {"x", "coordx", "mapx", "longitudex"}
+Y_LATITUDE_KEYS = {"y", "coordy", "mapy", "latitudey"}
+DIRECTION_KEYS = {"direction", "cameradirection", "facing", "facingdirection", "viewdirection", "lookdirection", "orientation"}
+BEARING_KEYS = {"bearing", "camerabearing", "azimuth", "angle", "viewangle"}
+HEADING_KEYS = {"heading", "cameraheading", "viewheading"}
+DATE_KEYS = {"date", "capturedate", "imagedate", "snapshotdate", "lastupdatedate", "updatedate"}
+TIME_KEYS = {"time", "capturetime", "imagetime", "snapshottime", "lastupdatetime", "updatetime"}
+TIMESTAMP_KEYS = {
+    "timestamp",
+    "datetime",
+    "capturedat",
+    "capturetimestamp",
+    "imagetimestamp",
+    "snapshottimestamp",
+    "lastupdated",
+    "lastupdate",
+    "lastrefreshed",
+    "lastrefresh",
+    "updated",
+    "updatetime",
+    "updatetimestamp",
+    "recordedat",
+    "createdat",
+    "observedat",
 }
 
 
@@ -470,11 +523,22 @@ class CameraUrlHarvestEngine:
 
     def _extract_from_json_data(self, data: Any, source_url: str, row: dict[str, str], *, method: str) -> list[HarvestedUrlRecord]:
         records: list[HarvestedUrlRecord] = []
-        self._walk_json(data, source_url, row, method=method, path="$", records=records)
+        self._walk_json(data, source_url, row, method=method, path="$", records=records, context_metadata=None)
         return records
 
-    def _walk_json(self, value: Any, source_url: str, row: dict[str, str], *, method: str, path: str, records: list[HarvestedUrlRecord]) -> None:
+    def _walk_json(
+        self,
+        value: Any,
+        source_url: str,
+        row: dict[str, str],
+        *,
+        method: str,
+        path: str,
+        records: list[HarvestedUrlRecord],
+        context_metadata: dict[str, Any] | None,
+    ) -> None:
         if isinstance(value, dict):
+            local_context = merge_metadata(context_metadata, json_context_metadata(value, source_url, path))
             for key, child in value.items():
                 key_norm = normalize_key(key)
                 if isinstance(child, str) and child.strip():
@@ -485,14 +549,32 @@ class CameraUrlHarvestEngine:
                             continue
                         if media_type == "image_snapshot" and _looks_like_non_camera_asset(absolute):
                             continue
-                        metadata = json_record_metadata(value, source_url, path, key_norm)
-                        records.append(record_from_url(absolute, media_type, source_url=source_url, row=row, method=method, title=metadata.get("title") or metadata.get("name"), location_text=metadata.get("location_text") or metadata.get("location"), camera_id=metadata.get("camera_id") or metadata.get("id"), metadata=metadata))
+                        metadata = json_record_metadata(value, source_url, path, key_norm, context_metadata=local_context)
+                        records.append(
+                            record_from_url(
+                                absolute,
+                                media_type,
+                                source_url=source_url,
+                                row=row,
+                                method=method,
+                                title=metadata.get("title") or metadata.get("name"),
+                                location_text=metadata.get("location_text") or metadata.get("location"),
+                                camera_id=metadata.get("camera_id") or metadata.get("id"),
+                                metadata=metadata,
+                            )
+                        )
                 if isinstance(child, (dict, list)):
-                    self._walk_json(child, source_url, row, method=method, path=f"{path}.{key}", records=records)
+                    child_context = local_context
+                    # GeoJSON/ArcGIS features often keep media URLs in properties/attributes
+                    # and coordinates in sibling geometry. Carry that deterministic
+                    # coordinate evidence into the child record metadata.
+                    if key_norm in {"attributes", "properties"}:
+                        child_context = merge_metadata(local_context, json_context_metadata(value, source_url, path))
+                    self._walk_json(child, source_url, row, method=method, path=f"{path}.{key}", records=records, context_metadata=child_context)
         elif isinstance(value, list):
             for idx, child in enumerate(value):
                 if isinstance(child, (dict, list)):
-                    self._walk_json(child, source_url, row, method=method, path=f"{path}[{idx}]", records=records)
+                    self._walk_json(child, source_url, row, method=method, path=f"{path}[{idx}]", records=records, context_metadata=context_metadata)
 
     def _extract_linked_endpoints(self, source_url: str, row: dict[str, str], text: str, client: httpx.Client) -> list[HarvestedUrlRecord]:
         hrefs: list[str] = []
@@ -681,6 +763,9 @@ class CameraUrlHarvestEngine:
             "by_media_type": dict(Counter(record.media_type for record in records)),
             "by_source_provider": dict(Counter(record.source_provider or "unknown" for record in records)),
             "by_source_host": dict(Counter(urlparse(record.source_url or record.url).netloc.casefold() or "unknown" for record in records)),
+            "records_with_coordinates": sum(1 for record in records if record.lat is not None and record.lon is not None),
+            "records_with_orientation": sum(1 for record in records if record.direction or record.bearing is not None or record.heading is not None),
+            "records_with_datetime": sum(1 for record in records if record.date or record.time or record.timestamp),
             "blocked_or_filtered_urls": blocked_or_filtered,
             "outputs": outputs,
             "warnings": self._warnings,
@@ -812,6 +897,9 @@ def merge_record(existing: HarvestedUrlRecord, duplicate: HarvestedUrlRecord) ->
         existing.source_provider = duplicate.source_provider
     if existing.media_type == "unknown_media" and duplicate.media_type != "unknown_media":
         existing.media_type = duplicate.media_type
+    for attr in ("lat", "lon", "coordinate_source", "direction", "bearing", "heading", "date", "time", "timestamp"):
+        if getattr(existing, attr) in (None, "") and getattr(duplicate, attr) not in (None, ""):
+            setattr(existing, attr, getattr(duplicate, attr))
     for key, value in duplicate.metadata.items():
         if value in (None, "", [], {}):
             continue
@@ -823,6 +911,13 @@ def merge_record(existing: HarvestedUrlRecord, duplicate: HarvestedUrlRecord) ->
 
 def record_from_candidate(candidate: CameraCandidate, *, include_metadata: bool = True) -> HarvestedUrlRecord:
     metadata = dict(candidate.source_metadata or {}) if include_metadata else {}
+    if candidate.lat is not None:
+        metadata.setdefault("lat", candidate.lat)
+    if candidate.lon is not None:
+        metadata.setdefault("lon", candidate.lon)
+    if candidate.coordinate_source:
+        metadata.setdefault("coordinate_source", candidate.coordinate_source)
+    promoted = promoted_metadata_fields(metadata)
     media_type = normalize_candidate_media_type(metadata.get("media_type"), candidate.stream_url)
     return HarvestedUrlRecord(
         url=candidate.stream_url,
@@ -834,6 +929,15 @@ def record_from_candidate(candidate: CameraCandidate, *, include_metadata: bool 
         camera_id=str(metadata.get("camera_id")) if metadata.get("camera_id") not in (None, "") else None,
         source_name=metadata.get("source_name"),
         source_provider=metadata.get("source_provider"),
+        lat=promoted.get("lat"),
+        lon=promoted.get("lon"),
+        coordinate_source=promoted.get("coordinate_source"),
+        direction=promoted.get("direction"),
+        bearing=promoted.get("bearing"),
+        heading=promoted.get("heading"),
+        date=promoted.get("date"),
+        time=promoted.get("time"),
+        timestamp=promoted.get("timestamp"),
         metadata=metadata,
     )
 
@@ -864,6 +968,8 @@ def record_from_url(
     metadata.setdefault("original_query", row.get("original_query") or row.get("query"))
     metadata.setdefault("source_kind", row.get("source_kind"))
     metadata.setdefault("media_extension", media_extension(url))
+    cleaned_metadata = {k: v for k, v in metadata.items() if v not in (None, "", [], {})}
+    promoted = promoted_metadata_fields(cleaned_metadata)
     return HarvestedUrlRecord(
         url=url,
         media_type=media_type,
@@ -874,7 +980,16 @@ def record_from_url(
         camera_id=camera_id,
         source_name=row.get("source_name") or row.get("title"),
         source_provider=row.get("source_provider"),
-        metadata={k: v for k, v in metadata.items() if v not in (None, "", [], {})},
+        lat=promoted.get("lat"),
+        lon=promoted.get("lon"),
+        coordinate_source=promoted.get("coordinate_source"),
+        direction=promoted.get("direction"),
+        bearing=promoted.get("bearing"),
+        heading=promoted.get("heading"),
+        date=promoted.get("date"),
+        time=promoted.get("time"),
+        timestamp=promoted.get("timestamp"),
+        metadata=cleaned_metadata,
     )
 
 
@@ -996,27 +1111,218 @@ def normalize_key(key: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(key).casefold())
 
 
+def merge_metadata(*parts: dict[str, Any] | None) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for part in parts:
+        if not part:
+            continue
+        for key, value in part.items():
+            if value in (None, "", [], {}):
+                continue
+            merged.setdefault(key, value)
+    return merged
+
+
+def coerce_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().strip("°")
+        if not cleaned:
+            return None
+        match = re.search(r"[-+]?\d+(?:\.\d+)?", cleaned)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except ValueError:
+            return None
+    return None
+
+
+def plausible_lat_lon(lat: float | None, lon: float | None) -> bool:
+    return lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180
+
+
+def value_by_normalized_key(metadata: dict[str, Any], keys: set[str]) -> tuple[str | None, Any]:
+    for key, value in metadata.items():
+        if normalize_key(key) in keys and value not in (None, "", [], {}):
+            return str(key), value
+    return None, None
+
+
+def coordinates_from_sequence(value: Any) -> tuple[float | None, float | None]:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None, None
+    first = value[0]
+    # GeoJSON polygons/lines may be nested. Follow the first coordinate pair.
+    while isinstance(first, (list, tuple)) and first:
+        value = first
+        first = value[0]
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None, None
+    a = coerce_float(value[0])
+    b = coerce_float(value[1])
+    # GeoJSON order is lon, lat. Fall back to lat, lon only when that is the
+    # only plausible interpretation.
+    if plausible_lat_lon(b, a):
+        return b, a
+    if plausible_lat_lon(a, b):
+        return a, b
+    return None, None
+
+
+def coordinates_from_geometry(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    x_key, x_value = value_by_normalized_key(value, X_LONGITUDE_KEYS | LONGITUDE_KEYS)
+    y_key, y_value = value_by_normalized_key(value, Y_LATITUDE_KEYS | LATITUDE_KEYS)
+    lat = coerce_float(y_value)
+    lon = coerce_float(x_value)
+    if plausible_lat_lon(lat, lon):
+        out["lat"] = lat
+        out["lon"] = lon
+        out["coordinate_source"] = f"geometry:{y_key},{x_key}"
+    coords_key, coords_value = value_by_normalized_key(value, {"coordinates", "coordinate", "coords"})
+    if "lat" not in out and coords_key:
+        seq_lat, seq_lon = coordinates_from_sequence(coords_value)
+        if plausible_lat_lon(seq_lat, seq_lon):
+            out["lat"] = seq_lat
+            out["lon"] = seq_lon
+            out["coordinate_source"] = f"geometry:{coords_key}"
+    return out
+
+
+def json_context_metadata(record: dict[str, Any], source_url: str, path: str) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    if isinstance(record.get("geometry"), dict):
+        geometry = record["geometry"]
+        context["geometry"] = geometry
+        context["geometry_json_endpoint_url"] = source_url
+        context["geometry_json_record_path"] = f"{path}.geometry"
+        context.update(coordinates_from_geometry(geometry))
+    elif isinstance(record.get("coordinates"), (list, tuple)):
+        context["coordinates"] = record["coordinates"]
+        lat, lon = coordinates_from_sequence(record["coordinates"])
+        if plausible_lat_lon(lat, lon):
+            context["lat"] = lat
+            context["lon"] = lon
+            context["coordinate_source"] = f"json:{path}.coordinates"
+    x_key, x_value = value_by_normalized_key(record, X_LONGITUDE_KEYS | LONGITUDE_KEYS)
+    y_key, y_value = value_by_normalized_key(record, Y_LATITUDE_KEYS | LATITUDE_KEYS)
+    lat = coerce_float(y_value)
+    lon = coerce_float(x_value)
+    if plausible_lat_lon(lat, lon):
+        context.setdefault("lat", lat)
+        context.setdefault("lon", lon)
+        context.setdefault("coordinate_source", f"json:{path}:{y_key},{x_key}")
+    return context
+
+
+def promoted_metadata_fields(metadata: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    lat_key, lat_value = value_by_normalized_key(metadata, LATITUDE_KEYS)
+    lon_key, lon_value = value_by_normalized_key(metadata, LONGITUDE_KEYS)
+    lat = coerce_float(lat_value)
+    lon = coerce_float(lon_value)
+    if not plausible_lat_lon(lat, lon):
+        x_key, x_value = value_by_normalized_key(metadata, X_LONGITUDE_KEYS)
+        y_key, y_value = value_by_normalized_key(metadata, Y_LATITUDE_KEYS)
+        lat = coerce_float(y_value)
+        lon = coerce_float(x_value)
+        lat_key = y_key
+        lon_key = x_key
+    if not plausible_lat_lon(lat, lon) and isinstance(metadata.get("geometry"), dict):
+        geo = coordinates_from_geometry(metadata["geometry"])
+        lat = geo.get("lat")
+        lon = geo.get("lon")
+        if geo.get("coordinate_source"):
+            out["coordinate_source"] = geo["coordinate_source"]
+    if not plausible_lat_lon(lat, lon) and isinstance(metadata.get("coordinates"), (list, tuple)):
+        lat, lon = coordinates_from_sequence(metadata["coordinates"])
+        if plausible_lat_lon(lat, lon):
+            out["coordinate_source"] = "metadata:coordinates"
+    if plausible_lat_lon(lat, lon):
+        out["lat"] = lat
+        out["lon"] = lon
+        out.setdefault("coordinate_source", str(metadata.get("coordinate_source") or f"metadata:{lat_key},{lon_key}"))
+
+    direction_key, direction_value = value_by_normalized_key(metadata, DIRECTION_KEYS)
+    if direction_value not in (None, "", [], {}):
+        out["direction"] = str(direction_value)
+    bearing_key, bearing_value = value_by_normalized_key(metadata, BEARING_KEYS)
+    bearing = coerce_float(bearing_value)
+    if bearing is not None:
+        out["bearing"] = bearing
+    heading_key, heading_value = value_by_normalized_key(metadata, HEADING_KEYS)
+    heading = coerce_float(heading_value)
+    if heading is not None:
+        out["heading"] = heading
+    # Some feeds use numeric direction/orientation as an angle. Keep the raw
+    # direction string above and also expose it as bearing when useful.
+    if "bearing" not in out and direction_key:
+        maybe_bearing = coerce_float(direction_value)
+        if maybe_bearing is not None:
+            out["bearing"] = maybe_bearing
+
+    timestamp_key, timestamp_value = value_by_normalized_key(metadata, TIMESTAMP_KEYS)
+    if timestamp_value not in (None, "", [], {}):
+        out["timestamp"] = str(timestamp_value)
+    date_key, date_value = value_by_normalized_key(metadata, DATE_KEYS)
+    if date_value not in (None, "", [], {}):
+        out["date"] = str(date_value)
+    time_key, time_value = value_by_normalized_key(metadata, TIME_KEYS)
+    if time_value not in (None, "", [], {}):
+        out["time"] = str(time_value)
+    return out
+
+
 def simple_metadata(record: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in record.items():
+        key_norm = normalize_key(key)
         if isinstance(value, list):
-            value = " ".join(str(part) for part in value)
+            # Preserve coordinate arrays as structured metadata; other lists are
+            # collapsed for compact CSV/JSONL readability.
+            if key_norm in {"coordinates", "coordinate", "coords"}:
+                out[str(key)] = value
+            else:
+                out[str(key)] = " ".join(str(part) for part in value)
+            continue
+        if isinstance(value, dict):
+            if key_norm == "geometry":
+                out[str(key)] = value
+            continue
         if isinstance(value, (str, int, float, bool)) or value is None:
             out[str(key)] = value
     return out
 
 
-def json_record_metadata(record: dict[str, Any], source_url: str, path: str, media_key: str) -> dict[str, Any]:
-    metadata = simple_metadata(record)
+def json_record_metadata(
+    record: dict[str, Any],
+    source_url: str,
+    path: str,
+    media_key: str,
+    *,
+    context_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata = merge_metadata(context_metadata, simple_metadata(record))
     metadata["json_endpoint_url"] = source_url
     metadata["json_record_path"] = path
     metadata["json_media_key"] = media_key
     for key, value in list(record.items()):
-        if isinstance(value, (dict, list)):
-            continue
         key_norm = normalize_key(key)
+        if isinstance(value, (dict, list)) and key_norm not in {"geometry", "coordinates", "coordinate", "coords"}:
+            continue
         if key_norm in JSON_METADATA_KEYS or key_norm in JSON_MEDIA_KEYS:
             metadata.setdefault(str(key), value)
+    metadata = merge_metadata(metadata, json_context_metadata(record, source_url, path))
+    promoted = promoted_metadata_fields(metadata)
+    for key, value in promoted.items():
+        metadata.setdefault(key, value)
     # Friendly aliases used by output records.
     for candidate_key in ("camera_id", "cameraid", "id", "device_id", "deviceid"):
         if candidate_key in metadata:
@@ -1040,7 +1346,26 @@ def write_plain_urls(path: Path, records: list[HarvestedUrlRecord]) -> None:
 
 def write_csv(path: Path, records: list[HarvestedUrlRecord]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["url", "media_type", "source_url", "discovery_method", "title", "location_text", "camera_id", "source_name", "source_provider"]
+    fields = [
+        "url",
+        "media_type",
+        "source_url",
+        "discovery_method",
+        "title",
+        "location_text",
+        "camera_id",
+        "source_name",
+        "source_provider",
+        "lat",
+        "lon",
+        "coordinate_source",
+        "direction",
+        "bearing",
+        "heading",
+        "date",
+        "time",
+        "timestamp",
+    ]
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()

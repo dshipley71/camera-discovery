@@ -286,6 +286,22 @@ class HarvestedUrlRecord:
     camera_id: str | None = None
     source_name: str | None = None
     source_provider: str | None = None
+
+    # Deterministically promoted source metadata. Harvest mode does not infer,
+    # geocode, validate, or normalize these from outside services; these fields
+    # are populated only when coordinates/orientation/time values are present in
+    # collected camera/source metadata. The full original metadata remains in
+    # ``metadata`` below.
+    lat: float | None = None
+    lon: float | None = None
+    coordinate_source: str | None = None
+    direction: str | None = None
+    bearing: float | None = None
+    heading: float | None = None
+    date: str | None = None
+    time: str | None = None
+    timestamp: str | None = None
+
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

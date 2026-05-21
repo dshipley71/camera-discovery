@@ -103,3 +103,62 @@ def test_dedupe_merges_duplicate_metadata():
     assert records[0].metadata["a"] == 1
     assert records[0].metadata["b"] == 2
     assert "https://source-b.example" in records[0].metadata["duplicate_sources"]
+
+
+def test_harvest_promotes_geospatial_orientation_and_datetime_metadata(tmp_path):
+    engine = _engine(tmp_path)
+    row = {"url": "https://source.example/api", "source_provider": "directory", "source_name": "Fixture API"}
+    data = {
+        "features": [
+            {
+                "geometry": {"x": -118.2437, "y": 34.0522},
+                "attributes": {
+                    "id": "cam-geo-1",
+                    "name": "Downtown Camera",
+                    "stream_url": "https://media.example/live/geo1.m3u8",
+                    "direction": "NB",
+                    "bearing": 12.5,
+                    "last_updated": "2026-05-21T10:15:30Z",
+                },
+            }
+        ]
+    }
+    records = engine._extract_from_json_data(data, "https://source.example/api", row, method="json_fixture")
+    assert len(records) == 1
+    record = records[0]
+    assert record.lat == 34.0522
+    assert record.lon == -118.2437
+    assert record.coordinate_source
+    assert record.direction == "NB"
+    assert record.bearing == 12.5
+    assert record.timestamp == "2026-05-21T10:15:30Z"
+    assert record.metadata["lat"] == 34.0522
+    assert record.metadata["lon"] == -118.2437
+    assert record.metadata["direction"] == "NB"
+    assert record.metadata["last_updated"] == "2026-05-21T10:15:30Z"
+
+
+def test_harvest_promotes_lat_lon_from_same_json_record(tmp_path):
+    engine = _engine(tmp_path)
+    row = {"url": "https://source.example/api", "source_provider": "direct", "source_name": "Fixture"}
+    data = {
+        "cameras": [
+            {
+                "camera_id": "cam-2",
+                "image_url": "https://media.example/cam2.jpg",
+                "latitude": "38.8977",
+                "longitude": "-77.0365",
+                "heading": "270",
+                "date": "2026-05-21",
+                "time": "13:45:00",
+            }
+        ]
+    }
+    records = engine._extract_from_json_data(data, "https://source.example/api", row, method="json_fixture")
+    assert len(records) == 1
+    record = records[0]
+    assert record.lat == 38.8977
+    assert record.lon == -77.0365
+    assert record.heading == 270
+    assert record.date == "2026-05-21"
+    assert record.time == "13:45:00"
