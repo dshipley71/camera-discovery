@@ -246,6 +246,63 @@ class CandidateSet:
 
 
 @dataclass
+class HarvestConfig:
+    query: str
+    output_dir: Path
+    discovery_mode: DiscoveryMode = DiscoveryMode.BOTH
+    seed_urls: list[str] = field(default_factory=list)
+    seed_file: Path | None = None
+    sources_file: Path | None = None
+    block_patterns: list[str] = field(default_factory=list)
+    max_urls: int = 10000  # 0 means unlimited final output
+    media: list[str] = field(default_factory=list)
+    max_search_queries: int = 40
+    max_search_results_per_query: int = 50
+    max_source_rows: int = 5000
+    max_pages_per_source: int = 25
+    max_structured_endpoints_per_page: int = 500
+    enable_browser_capture: bool = True
+    browser_backend: str = "playwright"
+    browser_capture_timeout_ms: int = 15000
+    browser_capture_settle_ms: int = 1000
+    browser_capture_scroll: bool = False
+    max_browser_pages: int = 1000
+    max_browser_pages_per_host: int = 100
+    max_browser_json_endpoints_per_page: int = 100
+    max_browser_network_events_logged_per_page: int = 100
+    include_source_metadata: bool = True
+    http_timeout: float = 20.0
+    user_agent: str = "camera-discovery/0.1 (+public-camera-research)"
+
+
+@dataclass
+class HarvestedUrlRecord:
+    url: str
+    media_type: str
+    source_url: str | None = None
+    discovery_method: str = "unknown"
+    title: str | None = None
+    location_text: str | None = None
+    camera_id: str | None = None
+    source_name: str | None = None
+    source_provider: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class HarvestResult:
+    raw_count: int = 0
+    unique_count: int = 0
+    written_count: int = 0
+    records: list[HarvestedUrlRecord] = field(default_factory=list)
+    by_media_type: dict[str, int] = field(default_factory=dict)
+    by_source_provider: dict[str, int] = field(default_factory=dict)
+    by_source_host: dict[str, int] = field(default_factory=dict)
+    output_files: dict[str, str] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ValidationSummary:
     """Validation counters.
 

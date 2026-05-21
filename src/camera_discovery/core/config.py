@@ -5,7 +5,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .models import DiscoveryMode, RunConfig, RuntimeProfile
+from .models import DiscoveryMode, HarvestConfig, RunConfig, RuntimeProfile
 
 _ALLOWED_BROWSER_BACKENDS = {"playwright", "cloakbrowser"}
 
@@ -149,3 +149,69 @@ def _bool_env(name: str, default: bool) -> bool:
 def _split_csv_env(name: str) -> list[str]:
     value = os.getenv(name, "")
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+
+def load_harvest_config(
+    query: str,
+    output_dir: str | Path,
+    *,
+    seed_urls: list[str] | None = None,
+    seed_file: str | Path | None = None,
+    sources_file: str | Path | None = None,
+    discovery_mode: str | None = None,
+    block_patterns: list[str] | None = None,
+    max_urls: int | None = None,
+    media: list[str] | None = None,
+    max_search_queries: int | None = None,
+    max_search_results_per_query: int | None = None,
+    max_source_rows: int | None = None,
+    max_pages_per_source: int | None = None,
+    max_structured_endpoints_per_page: int | None = None,
+    enable_browser_capture: bool | None = None,
+    browser_backend: str | None = None,
+    max_browser_pages: int | None = None,
+    max_browser_pages_per_host: int | None = None,
+    include_source_metadata: bool = True,
+) -> HarvestConfig:
+    """Load extraction-only harvest configuration.
+
+    Harvest mode intentionally has no LLM, target-resolution, geocoding, trust,
+    validation, GeoJSON, or review-package settings. It reuses only public source
+    policy, HTTP, search, browser, and crawl-budget settings.
+    """
+    load_dotenv(override=False)
+    configured_sources_file = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
+    selected_discovery_mode = DiscoveryMode((discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE", "both")).strip().lower())
+    configured_browser_backend = (browser_backend or _browser_backend_env()).strip().lower()
+    if configured_browser_backend not in _ALLOWED_BROWSER_BACKENDS:
+        allowed = ", ".join(sorted(_ALLOWED_BROWSER_BACKENDS))
+        raise ValueError(f"Invalid browser backend {configured_browser_backend!r}; expected one of: {allowed}")
+    return HarvestConfig(
+        query=query,
+        output_dir=Path(output_dir),
+        discovery_mode=selected_discovery_mode,
+        seed_urls=seed_urls or [],
+        seed_file=Path(seed_file).expanduser() if seed_file else None,
+        sources_file=Path(configured_sources_file).expanduser() if configured_sources_file else None,
+        block_patterns=block_patterns or _split_csv_env("CAMERA_DISCOVERY_BLOCK_PATTERNS"),
+        max_urls=max(0, int(max_urls if max_urls is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_URLS", 10000))),
+        media=media or [],
+        max_search_queries=max(0, int(max_search_queries if max_search_queries is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_SEARCH_QUERIES", _int_env("CAMERA_DISCOVERY_MAX_SEARCH_QUERIES", 40)))),
+        max_search_results_per_query=max(0, int(max_search_results_per_query if max_search_results_per_query is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_SEARCH_RESULTS_PER_QUERY", _int_env("CAMERA_DISCOVERY_MAX_SEARCH_RESULTS_PER_QUERY", 50)))),
+        max_source_rows=max(0, int(max_source_rows if max_source_rows is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_SOURCE_ROWS", 5000))),
+        max_pages_per_source=max(1, int(max_pages_per_source if max_pages_per_source is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_PAGES_PER_SOURCE", _int_env("CAMERA_DISCOVERY_MAX_DIRECTORY_PAGES", 25)))),
+        max_structured_endpoints_per_page=max(0, int(max_structured_endpoints_per_page if max_structured_endpoints_per_page is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", _int_env("CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", 500)))),
+        enable_browser_capture=_bool_env("CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE", True) if enable_browser_capture is None else bool(enable_browser_capture),
+        browser_backend=configured_browser_backend,
+        browser_capture_timeout_ms=max(1000, _int_env("CAMERA_DISCOVERY_BROWSER_CAPTURE_TIMEOUT_MS", 15000)),
+        browser_capture_settle_ms=max(0, _int_env("CAMERA_DISCOVERY_BROWSER_CAPTURE_SETTLE_MS", 1000)),
+        browser_capture_scroll=_bool_env("CAMERA_DISCOVERY_BROWSER_CAPTURE_SCROLL", False),
+        max_browser_pages=max(0, int(max_browser_pages if max_browser_pages is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_BROWSER_PAGES", _int_env("CAMERA_DISCOVERY_MAX_BROWSER_CAPTURE_PAGES", 1000)))),
+        max_browser_pages_per_host=max(0, int(max_browser_pages_per_host if max_browser_pages_per_host is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_BROWSER_PAGES_PER_HOST", _int_env("CAMERA_DISCOVERY_MAX_BROWSER_CAPTURE_PAGES_PER_HOST", 100)))),
+        max_browser_json_endpoints_per_page=max(0, _int_env("CAMERA_DISCOVERY_HARVEST_MAX_BROWSER_JSON_ENDPOINTS_PER_PAGE", _int_env("CAMERA_DISCOVERY_MAX_BROWSER_JSON_ENDPOINTS_PER_PAGE", 100))),
+        max_browser_network_events_logged_per_page=max(0, _int_env("CAMERA_DISCOVERY_HARVEST_MAX_BROWSER_NETWORK_EVENTS_LOGGED_PER_PAGE", _int_env("CAMERA_DISCOVERY_MAX_BROWSER_NETWORK_EVENTS_LOGGED_PER_PAGE", 100))),
+        include_source_metadata=include_source_metadata,
+        http_timeout=_float_env("CAMERA_DISCOVERY_HTTP_TIMEOUT", 20.0),
+        user_agent=os.getenv("CAMERA_DISCOVERY_USER_AGENT", "camera-discovery/0.1 (+public-camera-research)"),
+    )

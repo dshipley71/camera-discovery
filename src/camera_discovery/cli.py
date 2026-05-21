@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import sys
 import threading
@@ -12,9 +13,10 @@ import typer
 from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 
-from camera_discovery.core.config import load_run_config
+from camera_discovery.core.config import load_harvest_config, load_run_config
 from camera_discovery.core.models import CandidateSet, RunState, TrustPolicy
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
+from camera_discovery.services.harvest_engine import CameraUrlHarvestEngine
 from camera_discovery.services.review_validation_pipeline import ReviewAndValidationPipeline
 from camera_discovery.services.target_resolver import TargetResolver
 from camera_discovery.utils.io import write_json
@@ -237,6 +239,43 @@ def _make_event_stream_discovery_progress_callback(lock: threading.Lock):
     return callback
 
 
+
+def _make_harvest_progress_callback(console: Console, *, mode: str):
+    state = {"last_row_report": 0}
+
+    def callback(event: str, payload: dict[str, Any]) -> None:
+        if mode == "events":
+            _emit_progress_stream_event(event, payload)
+            return
+        if mode == "off":
+            return
+        if event == "harvest_started":
+            console.print(f"Progress: harvest started — discovery_mode={payload.get('discovery_mode')}")
+        elif event == "harvest_source_rows_ready":
+            console.print(f"Progress: harvest source rows ready — {payload.get('rows', 0)} rows.")
+        elif event == "harvest_source_row_processed":
+            processed = int(payload.get("processed_rows") or 0)
+            rows = int(payload.get("rows") or 0)
+            raw_records = int(payload.get("raw_records") or 0)
+            report_every = max(1, rows // 10) if rows else 1
+            if processed == rows or processed - int(state.get("last_row_report", 0)) >= report_every or raw_records >= int(state.get("last_records_report", 0)) + 100:
+                state["last_row_report"] = processed
+                state["last_records_report"] = raw_records
+                console.print(f"Progress: harvest rows {processed}/{rows}; raw records={raw_records}.")
+        elif event == "harvest_dedupe_complete":
+            console.print(
+                "Progress: dedupe/media filtering complete — "
+                f"raw={payload.get('raw_records', 0)} unique={payload.get('unique_urls', 0)} "
+                f"media_filtered={payload.get('media_filtered_urls', 0)}."
+            )
+        elif event == "harvest_outputs_written":
+            console.print(f"Progress: harvest outputs written — URLs={payload.get('written_urls', 0)}.")
+        elif event == "harvest_complete":
+            console.print(f"Progress: harvest complete — written={payload.get('written_urls', 0)}.")
+
+    return callback
+
+
 @app.callback()
 def main() -> None:
     """Camera discovery command group."""
@@ -407,6 +446,88 @@ def run(
                 console.print(f"  - {item}")
         except Exception:
             console.print(f"[bold]Run explanation:[/bold] {cfg.output_dir / 'RUN_EXPLANATION.md'}")
+
+
+@app.command(name="harvest-urls")
+def harvest_urls(
+    query: str = typer.Argument(...),
+    output_dir: Path = typer.Option(Path("runs/harvest-latest"), "--output-dir", "-o"),
+    max_urls: int = typer.Option(10000, "--max-urls", help="Final unique URL output cap after dedupe and media filtering. Use 0 for unlimited."),
+    discovery_mode: str = typer.Option("both", "--discovery-mode", help="blind, directory, both, or direct"),
+    seed_url: Optional[list[str]] = typer.Option(None, "--seed-url", help="Repeatable seed page or direct media URL."),
+    seed_file: Optional[Path] = typer.Option(None, "--seed-file", help="Text file with one seed URL per line."),
+    sources_file: Optional[Path] = typer.Option(None, "--sources-file"),
+    block_pattern: Optional[list[str]] = typer.Option(None, "--block-pattern"),
+    enable_browser_capture: bool = typer.Option(True, "--enable-browser-capture/--disable-browser-capture"),
+    browser_backend: Optional[str] = typer.Option(None, "--browser-backend", help="playwright or cloakbrowser; defaults to env/config."),
+    max_search_queries: Optional[int] = typer.Option(None, "--max-search-queries"),
+    max_search_results_per_query: Optional[int] = typer.Option(None, "--max-search-results-per-query"),
+    max_source_rows: Optional[int] = typer.Option(None, "--max-source-rows"),
+    max_pages_per_source: Optional[int] = typer.Option(None, "--max-pages-per-source"),
+    max_structured_endpoints_per_page: Optional[int] = typer.Option(None, "--max-structured-endpoints-per-page"),
+    max_browser_pages: Optional[int] = typer.Option(None, "--max-browser-pages"),
+    max_browser_pages_per_host: Optional[int] = typer.Option(None, "--max-browser-pages-per-host"),
+    media: Optional[list[str]] = typer.Option(None, "--media", help="Comma-separated/repeatable extensions or categories: .m3u8, mp4, hls, image, stream, video_file."),
+    include_source_metadata: bool = typer.Option(True, "--include-source-metadata/--no-source-metadata"),
+    show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show harvest progress."),
+    progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, plain, or events."),
+) -> None:
+    """Harvest raw direct public camera/media URLs without inventory validation."""
+    if max_urls < 0:
+        raise typer.BadParameter("--max-urls must be >= 0; use 0 for unlimited")
+    try:
+        cfg = load_harvest_config(
+            query,
+            output_dir,
+            seed_urls=seed_url or [],
+            seed_file=seed_file,
+            sources_file=sources_file,
+            discovery_mode=discovery_mode,
+            block_patterns=block_pattern or [],
+            max_urls=max_urls,
+            media=media or [],
+            max_search_queries=max_search_queries,
+            max_search_results_per_query=max_search_results_per_query,
+            max_source_rows=max_source_rows,
+            max_pages_per_source=max_pages_per_source,
+            max_structured_endpoints_per_page=max_structured_endpoints_per_page,
+            enable_browser_capture=enable_browser_capture,
+            browser_backend=browser_backend,
+            max_browser_pages=max_browser_pages,
+            max_browser_pages_per_host=max_browser_pages_per_host,
+            include_source_metadata=include_source_metadata,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    progress_mode = _resolve_progress_mode(
+        console,
+        enabled=show_progress,
+        style=os.environ.get("CAMERA_DISCOVERY_PROGRESS_STYLE", progress_style),
+    )
+    callback = _make_harvest_progress_callback(console, mode=progress_mode)
+    try:
+        engine = CameraUrlHarvestEngine(cfg, progress_callback=callback)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print("[bold]Harvest mode:[/bold] extraction-only raw camera/media URL harvesting")
+    console.print("[bold]Bypasses:[/bold] target resolution, geocoding, validation, trust, scope, LLM review, GeoJSON, maps, cameras.md, review ZIP")
+    console.print(f"[bold]Discovery mode:[/bold] {cfg.discovery_mode.value}")
+    console.print(f"[bold]Sources file:[/bold] {cfg.sources_file}")
+    console.print(f"[bold]Media filter:[/bold] {', '.join(cfg.media) if cfg.media else 'all'}")
+    result = engine.harvest()
+    summary_path = cfg.output_dir / "harvest_summary.json"
+    console.print(f"[bold]Harvested URLs:[/bold] raw={result.raw_count} unique={result.unique_count} written={result.written_count}")
+    console.print(f"[bold]camera_urls.txt:[/bold] {cfg.output_dir / 'camera_urls.txt'}")
+    console.print(f"[bold]camera_urls.csv:[/bold] {cfg.output_dir / 'camera_urls.csv'}")
+    console.print(f"[bold]camera_urls.jsonl:[/bold] {cfg.output_dir / 'camera_urls.jsonl'}")
+    console.print(f"[bold]harvest_summary.json:[/bold] {summary_path}")
+    if summary_path.exists():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            console.print(f"[bold]By media type:[/bold] {summary.get('by_media_type', {})}")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
