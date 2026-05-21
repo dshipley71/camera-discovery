@@ -306,7 +306,7 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       if (mediaType) return String(mediaType).toLowerCase();
       const lower = String(stream || '').toLowerCase();
       if (lower.includes('.m3u8')) return 'hls';
-      if (thumb || /\.(jpg|jpeg|png|webp)(\?|$)/i.test(lower)) return 'image_snapshot';
+      if (thumb || /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(lower)) return 'image_snapshot';
       return 'other';
     }
     function cameraColorCategory(props, mediaType) {
@@ -421,7 +421,7 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       video.style.display = 'none';
       snapshot.style.display = 'none';
       snapshot.removeAttribute('src');
-      if (mediaType === 'image_snapshot' || /\.(jpg|jpeg|png|webp)(\?|$)/i.test(url)) {
+      if (mediaType === 'image_snapshot' || /\\.(jpg|jpeg|png|webp)(\\?|$)/i.test(url)) {
         snapshot.src = cacheBust(url);
         snapshot.style.display = 'block';
         const refreshMs = Math.max(1000, Number(refreshSeconds || 15) * 1000);
