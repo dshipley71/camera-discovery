@@ -34,4 +34,9 @@ Blocked sources are a global deny policy and are respected by `blind`, `director
 
 | pattern | reason |
 |---|---|
-| insecam.org | User-blocked source; do not crawl, fetch, extract, or emit candidates from this domain. |
+| insecam.org | User-blocked camera directory; do not crawl, fetch, extract, or emit candidates from this domain. |
+| shodan.io | Internet-connected device search engine; not an approved public camera source. |
+| censys.io | Internet infrastructure scanning/search platform; not an approved public camera source. |
+| zoomeye.org | Cyberspace/internet asset search engine; not an approved public camera source. |
+| zoomeye.ai | Cyberspace/internet asset search engine; not an approved public camera source. |
+| fofa.info | Cyberspace/internet asset search engine; not an approved public camera source. |
