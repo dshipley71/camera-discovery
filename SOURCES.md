@@ -2,11 +2,9 @@
 
 This registry is intentionally empty by default. Add user-approved public source URLs here when you want directory-mode discovery.
 
-Allowed sources are used only in `directory` and `both` discovery modes. Blocked sources are a global deny policy and are respected by `blind`, `directory`, `both`, and `direct` modes, including fetched pages, linked endpoints, extracted media URLs, and final candidate rows.
+Allowed sources are used only in `directory` and `both` discovery modes. The `type` values are `page`, `feed`, `direct_hls`, `site`, and `dynamic`.
 
-Allowed `type` values are `page`, `feed`, `direct_hls`, `site`, and `dynamic`.
-
-
+Blocked sources are a global deny policy and are respected by `blind`, `directory`, `both`, and `direct` modes, including fetched pages, linked endpoints, extracted media URLs, and final candidate rows.
 
 | Pattern style          | Example                         | What it blocks                                                                                                      |
 | ---------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
