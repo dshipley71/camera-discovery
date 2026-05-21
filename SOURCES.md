@@ -10,8 +10,10 @@ Allowed `type` values are `page`, `feed`, `direct_hls`, `site`, and `dynamic`.
 
 | name | url | type | scope_hint | enabled | notes |
 |---|---|---|---|---|---|
+| OpenCCTV | http://www.opencctv.org | site | global | true | User-approved public CCTV directory source. |
 
 ## Blocked Sources
 
 | pattern | reason |
 |---|---|
+| http://www.insecam.org | User-blocked source; do not crawl, fetch, extract, or emit candidates from this domain. |
