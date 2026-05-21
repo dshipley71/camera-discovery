@@ -6,6 +6,8 @@ Allowed sources are used only in `directory` and `both` discovery modes. Blocked
 
 Allowed `type` values are `page`, `feed`, `direct_hls`, `site`, and `dynamic`.
 
+
+
 | Pattern style          | Example                         | What it blocks                                                                                                      |
 | ---------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | Bare domain            | `insecam.org`                   | Exact host and subdomains, across `http` and `https`, such as `insecam.org`, `www.insecam.org`, `foo.insecam.org`   |
@@ -22,6 +24,8 @@ Allowed `type` values are `page`, `feed`, `direct_hls`, `site`, and `dynamic`.
 - A full URL like http://www.insecam.org only blocks that protocol/host prefix. To block the whole domain regardless of protocol, use insecam.org instead.
 - Blocked sources are global deny rules: they apply to blind search, directory search, direct URLs, fetched pages, extracted endpoints, media URLs, and final candidate rows.
 
+
+
 ## Allowed Sources
 
 | name | url | type | scope_hint | enabled | notes |
@@ -32,4 +36,4 @@ Allowed `type` values are `page`, `feed`, `direct_hls`, `site`, and `dynamic`.
 
 | pattern | reason |
 |---|---|
-| http://www.insecam.org | User-blocked source; do not crawl, fetch, extract, or emit candidates from this domain. |
+| insecam.org | User-blocked source; do not crawl, fetch, extract, or emit candidates from this domain. |
