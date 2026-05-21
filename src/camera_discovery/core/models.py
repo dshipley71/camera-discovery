@@ -66,6 +66,22 @@ class RunConfig:
     max_streams: int = 150
     max_directory_pages: int = 8
     max_structured_endpoints_per_page: int = 20
+
+    # Browser/network capture is an optional second-stage extraction path. Static
+    # extraction runs first; these limits prevent dynamic rendering from consuming
+    # an entire discovery run.
+    enable_browser_capture: bool = True
+    browser_capture_timeout_ms: int = 15000
+    browser_capture_min_score: int = 3
+    max_browser_capture_pages: int = 20
+    max_browser_capture_pages_blind: int = 6
+    max_browser_capture_pages_directory: int = 12
+    max_browser_capture_pages_per_host: int = 3
+    browser_capture_settle_ms: int = 1000
+    browser_capture_scroll: bool = False
+    max_browser_json_endpoints_per_page: int = 10
+    max_browser_network_events_logged_per_page: int = 50
+
     asset_host_promotion_threshold: int = 3
     max_state_scale_candidate_geocodes: int = 150
     http_timeout: float = 20.0

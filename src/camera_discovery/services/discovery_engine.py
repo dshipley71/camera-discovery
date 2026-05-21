@@ -4,9 +4,10 @@ import concurrent.futures
 import json
 import math
 import re
+import threading
 import time
 import warnings
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse
 
@@ -25,6 +26,10 @@ IMAGE_RE = re.compile(r"https?://[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s'\"
 COORD_RE = re.compile(r"(?<!\d)([-+]?\d{1,2}\.\d{3,})\s*,\s*([-+]?\d{1,3}\.\d{3,})(?!\d)")
 JSON_FEED_HINT_RE = re.compile(r"(?:\.json(?:\?|$)|/api/|/feed|/feeds|/layer|/layers|camera|cameras|mapserver|featureserver)", re.I)
 MAP_LAYER_API_RE = re.compile(r"(?:/MapServer|/FeatureServer|/arcgis/|/api/cameras)", re.I)
+DYNAMIC_PAGE_HINT_RE = re.compile(
+    r"(?:__NEXT_DATA__|__NUXT__|window\.__INITIAL_STATE__|leaflet|mapbox|openlayers|video\.js|hls\.js|jwplayer|clappr|arcgis|MapServer|FeatureServer|camera|cameras|webcam|webcams|cctv|live|snapshot)",
+    re.I,
+)
 MAX_WORKERS = 8
 URL_KEYS = {"url", "stream", "stream_url", "streamurl", "hls", "hls_url", "hlsurl", "video", "video_url", "src"}
 IMAGE_KEYS = {"image", "image_url", "imageurl", "snapshot", "snapshot_url", "snapshoturl", "thumbnail", "thumbnail_url", "thumbnailurl", "preview", "preview_url", "poster", "poster_url"}
@@ -78,6 +83,97 @@ def _candidate_media_type(candidate: CameraCandidate) -> str:
     if _looks_like_hls(candidate.stream_url):
         return "hls"
     return "image_snapshot"
+
+
+@dataclass
+class PageDiscoverySignals:
+    url: str
+    source_provider: str = ""
+    source_kind: str = ""
+    status_code: int | None = None
+    content_type: str = ""
+    title: str = ""
+    script_count: int = 0
+    has_large_script_bundle: bool = False
+    dynamic_signals: list[str] | None = None
+    json_endpoint_hints: list[str] | None = None
+    pagination_hints: list[str] | None = None
+    camera_text_score: int = 0
+    app_shell_score: int = 0
+    has_hls_hint: bool = False
+    static_candidate_count: int = 0
+
+    def to_log_record(self, row: dict[str, str], phase: str) -> dict[str, Any]:
+        return {
+            "phase": phase,
+            "url": self.url,
+            "source_provider": self.source_provider,
+            "source_kind": self.source_kind,
+            "source_name": row.get("source_name") or row.get("title"),
+            "status_code": self.status_code,
+            "content_type": self.content_type,
+            "title": self.title,
+            "script_count": self.script_count,
+            "has_large_script_bundle": self.has_large_script_bundle,
+            "dynamic_signals": self.dynamic_signals or [],
+            "json_endpoint_hints": (self.json_endpoint_hints or [])[:20],
+            "pagination_hints": (self.pagination_hints or [])[:20],
+            "camera_text_score": self.camera_text_score,
+            "app_shell_score": self.app_shell_score,
+            "has_hls_hint": self.has_hls_hint,
+            "static_candidate_count": self.static_candidate_count,
+        }
+
+
+@dataclass
+class BrowserCaptureDecision:
+    url: str
+    source_provider: str
+    source_kind: str
+    selected: bool
+    score: int
+    reasons: list[str]
+    skip_reason: str = ""
+    host: str = ""
+    phase: str = "primary"
+    source_name: str = ""
+    static_candidate_count: int = 0
+    budget_remaining: dict[str, int] | None = None
+
+    def to_log_record(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class BrowserCaptureResult:
+    url: str
+    backend: str = "playwright"
+    captured_hls_urls: list[str] | None = None
+    captured_json_urls: list[str] | None = None
+    rendered_html_candidates: int = 0
+    total_browser_candidates: int = 0
+    network_events_sample: list[dict[str, Any]] | None = None
+    elapsed_ms: int = 0
+    timed_out: bool = False
+    error: str = ""
+
+    def to_log_record(self, row: dict[str, str], phase: str) -> dict[str, Any]:
+        return {
+            "phase": phase,
+            "url": self.url,
+            "backend": self.backend,
+            "source_provider": row.get("source_provider"),
+            "source_kind": row.get("source_kind"),
+            "source_name": row.get("source_name") or row.get("title"),
+            "elapsed_ms": self.elapsed_ms,
+            "captured_hls_urls": len(self.captured_hls_urls or []),
+            "captured_json_urls": len(self.captured_json_urls or []),
+            "rendered_html_candidates": self.rendered_html_candidates,
+            "total_browser_candidates": self.total_browser_candidates,
+            "timed_out": self.timed_out,
+            "error": self.error,
+            "network_events_sample": self.network_events_sample or [],
+        }
 
 
 class DirectorySourceProvider:
@@ -146,6 +242,24 @@ class CandidateDiscoveryEngine:
         self.source_policy = load_source_policy(config.sources_file, config.block_patterns)
         self.directory_provider = DirectorySourceProvider(self.source_policy)
         self.direct_provider = DirectUrlSourceProvider(config.seed_urls, self.source_policy)
+        self._browser_capture_lock = threading.RLock()
+        self._browser_capture_counts = {"total": 0, "blind": 0, "directory": 0, "direct": 0, "asset_host_promotion": 0}
+        self._browser_capture_host_counts: dict[str, int] = {}
+        self._browser_capture_host_failures: dict[str, int] = {}
+        self._browser_capture_summary: dict[str, Any] = {
+            "enabled": self.config.enable_browser_capture,
+            "backend": "playwright",
+            "rows_considered": 0,
+            "rows_selected": 0,
+            "rows_skipped": 0,
+            "pages_attempted": 0,
+            "candidates": 0,
+            "hls_candidates": 0,
+            "image_snapshot_candidates": 0,
+            "errors": 0,
+            "timeouts": 0,
+            "by_source_provider": {},
+        }
 
     def _emit_progress(self, event: str, **payload: Any) -> None:
         if self.progress_callback is None:
@@ -260,8 +374,19 @@ class CandidateDiscoveryEngine:
                 or total_count >= self.config.max_total_candidates
             )
 
+        def extract_row(row: dict[str, str]) -> list[CameraCandidate]:
+            try:
+                return self._extract_from_source_row(row, client, phase=phase)
+            except TypeError as exc:
+                # Keep tests and third-party callers that monkeypatch the older
+                # two-argument private helper working while the built-in
+                # implementation receives phase-aware browser-capture context.
+                if "phase" in str(exc):
+                    return self._extract_from_source_row(row, client)
+                raise
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {pool.submit(self._extract_from_source_row, row, client): row for row in rows}
+            futures = {pool.submit(extract_row, row): row for row in rows}
             for future in concurrent.futures.as_completed(futures):
                 try:
                     candidates = future.result()
@@ -336,13 +461,40 @@ class CandidateDiscoveryEngine:
 
     def _source_rows(self, target: TargetContext, queries: list[str], client: httpx.Client | None = None) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
-        # User-approved directory entries are evaluated before blind search in
-        # `both` mode so their provenance is preserved when they overlap with
-        # search results. Global block rules still apply to every provider.
-        if self.config.discovery_mode in {DiscoveryMode.DIRECTORY, DiscoveryMode.BOTH}:
-            rows.extend(self.directory_provider.rows_for_target(target))
-        if self.config.discovery_mode in {DiscoveryMode.BLIND, DiscoveryMode.BOTH}:
-            rows.extend(self._blind_search(queries, client))
+        if self.config.discovery_mode == DiscoveryMode.BOTH:
+            self._emit_progress("source_discovery_parallel_started", target=target, providers=["directory", "blind"])
+            directory_rows: list[dict[str, str]] = []
+            blind_rows: list[dict[str, str]] = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = {
+                    pool.submit(self.directory_provider.rows_for_target, target): "directory",
+                    # Use an independent HTTP client for blind search so row discovery
+                    # is truly parallel without sharing one client across threads.
+                    pool.submit(self._blind_search, queries, None): "blind",
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    provider = futures[future]
+                    try:
+                        provider_rows = future.result()
+                    except Exception as exc:
+                        provider_rows = [{"query": f"{provider}:{target.target_id}", "url": "", "title": "", "error": repr(exc), "source_provider": provider}]
+                    if provider == "directory":
+                        directory_rows = provider_rows
+                    else:
+                        blind_rows = provider_rows
+            rows.extend(directory_rows)
+            rows.extend(blind_rows)
+            self._emit_progress(
+                "source_discovery_parallel_complete",
+                target=target,
+                directory_rows=len(directory_rows),
+                blind_rows=len(blind_rows),
+            )
+        else:
+            if self.config.discovery_mode == DiscoveryMode.DIRECTORY:
+                rows.extend(self.directory_provider.rows_for_target(target))
+            if self.config.discovery_mode == DiscoveryMode.BLIND:
+                rows.extend(self._blind_search(queries, client))
         if self.config.seed_urls and self.config.discovery_mode in {DiscoveryMode.DIRECT, DiscoveryMode.BOTH, DiscoveryMode.BLIND, DiscoveryMode.DIRECTORY}:
             rows.extend(self.direct_provider.rows_for_target(target))
         return rows
@@ -479,7 +631,7 @@ class CandidateDiscoveryEngine:
         write_jsonl(self.logs_dir / "blocked_source_rows.jsonl", blocked_rows)
         return selected
 
-    def _extract_from_source_row(self, row: dict[str, str], client: httpx.Client | None = None) -> list[CameraCandidate]:
+    def _extract_from_source_row(self, row: dict[str, str], client: httpx.Client | None = None, *, phase: str = "primary") -> list[CameraCandidate]:
         url = row.get("url") or ""
         if self.source_policy.is_blocked(url):
             return []
@@ -487,43 +639,412 @@ class CandidateDiscoveryEngine:
             candidate = self._candidate_from_stream(url, url, row, "direct_hls")
             candidate.source_metadata["media_type"] = "hls"
             return [candidate]
-        if row.get("source_kind") == "dynamic":
-            return self._extract_from_dynamic_page(url, row)
-        return self._extract_from_page(url, row, client)
-
-    def _extract_from_dynamic_page(self, url: str, row: dict[str, str]) -> list[CameraCandidate]:
+        static_candidates, signals = self._extract_from_page_with_signals(url, row, client, phase=phase)
+        decision = self._browser_capture_decision(row, static_candidates, signals, phase)
+        self._log_browser_capture_decision(decision)
+        if not decision.selected:
+            return static_candidates
+        self._emit_progress(
+            "browser_capture_started",
+            phase=phase,
+            url=url,
+            source_provider=decision.source_provider,
+            source_kind=decision.source_kind,
+            score=decision.score,
+            reasons=decision.reasons,
+        )
         try:
+            payload = self._extract_from_dynamic_page(url, row, phase=phase, decision=decision, return_result=True)
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+            payload = self._extract_from_dynamic_page(url, row)
+        if isinstance(payload, tuple):
+            browser_candidates, result = payload
+        else:
+            browser_candidates = payload
+            result = BrowserCaptureResult(url=url, total_browser_candidates=len(browser_candidates or []))
+            self._record_browser_summary(row.get("source_provider") or "unknown", attempted=True, candidates=browser_candidates or [])
+        self._log_browser_capture_result(result, row, phase)
+        self._emit_progress(
+            "browser_capture_page_complete",
+            phase=phase,
+            url=url,
+            source_provider=decision.source_provider,
+            candidates=result.total_browser_candidates,
+            hls_urls=len(result.captured_hls_urls or []),
+            json_urls=len(result.captured_json_urls or []),
+            timed_out=result.timed_out,
+            error=bool(result.error),
+        )
+        return self._dedupe(static_candidates + (browser_candidates or []))
+
+    def _extract_from_page(self, url: str, row: dict[str, str], client: httpx.Client | None = None) -> list[CameraCandidate]:
+        candidates, _signals = self._extract_from_page_with_signals(url, row, client, phase="direct_static")
+        return candidates
+
+    def _extract_from_page_with_signals(
+        self,
+        url: str,
+        row: dict[str, str],
+        client: httpx.Client | None = None,
+        *,
+        phase: str = "primary",
+    ) -> tuple[list[CameraCandidate], PageDiscoverySignals | None]:
+        owns_client = client is None
+        client = client or self._make_client()
+        try:
+            resp = _get_with_retry(client, url)
+            resp.raise_for_status()
+            text = resp.text
+            content_type = resp.headers.get("content-type", "")
+            out = self._extract_from_response(url, row, text, content_type)
+            if "html" in content_type.lower() or "<html" in text[:1000].lower():
+                out.extend(self._extract_from_linked_feeds(url, row, text, client))
+            deduped = self._dedupe(out)
+            signals = self._page_discovery_signals(url, row, text, content_type, resp.status_code, len(deduped))
+            write_jsonl(self.logs_dir / "page_discovery_signals.jsonl", [signals.to_log_record(row, phase)], append=True)
+            return deduped, signals
+        except Exception as exc:
+            signals = PageDiscoverySignals(
+                url=url,
+                source_provider=row.get("source_provider") or "",
+                source_kind=row.get("source_kind") or "",
+                dynamic_signals=["static_fetch_error"],
+                static_candidate_count=0,
+            )
+            write_jsonl(
+                self.logs_dir / "page_discovery_signals.jsonl",
+                [{**signals.to_log_record(row, phase), "error": repr(exc)}],
+                append=True,
+            )
+            return [], signals
+        finally:
+            if owns_client:
+                client.close()
+
+    def _page_discovery_signals(
+        self,
+        url: str,
+        row: dict[str, str],
+        text: str,
+        content_type: str,
+        status_code: int | None,
+        static_candidate_count: int,
+    ) -> PageDiscoverySignals:
+        lowered = (text or "").casefold()
+        soup = _html_soup(text) if ("html" in content_type.casefold() or "<html" in lowered[:1000]) else None
+        title = ""
+        script_count = 0
+        large_script = False
+        json_hints: list[str] = []
+        pagination_hints: list[str] = []
+        dynamic: list[str] = []
+        if soup is not None:
+            title_tag = soup.find("title")
+            title = title_tag.get_text(" ", strip=True) if title_tag else ""
+            script_tags = soup.select("script")
+            script_count = len(script_tags)
+            for tag in script_tags:
+                src = tag.get("src") or ""
+                inline_len = len(tag.get_text("", strip=False) or "")
+                if src:
+                    if any(part in src.casefold() for part in ("app", "bundle", "chunk", "static", "assets")):
+                        large_script = True
+                    if JSON_FEED_HINT_RE.search(src) or MAP_LAYER_API_RE.search(src):
+                        json_hints.append(urljoin(url, src))
+                if inline_len > 20000:
+                    large_script = True
+            for tag in soup.select("a[href], link[href]"):
+                href = tag.get("href") or ""
+                absolute = urljoin(url, href)
+                if JSON_FEED_HINT_RE.search(absolute) or MAP_LAYER_API_RE.search(absolute):
+                    json_hints.append(absolute)
+                if _looks_like_pagination_url(absolute) or str(tag.get_text(" ", strip=True)).casefold() in {"next", "more", "older"}:
+                    pagination_hints.append(absolute)
+            if script_count >= 5:
+                dynamic.append("multiple_script_tags")
+            if large_script:
+                dynamic.append("large_script_bundle")
+        for name, pattern in (
+            ("hls_hint", r"\.m3u8|application/x-mpegurl|application/vnd\.apple\.mpegurl"),
+            ("map_library", r"leaflet|mapbox|openlayers|arcgis|MapServer|FeatureServer"),
+            ("player_library", r"video\.js|hls\.js|jwplayer|clappr"),
+            ("javascript_state", r"__NEXT_DATA__|__NUXT__|window\.__INITIAL_STATE__"),
+            ("json_api_hint", r"/api/|\.json|/feed|/feeds|/layer|/layers|MapServer|FeatureServer"),
+        ):
+            if re.search(pattern, text, flags=re.I):
+                dynamic.append(name)
+        camera_text_score = sum(lowered.count(term) for term in ("camera", "cameras", "webcam", "webcams", "cctv", "live", "snapshot"))
+        app_shell_score = 0
+        if soup is not None and script_count >= 5 and len(soup.get_text(" ", strip=True)) < 1500:
+            app_shell_score += 2
+            dynamic.append("app_shell")
+        if row.get("source_kind") in {"dynamic", "site", "promoted_host", "site_target_page"}:
+            dynamic.append(f"source_kind:{row.get('source_kind')}")
+        return PageDiscoverySignals(
+            url=url,
+            source_provider=row.get("source_provider") or "",
+            source_kind=row.get("source_kind") or "",
+            status_code=status_code,
+            content_type=content_type,
+            title=title,
+            script_count=script_count,
+            has_large_script_bundle=large_script,
+            dynamic_signals=_dedupe_strings(dynamic),
+            json_endpoint_hints=_dedupe_strings(json_hints),
+            pagination_hints=_dedupe_strings(pagination_hints),
+            camera_text_score=camera_text_score,
+            app_shell_score=app_shell_score,
+            has_hls_hint="hls_hint" in dynamic,
+            static_candidate_count=static_candidate_count,
+        )
+
+    def _browser_capture_decision(
+        self,
+        row: dict[str, str],
+        static_candidates: list[CameraCandidate],
+        signals: PageDiscoverySignals | None,
+        phase: str,
+    ) -> BrowserCaptureDecision:
+        url = row.get("url") or ""
+        host = urlparse(url).netloc.casefold()
+        source_provider = row.get("source_provider") or "unknown"
+        source_kind = row.get("source_kind") or ""
+        reasons: list[str] = []
+        score = 0
+        if not self.config.enable_browser_capture:
+            return self._browser_skip(row, phase, "browser_capture_disabled", score, reasons, len(static_candidates))
+        if not url.startswith("http"):
+            return self._browser_skip(row, phase, "invalid_url", score, reasons, len(static_candidates))
+        if self.source_policy.is_blocked(url):
+            return self._browser_skip(row, phase, "blocked_url", score, reasons, len(static_candidates))
+        if _looks_like_hls(url) or _looks_like_image(url):
+            return self._browser_skip(row, phase, "direct_media_url", score, reasons, len(static_candidates))
+        if source_kind in {"direct_hls", "feed"} and not (signals and signals.dynamic_signals):
+            return self._browser_skip(row, phase, "static_endpoint_already_handled", score, reasons, len(static_candidates))
+        if self._candidate_budgets_full(static_candidates):
+            return self._browser_skip(row, phase, "candidate_budget_full", score, reasons, len(static_candidates))
+        if source_kind == "dynamic":
+            score += 5
+            reasons.append("explicit_dynamic_source_kind")
+        if source_provider == "directory":
+            score += 2
+            reasons.append("directory_source")
+        elif source_provider == "blind":
+            score += 1
+            reasons.append("blind_source")
+        elif source_provider == "asset_host_promotion":
+            score += 2
+            reasons.append("promoted_asset_host")
+        if signals:
+            if signals.static_candidate_count == 0:
+                score += 2
+                reasons.append("static_zero_candidates")
+            if signals.dynamic_signals:
+                signal_weight = min(4, len(signals.dynamic_signals))
+                score += signal_weight
+                reasons.extend(signals.dynamic_signals[:6])
+            if signals.camera_text_score >= 2:
+                score += 2
+                reasons.append("camera_text_signals")
+            if signals.json_endpoint_hints:
+                score += 1
+                reasons.append("json_or_map_endpoint_hints")
+            if signals.app_shell_score:
+                score += signals.app_shell_score
+                reasons.append("app_shell_score")
+            if signals.has_hls_hint:
+                score += 2
+                reasons.append("hls_text_hint")
+        row_text = " ".join(str(row.get(key) or "") for key in ("title", "snippet", "source_name", "source_notes")).casefold()
+        if any(term in row_text for term in ("camera", "cameras", "webcam", "webcams", "cctv", "live", "snapshot")):
+            score += 1
+            reasons.append("row_camera_text")
+        if static_candidates and not (source_kind == "dynamic" or (signals and (signals.dynamic_signals or signals.json_endpoint_hints))):
+            return self._browser_skip(row, phase, "static_candidates_sufficient", score, reasons, len(static_candidates))
+        if score < self.config.browser_capture_min_score:
+            return self._browser_skip(row, phase, "score_below_threshold", score, reasons, len(static_candidates))
+        return self._reserve_browser_capture(row, phase, score, _dedupe_strings(reasons), len(static_candidates))
+
+    def _browser_skip(self, row: dict[str, str], phase: str, skip_reason: str, score: int, reasons: list[str], static_candidate_count: int) -> BrowserCaptureDecision:
+        self._record_browser_summary(row.get("source_provider") or "unknown", considered=True, selected=False)
+        return BrowserCaptureDecision(
+            url=row.get("url") or "",
+            source_provider=row.get("source_provider") or "unknown",
+            source_kind=row.get("source_kind") or "",
+            selected=False,
+            score=score,
+            reasons=_dedupe_strings(reasons),
+            skip_reason=skip_reason,
+            host=urlparse(row.get("url") or "").netloc.casefold(),
+            phase=phase,
+            source_name=row.get("source_name") or row.get("title") or "",
+            static_candidate_count=static_candidate_count,
+            budget_remaining=self._browser_budget_remaining(row.get("source_provider") or "unknown", urlparse(row.get("url") or "").netloc.casefold()),
+        )
+
+    def _reserve_browser_capture(self, row: dict[str, str], phase: str, score: int, reasons: list[str], static_candidate_count: int) -> BrowserCaptureDecision:
+        source_provider = row.get("source_provider") or "unknown"
+        host = urlparse(row.get("url") or "").netloc.casefold()
+        with self._browser_capture_lock:
+            skip_reason = ""
+            if self._browser_capture_counts["total"] >= self.config.max_browser_capture_pages:
+                skip_reason = "global_browser_budget_exhausted"
+            elif source_provider == "blind" and self._browser_capture_counts.get("blind", 0) >= self.config.max_browser_capture_pages_blind:
+                skip_reason = "blind_browser_budget_exhausted"
+            elif source_provider == "directory" and self._browser_capture_counts.get("directory", 0) >= self.config.max_browser_capture_pages_directory:
+                skip_reason = "directory_browser_budget_exhausted"
+            elif self._browser_capture_host_counts.get(host, 0) >= self.config.max_browser_capture_pages_per_host:
+                skip_reason = "host_browser_budget_exhausted"
+            elif self._browser_capture_host_failures.get(host, 0) >= 2:
+                skip_reason = "host_browser_cooldown"
+            if skip_reason:
+                self._record_browser_summary(source_provider, considered=True, selected=False)
+                return BrowserCaptureDecision(
+                    url=row.get("url") or "",
+                    source_provider=source_provider,
+                    source_kind=row.get("source_kind") or "",
+                    selected=False,
+                    score=score,
+                    reasons=reasons,
+                    skip_reason=skip_reason,
+                    host=host,
+                    phase=phase,
+                    source_name=row.get("source_name") or row.get("title") or "",
+                    static_candidate_count=static_candidate_count,
+                    budget_remaining=self._browser_budget_remaining(source_provider, host),
+                )
+            self._browser_capture_counts["total"] += 1
+            self._browser_capture_counts[source_provider] = self._browser_capture_counts.get(source_provider, 0) + 1
+            self._browser_capture_host_counts[host] = self._browser_capture_host_counts.get(host, 0) + 1
+            self._record_browser_summary(source_provider, considered=True, selected=True)
+            return BrowserCaptureDecision(
+                url=row.get("url") or "",
+                source_provider=source_provider,
+                source_kind=row.get("source_kind") or "",
+                selected=True,
+                score=score,
+                reasons=reasons,
+                host=host,
+                phase=phase,
+                source_name=row.get("source_name") or row.get("title") or "",
+                static_candidate_count=static_candidate_count,
+                budget_remaining=self._browser_budget_remaining(source_provider, host),
+            )
+
+    def _browser_budget_remaining(self, source_provider: str, host: str) -> dict[str, int]:
+        return {
+            "global": max(0, self.config.max_browser_capture_pages - self._browser_capture_counts.get("total", 0)),
+            "blind": max(0, self.config.max_browser_capture_pages_blind - self._browser_capture_counts.get("blind", 0)),
+            "directory": max(0, self.config.max_browser_capture_pages_directory - self._browser_capture_counts.get("directory", 0)),
+            "host": max(0, self.config.max_browser_capture_pages_per_host - self._browser_capture_host_counts.get(host, 0)),
+        }
+
+    def _record_browser_summary(self, source_provider: str, *, considered: bool = False, selected: bool = False, candidates: list[CameraCandidate] | None = None, error: bool = False, timeout: bool = False, attempted: bool = False) -> None:
+        with self._browser_capture_lock:
+            provider_summary = self._browser_capture_summary["by_source_provider"].setdefault(
+                source_provider,
+                {"considered": 0, "selected": 0, "attempted": 0, "candidates": 0, "hls_candidates": 0, "image_snapshot_candidates": 0, "errors": 0, "timeouts": 0},
+            )
+            if considered:
+                self._browser_capture_summary["rows_considered"] += 1
+                provider_summary["considered"] += 1
+            if selected:
+                self._browser_capture_summary["rows_selected"] += 1
+                provider_summary["selected"] += 1
+            elif considered:
+                self._browser_capture_summary["rows_skipped"] += 1
+            if attempted:
+                self._browser_capture_summary["pages_attempted"] += 1
+                provider_summary["attempted"] += 1
+            if candidates:
+                hls = sum(1 for c in candidates if _candidate_media_type(c) == "hls")
+                snapshots = len(candidates) - hls
+                self._browser_capture_summary["candidates"] += len(candidates)
+                self._browser_capture_summary["hls_candidates"] += hls
+                self._browser_capture_summary["image_snapshot_candidates"] += snapshots
+                provider_summary["candidates"] += len(candidates)
+                provider_summary["hls_candidates"] += hls
+                provider_summary["image_snapshot_candidates"] += snapshots
+            if error:
+                self._browser_capture_summary["errors"] += 1
+                provider_summary["errors"] += 1
+            if timeout:
+                self._browser_capture_summary["timeouts"] += 1
+                provider_summary["timeouts"] += 1
+
+    def _log_browser_capture_decision(self, decision: BrowserCaptureDecision) -> None:
+        write_jsonl(self.logs_dir / "browser_capture_decisions.jsonl", [decision.to_log_record()], append=True)
+        if decision.skip_reason in {"global_browser_budget_exhausted", "blind_browser_budget_exhausted", "directory_browser_budget_exhausted", "host_browser_budget_exhausted"}:
+            self._emit_progress("browser_capture_budget_exhausted", phase=decision.phase, skip_reason=decision.skip_reason, source_provider=decision.source_provider, host=decision.host)
+
+    def _log_browser_capture_result(self, result: BrowserCaptureResult, row: dict[str, str], phase: str) -> None:
+        write_jsonl(self.logs_dir / "browser_capture_results.jsonl", [result.to_log_record(row, phase)], append=True)
+        if result.error:
+            error_record = {**result.to_log_record(row, phase), "error": result.error}
+            write_jsonl(self.logs_dir / "browser_capture_errors.jsonl", [error_record], append=True)
+            write_jsonl(self.logs_dir / "playwright_network_capture_errors.jsonl", [error_record], append=True)
+
+    def _extract_from_dynamic_page(
+        self,
+        url: str,
+        row: dict[str, str],
+        *,
+        phase: str = "primary",
+        decision: BrowserCaptureDecision | None = None,
+        return_result: bool = False,
+    ) -> list[CameraCandidate] | tuple[list[CameraCandidate], BrowserCaptureResult]:
+        start = time.monotonic()
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
             from playwright.sync_api import sync_playwright
-        except ImportError:
-            return []
+        except ImportError as exc:
+            result = BrowserCaptureResult(url=url, error=repr(exc))
+            self._record_browser_summary(row.get("source_provider") or "unknown", attempted=True, error=True)
+            return ([], result) if return_result else []
 
         collected_hls: set[str] = set()
         collected_json: set[str] = set()
+        network_events: list[dict[str, Any]] = []
+        rendered_html = ""
+        timed_out = False
         browser = None
         try:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch(headless=True)
                 page = browser.new_page(user_agent=self.config.user_agent)
 
-                def collect_url(candidate_url: str, content_type: str = "") -> None:
-                    if not candidate_url:
+                def collect_url(candidate_url: str, content_type: str = "", event_type: str = "network") -> None:
+                    if not candidate_url or self.source_policy.is_blocked(candidate_url):
                         return
                     lowered_type = content_type.casefold()
+                    if len(network_events) < self.config.max_browser_network_events_logged_per_page:
+                        network_events.append({"event": event_type, "url": candidate_url, "content_type": content_type[:120]})
                     if _looks_like_hls(candidate_url) or "application/x-mpegurl" in lowered_type or "application/vnd.apple.mpegurl" in lowered_type:
                         collected_hls.add(candidate_url)
                     if JSON_FEED_HINT_RE.search(candidate_url) or MAP_LAYER_API_RE.search(candidate_url):
                         collected_json.add(candidate_url)
 
-                page.on("request", lambda request: collect_url(request.url, str(request.headers.get("content-type", ""))))
-                page.on("response", lambda response: collect_url(response.url, str(response.headers.get("content-type", ""))))
-                page.goto(url, wait_until="networkidle", timeout=15_000)
+                page.on("request", lambda request: collect_url(request.url, str(request.headers.get("content-type", "")), "request"))
+                page.on("response", lambda response: collect_url(response.url, str(response.headers.get("content-type", "")), "response"))
+                page.goto(url, wait_until="networkidle", timeout=self.config.browser_capture_timeout_ms)
+                if self.config.browser_capture_settle_ms:
+                    page.wait_for_timeout(self.config.browser_capture_settle_ms)
+                if self.config.browser_capture_scroll:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    if self.config.browser_capture_settle_ms:
+                        page.wait_for_timeout(min(self.config.browser_capture_settle_ms, 1500))
+                rendered_html = page.content()
+        except PlaywrightTimeoutError as exc:
+            timed_out = True
+            result = BrowserCaptureResult(url=url, elapsed_ms=int((time.monotonic() - start) * 1000), timed_out=True, error=repr(exc), network_events_sample=network_events)
+            self._record_browser_failure(url, row, result)
+            return ([], result) if return_result else []
         except Exception as exc:
-            write_jsonl(
-                self.logs_dir / "playwright_network_capture_errors.jsonl",
-                [{"url": url, "error": repr(exc), "source_name": row.get("source_name") or row.get("title")}],
-                append=True,
-            )
-            return []
+            result = BrowserCaptureResult(url=url, elapsed_ms=int((time.monotonic() - start) * 1000), error=repr(exc), network_events_sample=network_events)
+            self._record_browser_failure(url, row, result)
+            return ([], result) if return_result else []
         finally:
             try:
                 if browser is not None:
@@ -535,43 +1056,65 @@ class CandidateDiscoveryEngine:
         for stream_url in sorted(collected_hls):
             if self.source_policy.is_blocked(stream_url):
                 continue
-            candidate = self._candidate_from_stream(stream_url, url, row, "playwright_network_capture")
+            candidate = self._candidate_from_stream(stream_url, url, row, "browser_network_capture")
             candidate.source_metadata["media_type"] = "hls"
+            self._apply_browser_metadata(candidate, url, decision, "browser_network_capture")
             out.append(candidate)
+        if rendered_html:
+            rendered_candidates = self._extract_from_response(url, row, rendered_html, "text/html")
+            for candidate in rendered_candidates:
+                self._apply_browser_metadata(candidate, url, decision, "browser_rendered_html")
+                if candidate.discovery_method not in {"browser_network_capture", "browser_json_endpoint"}:
+                    candidate.discovery_method = "browser_rendered_html"
+            out.extend(rendered_candidates)
         if collected_json:
             client = self._make_client()
             try:
-                for feed_url in sorted(collected_json):
+                for feed_url in sorted(collected_json)[: self.config.max_browser_json_endpoints_per_page]:
                     if self.source_policy.is_blocked(feed_url):
                         continue
                     try:
                         resp = _get_with_retry(client, feed_url)
                         if resp.status_code >= 400:
                             continue
-                        out.extend(self._extract_from_response(feed_url, row, resp.text, resp.headers.get("content-type", "")))
+                        json_candidates = self._extract_from_response(feed_url, row, resp.text, resp.headers.get("content-type", ""))
+                        for candidate in json_candidates:
+                            self._apply_browser_metadata(candidate, url, decision, "browser_json_endpoint")
+                            candidate.discovery_method = "browser_json_endpoint"
+                        out.extend(json_candidates)
                     except Exception:
                         continue
             finally:
                 client.close()
-        return self._dedupe(out)
+        out = self._dedupe(out)
+        result = BrowserCaptureResult(
+            url=url,
+            captured_hls_urls=sorted(collected_hls),
+            captured_json_urls=sorted(collected_json),
+            rendered_html_candidates=sum(1 for c in out if c.discovery_method == "browser_rendered_html"),
+            total_browser_candidates=len(out),
+            network_events_sample=network_events,
+            elapsed_ms=int((time.monotonic() - start) * 1000),
+            timed_out=timed_out,
+        )
+        self._record_browser_summary(row.get("source_provider") or "unknown", attempted=True, candidates=out)
+        return (out, result) if return_result else out
 
-    def _extract_from_page(self, url: str, row: dict[str, str], client: httpx.Client | None = None) -> list[CameraCandidate]:
-        owns_client = client is None
-        client = client or self._make_client()
-        try:
-            resp = _get_with_retry(client, url)
-            resp.raise_for_status()
-            text = resp.text
-            content_type = resp.headers.get("content-type", "")
-            out = self._extract_from_response(url, row, text, content_type)
-            if "html" in content_type.lower() or "<html" in text[:1000].lower():
-                out.extend(self._extract_from_linked_feeds(url, row, text, client))
-            return self._dedupe(out)
-        except Exception:
-            return []
-        finally:
-            if owns_client:
-                client.close()
+    def _apply_browser_metadata(self, candidate: CameraCandidate, capture_url: str, decision: BrowserCaptureDecision | None, method: str) -> None:
+        candidate.source_metadata["browser_backend"] = "playwright"
+        candidate.source_metadata["browser_capture_url"] = capture_url
+        candidate.source_metadata["browser_capture_reason"] = ",".join((decision.reasons if decision else [])[:10])
+        candidate.source_metadata.setdefault("discovery_method", method)
+        if _looks_like_hls(candidate.stream_url):
+            candidate.source_metadata.setdefault("media_type", "hls")
+        else:
+            candidate.source_metadata.setdefault("media_type", "image_snapshot")
+
+    def _record_browser_failure(self, url: str, row: dict[str, str], result: BrowserCaptureResult) -> None:
+        host = urlparse(url).netloc.casefold()
+        with self._browser_capture_lock:
+            self._browser_capture_host_failures[host] = self._browser_capture_host_failures.get(host, 0) + 1
+        self._record_browser_summary(row.get("source_provider") or "unknown", attempted=True, error=bool(result.error), timeout=result.timed_out)
 
     def _extract_from_response(self, url: str, row: dict[str, str], text: str, content_type: str = "") -> list[CameraCandidate]:
         if _looks_like_json_response(url, content_type, text):
@@ -1478,7 +2021,28 @@ class CandidateDiscoveryEngine:
             "review": len(cs.review),
             "rejected": len(cs.rejected),
             "llm_semantic_reviewed": sum(1 for candidate in cs.unique if candidate.llm_semantic_decision),
+            "browser_capture_enabled": self.config.enable_browser_capture,
+            "browser_backend": "playwright",
+            "browser_rows_considered": self._browser_capture_summary.get("rows_considered", 0),
+            "browser_rows_selected": self._browser_capture_summary.get("rows_selected", 0),
+            "browser_pages_attempted": self._browser_capture_summary.get("pages_attempted", 0),
+            "browser_candidates": self._browser_capture_summary.get("candidates", 0),
+            "browser_hls_candidates": self._browser_capture_summary.get("hls_candidates", 0),
+            "browser_image_snapshot_candidates": self._browser_capture_summary.get("image_snapshot_candidates", 0),
+            "browser_errors": self._browser_capture_summary.get("errors", 0),
+            "browser_timeouts": self._browser_capture_summary.get("timeouts", 0),
         }
+        write_json(target_logs / "browser_capture_summary.json", self._browser_capture_summary)
+        write_json(self.logs_dir / "browser_capture_summary.json", self._browser_capture_summary)
+        self._emit_progress(
+            "browser_capture_complete",
+            target=target,
+            rows_considered=self._browser_capture_summary.get("rows_considered", 0),
+            rows_selected=self._browser_capture_summary.get("rows_selected", 0),
+            pages_attempted=self._browser_capture_summary.get("pages_attempted", 0),
+            candidates=self._browser_capture_summary.get("candidates", 0),
+            errors=self._browser_capture_summary.get("errors", 0),
+        )
         write_json(target_logs / "candidate_discovery_summary.json", summary)
         if target.target_index == 0:
             write_json(self.logs_dir / "search_queries.json", {"queries": queries})
@@ -1801,6 +2365,11 @@ def _pagination_rows(row: dict[str, str], max_pages: int) -> list[dict[str, str]
         new_row["discovery_note"] = f"pagination_page_{page}"
         rows.append(new_row)
     return rows
+
+
+def _looks_like_pagination_url(url: str) -> bool:
+    lower = url.casefold()
+    return any(token in lower for token in ("page=", "/page/", "offset=", "start=", "next", "camera", "webcam", "cctv"))
 
 
 def _looks_like_paginated_directory_url(url: str) -> bool:
