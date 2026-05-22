@@ -254,7 +254,18 @@ def _make_harvest_progress_callback(console: Console, *, mode: str):
         if event == "harvest_started":
             console.print(f"Progress: harvest started — discovery_mode={payload.get('discovery_mode')}")
         elif event == "harvest_source_rows_ready":
-            console.print(f"Progress: harvest source rows ready — {payload.get('rows', 0)} rows.")
+            summary = payload.get("source_rows_summary") or {}
+            by_provider = summary.get("selected_by_provider") or {}
+            sources_file = summary.get("sources_file")
+            sources_used = summary.get("sources_file_used")
+            directory_rows = by_provider.get("directory", 0)
+            blind_rows = by_provider.get("blind", 0)
+            direct_rows = by_provider.get("direct", 0)
+            console.print(
+                f"Progress: harvest source rows ready — {payload.get('rows', 0)} rows "
+                f"(directory/SOURCES.md={directory_rows}, blind={blind_rows}, direct={direct_rows}; "
+                f"sources_file_used={sources_used}; sources_file={sources_file})."
+            )
         elif event == "harvest_source_row_processed":
             processed = int(payload.get("processed_rows") or 0)
             rows = int(payload.get("rows") or 0)
@@ -569,6 +580,15 @@ def harvest_urls(
         try:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             console.print(f"[bold]By media type:[/bold] {summary.get('by_media_type', {})}")
+            source_summary = summary.get("source_rows") or {}
+            if source_summary:
+                console.print(f"[bold]Source rows by provider:[/bold] {source_summary.get('selected_by_provider', {})}")
+                console.print(
+                    "[bold]SOURCES.md used:[/bold] "
+                    f"{source_summary.get('sources_file_used', False)} "
+                    f"(file={source_summary.get('sources_file')}, exists={source_summary.get('sources_file_exists', False)}, "
+                    f"enabled_directory_sources={source_summary.get('directory_sources_enabled', 0)})"
+                )
         except Exception:
             pass
 

@@ -201,3 +201,64 @@ def test_harvest_notebook_exists_and_is_cli_harness():
     assert "harvest-urls" in text
     assert "CameraUrlHarvestEngine" not in text
     assert "TargetResolver" not in text
+
+
+def test_harvest_reports_sources_md_directory_usage(tmp_path, monkeypatch):
+    from camera_discovery.services import harvest_engine
+
+    def fail_fetch(*args, **kwargs):  # avoid network; direct media rows are emitted before fetch attempt
+        raise RuntimeError("network disabled in test")
+
+    monkeypatch.setattr(harvest_engine, "_get_with_retry", fail_fetch)
+    sources = tmp_path / "SOURCES.md"
+    sources.write_text(
+        """
+# Allowed Sources
+
+| name | url | type | scope_hint | enabled | notes |
+| --- | --- | --- | --- | --- | --- |
+| Fixture HLS | https://media.example/directory-cam.m3u8 | direct_hls | public | true | test source |
+
+# Blocked Sources
+
+| pattern | reason |
+| --- | --- |
+| blocked.example | test block |
+""".strip(),
+        encoding="utf-8",
+    )
+    out = tmp_path / "harvest"
+    result = runner.invoke(
+        app,
+        [
+            "harvest-urls",
+            "test cameras",
+            "--discovery-mode",
+            "both",
+            "--max-search-queries",
+            "0",
+            "--sources-file",
+            str(sources),
+            "--output-dir",
+            str(out),
+            "--disable-browser-capture",
+            "--no-progress",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    summary = json.loads((out / "harvest_summary.json").read_text(encoding="utf-8"))
+    source_rows = summary["source_rows"]
+    assert source_rows["sources_file"] == str(sources)
+    assert source_rows["sources_file_exists"] is True
+    assert source_rows["sources_file_loaded"] is True
+    assert source_rows["sources_file_used"] is True
+    assert source_rows["directory_sources_configured"] == 1
+    assert source_rows["directory_sources_enabled"] == 1
+    assert source_rows["selected_by_provider"] == {"directory": 1}
+    assert summary["source_rows_by_provider"] == {"directory": 1}
+    assert summary["directory_source_rows_selected"] == 1
+    assert "SOURCES.md used" in result.stdout
+    assert "directory" in result.stdout
+    assert (out / "logs" / "source_rows_summary.json").exists()
+    handoff = json.loads((out / "harvest_handoff.json").read_text(encoding="utf-8"))
+    assert handoff["source_rows"]["sources_file_used"] is True

@@ -296,6 +296,8 @@ No tests or docs should add fake camera inventories, synthetic streams, fabricat
 
 When structured endpoints expose fields such as coordinates, direction/bearing/heading, `inService`, timestamps, image descriptions, refresh/update frequencies, `streamingVideoURL`, `currentImageURL`, and `referenceImageURL`, harvest mode preserves the full raw camera record, normalizes useful fields, groups media assets by `camera_record_id`, and writes `camera_records.jsonl`, `camera_media_assets.jsonl`, `discovered_endpoints.jsonl`, `harvest_camera_inventory.jsonl`, and `harvest_handoff.json` alongside the existing URL files.
 
+Harvest summaries also include source-row provenance so users can verify whether `SOURCES.md` was actually used. Check `harvest_summary.json` → `source_rows` or `logs/source_rows_summary.json` for `sources_file_used`, `selected_by_provider`, `selected_directory_rows`, `selected_blind_rows`, and `selected_direct_rows`.
+
 A normal run can consume the handoff without bypassing normal inventory behavior:
 
 ```bash

@@ -138,6 +138,7 @@ Harvest outputs include:
 - `discovered_endpoints.jsonl` — catalog of discovered JSON/API/GeoJSON/ArcGIS/feed endpoints and source-completeness counts.
 - `harvest_camera_inventory.jsonl` — handoff-oriented camera inventory rows marked source-provided, unvalidated, untrusted, ungeocoded, and not scope-filtered.
 - `harvest_handoff.json` — manifest that points to the handoff files and records counts.
-- `harvest_summary.json` — summary counts for URLs, structured records, media assets, endpoints, coordinates, orientation, source-reported `inService`, timestamps, and update frequencies.
+- `harvest_summary.json` — summary counts for URLs, structured records, media assets, endpoints, coordinates, orientation, source-reported `inService`, timestamps, update frequencies, and source-row provenance. The `source_rows` object reports whether `SOURCES.md` existed, was loaded, and contributed directory rows, plus counts by provider (`directory`, `blind`, `direct`) and source kind.
+- `logs/source_rows_summary.json` — the same source-row provenance summary written as a standalone log for quick debugging of `--discovery-mode both`, `--sources-file`, and directory-vs-blind behavior.
 
 `source_url` and `source_endpoint_url` are provenance fields. If a URL row came from a JSON endpoint, those fields should remain the endpoint URL; the direct media URL remains in `url` / `media_url`.

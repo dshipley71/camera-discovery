@@ -230,6 +230,8 @@ class CameraUrlHarvestEngine:
         self._camera_records: dict[str, HarvestedCameraRecord] = {}
         self._media_assets: dict[str, HarvestedMediaAsset] = {}
         self._discovered_endpoints: dict[str, DiscoveredEndpointRecord] = {}
+        self._blocked_source_rows: list[dict[str, Any]] = []
+        self._source_rows_summary: dict[str, Any] = {}
         self._browser_summary: dict[str, Any] = {
             "enabled": config.enable_browser_capture,
             "backend": config.browser_backend,
@@ -247,7 +249,8 @@ class CameraUrlHarvestEngine:
         self._emit("harvest_started", query=self.config.query, discovery_mode=self.config.discovery_mode.value)
         rows = self._source_rows()
         write_jsonl(self.output_dir / "source_rows.jsonl", rows)
-        self._emit("harvest_source_rows_ready", rows=len(rows))
+        write_json(self.logs_dir / "source_rows_summary.json", self._source_rows_summary)
+        self._emit("harvest_source_rows_ready", rows=len(rows), source_rows_summary=self._source_rows_summary)
 
         raw_records: list[HarvestedUrlRecord] = []
         client = self._make_client()
@@ -319,16 +322,33 @@ class CameraUrlHarvestEngine:
             return
 
     def _source_rows(self) -> list[dict[str, str]]:
-        rows: list[dict[str, str]] = []
+        directory_rows: list[dict[str, str]] = []
+        blind_rows: list[dict[str, str]] = []
+        direct_rows: list[dict[str, str]] = []
         if self.config.discovery_mode in {DiscoveryMode.DIRECTORY, DiscoveryMode.BOTH}:
-            rows.extend(self._directory_rows())
+            directory_rows = self._directory_rows()
         if self.config.discovery_mode in {DiscoveryMode.BLIND, DiscoveryMode.BOTH}:
-            rows.extend(self._blind_rows())
+            blind_rows = self._blind_rows()
         if self.config.discovery_mode in {DiscoveryMode.DIRECT, DiscoveryMode.BOTH, DiscoveryMode.BLIND, DiscoveryMode.DIRECTORY}:
-            rows.extend(self._direct_seed_rows())
-        selected = self._select_rows(rows)
-        if self.config.max_source_rows > 0:
-            selected = selected[: self.config.max_source_rows]
+            direct_rows = self._direct_seed_rows()
+        rows = [*directory_rows, *blind_rows, *direct_rows]
+        selected_before_budget = self._select_rows(rows)
+        selected = selected_before_budget
+        max_source_rows_applied = False
+        if self.config.max_source_rows > 0 and len(selected_before_budget) > self.config.max_source_rows:
+            selected = selected_before_budget[: self.config.max_source_rows]
+            max_source_rows_applied = True
+        self._source_rows_summary = build_source_rows_summary(
+            config=self.config,
+            source_policy=self.source_policy,
+            directory_rows=directory_rows,
+            blind_rows=blind_rows,
+            direct_rows=direct_rows,
+            selected_before_budget=selected_before_budget,
+            selected=selected,
+            blocked_rows=self._blocked_source_rows,
+            max_source_rows_applied=max_source_rows_applied,
+        )
         return selected
 
     def _directory_rows(self) -> list[dict[str, str]]:
@@ -412,6 +432,7 @@ class CameraUrlHarvestEngine:
                 if page_url and page_url not in seen and not self.source_policy.block_reason(page_url):
                     seen.add(page_url)
                     selected.append(page_row)
+        self._blocked_source_rows = blocked
         write_jsonl(self.logs_dir / "harvest_blocked_source_rows.jsonl", blocked)
         return selected
 
@@ -906,6 +927,7 @@ class CameraUrlHarvestEngine:
                 "records_with_timestamps": sum(1 for record in camera_records if record.timestamp or record.date or record.time or record.last_updated or record.last_refresh),
                 "records_with_update_frequency": sum(1 for record in camera_records if record.current_image_update_frequency is not None or record.reference_image_update_frequency is not None),
             },
+            "source_rows": self._source_rows_summary,
             "warnings": self._warnings,
         }
         write_json(self.output_dir / "harvest_handoff.json", handoff)
@@ -944,6 +966,18 @@ class CameraUrlHarvestEngine:
             "records_with_reference_image": sum(1 for record in records if record.asset_role == "reference_image_snapshot"),
             "records_missing_media_url": sum(1 for record in camera_records if not record.media_assets),
             "blocked_or_filtered_urls": blocked_or_filtered,
+            "source_rows": self._source_rows_summary,
+            "source_rows_total": self._source_rows_summary.get("selected_rows", 0),
+            "source_rows_by_provider": self._source_rows_summary.get("selected_by_provider", {}),
+            "source_rows_by_kind": self._source_rows_summary.get("selected_by_kind", {}),
+            "sources_file": self._source_rows_summary.get("sources_file"),
+            "sources_file_exists": self._source_rows_summary.get("sources_file_exists", False),
+            "sources_file_used": self._source_rows_summary.get("sources_file_used", False),
+            "directory_sources_configured": self._source_rows_summary.get("directory_sources_configured", 0),
+            "directory_sources_enabled": self._source_rows_summary.get("directory_sources_enabled", 0),
+            "directory_source_rows_selected": self._source_rows_summary.get("selected_by_provider", {}).get("directory", 0),
+            "blind_source_rows_selected": self._source_rows_summary.get("selected_by_provider", {}).get("blind", 0),
+            "direct_source_rows_selected": self._source_rows_summary.get("selected_by_provider", {}).get("direct", 0),
             "outputs": outputs,
             "warnings": self._warnings,
             "browser_capture": self._browser_summary,
@@ -954,6 +988,66 @@ class CameraUrlHarvestEngine:
         write_json(self.logs_dir / "endpoint_catalog_summary.json", {"endpoints": len(endpoints), "records": endpoint_dicts})
         outputs["harvest_summary_json"] = str(self.output_dir / "harvest_summary.json")
         return outputs
+
+
+def build_source_rows_summary(
+    *,
+    config: HarvestConfig,
+    source_policy: SourcePolicy,
+    directory_rows: list[dict[str, str]],
+    blind_rows: list[dict[str, str]],
+    direct_rows: list[dict[str, str]],
+    selected_before_budget: list[dict[str, str]],
+    selected: list[dict[str, str]],
+    blocked_rows: list[dict[str, Any]],
+    max_source_rows_applied: bool,
+) -> dict[str, Any]:
+    """Summarize harvest source-row provenance for reporting/debugging.
+
+    This is deliberately metadata-only: it reports whether SOURCES.md/directory,
+    blind search, and direct seeds contributed rows, without changing extraction.
+    """
+
+    sources_file = str(source_policy.source_file) if source_policy.source_file else None
+    sources_file_exists = bool(source_policy.source_file and source_policy.source_file.exists())
+    directory_requested = config.discovery_mode in {DiscoveryMode.DIRECTORY, DiscoveryMode.BOTH}
+    blind_requested = config.discovery_mode in {DiscoveryMode.BLIND, DiscoveryMode.BOTH}
+    direct_requested = config.discovery_mode in {DiscoveryMode.DIRECT, DiscoveryMode.BOTH, DiscoveryMode.BLIND, DiscoveryMode.DIRECTORY}
+    selected_by_provider = count_rows_by_key(selected, "source_provider")
+    generated_by_provider = count_rows_by_key([*directory_rows, *blind_rows, *direct_rows], "source_provider")
+    summary = {
+        "discovery_mode": config.discovery_mode.value,
+        "sources_file": sources_file,
+        "sources_file_exists": sources_file_exists,
+        "sources_file_loaded": bool(sources_file_exists and source_policy.allowed_sources),
+        "sources_file_used": bool(directory_requested and selected_by_provider.get("directory", 0) > 0),
+        "directory_requested": directory_requested,
+        "blind_requested": blind_requested,
+        "direct_requested": direct_requested,
+        "directory_sources_configured": len(source_policy.allowed_sources),
+        "directory_sources_enabled": len(source_policy.enabled_allowed_sources()),
+        "blocked_patterns_configured": len(source_policy.blocked_sources),
+        "generated_rows": len(directory_rows) + len(blind_rows) + len(direct_rows),
+        "generated_by_provider": generated_by_provider,
+        "generated_by_kind": count_rows_by_key([*directory_rows, *blind_rows, *direct_rows], "source_kind"),
+        "selected_rows_before_budget": len(selected_before_budget),
+        "selected_rows": len(selected),
+        "selected_by_provider": selected_by_provider,
+        "selected_by_kind": count_rows_by_key(selected, "source_kind"),
+        "selected_directory_rows": selected_by_provider.get("directory", 0),
+        "selected_blind_rows": selected_by_provider.get("blind", 0),
+        "selected_direct_rows": selected_by_provider.get("direct", 0),
+        "blocked_source_rows": len(blocked_rows),
+        "blocked_source_rows_by_provider": count_rows_by_key(blocked_rows, "source_provider"),
+        "max_source_rows": config.max_source_rows,
+        "max_source_rows_applied": max_source_rows_applied,
+    }
+    return summary
+
+
+def count_rows_by_key(rows: Iterable[dict[str, Any]], key: str) -> dict[str, int]:
+    counts = Counter(str(row.get(key) or "unknown") for row in rows)
+    return dict(sorted(counts.items()))
 
 
 def parse_media_filter(values: Iterable[str] | None) -> MediaFilter:
