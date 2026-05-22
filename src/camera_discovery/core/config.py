@@ -66,6 +66,7 @@ def load_run_config(
     sources_file: str | Path | None = None,
     discovery_mode: str | None = None,
     block_patterns: list[str] | None = None,
+    harvest_input: str | Path | None = None,
 ) -> RunConfig:
     load_dotenv(override=False)
     selected_profile = RuntimeProfile(profile or os.getenv("CAMERA_DISCOVERY_PROFILE", "fast").strip().lower())
@@ -136,6 +137,7 @@ def load_run_config(
         enable_candidate_geocoding=_bool_env("CAMERA_DISCOVERY_ENABLE_CANDIDATE_GEOCODING", True),
         max_candidate_geocodes=max(0, _int_env("CAMERA_DISCOVERY_MAX_CANDIDATE_GEOCODES", max_total_candidates)),
         image_snapshot_refresh_delay_seconds=max(0.0, _float_env("CAMERA_DISCOVERY_IMAGE_SNAPSHOT_REFRESH_DELAY_SECONDS", 2.0)),
+        harvest_input=Path(harvest_input).expanduser() if harvest_input else None,
     )
 
 

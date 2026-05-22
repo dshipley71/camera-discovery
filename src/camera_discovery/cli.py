@@ -17,8 +17,10 @@ from camera_discovery.core.config import load_harvest_config, load_run_config
 from camera_discovery.core.models import CandidateSet, RunState, TrustPolicy
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
 from camera_discovery.services.harvest_engine import CameraUrlHarvestEngine
+from camera_discovery.services.harvest_handoff import harvest_records_to_candidates, load_harvest_handoff
 from camera_discovery.services.review_validation_pipeline import ReviewAndValidationPipeline
 from camera_discovery.services.target_resolver import TargetResolver
+from camera_discovery.sources import load_source_policy
 from camera_discovery.utils.io import write_json
 from camera_discovery.core.progress_events import emit_progress_event
 
@@ -290,6 +292,7 @@ def run(
     sources_file: Optional[Path] = typer.Option(None, "--sources-file"),
     discovery_mode: str = typer.Option("both", "--discovery-mode", help="blind, directory, both, or direct"),
     block_pattern: Optional[list[str]] = typer.Option(None, "--block-pattern"),
+    harvest_input: Optional[Path] = typer.Option(None, "--harvest-input", help="Harvest handoff manifest or harvest_camera_inventory.jsonl to seed the normal run workflow."),
     show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show progress while resolving, discovering, enriching coordinates, validating, and writing outputs."),
     progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, plain, or events. Use events for machine-readable progress records consumed by external UIs."),
 ) -> None:
@@ -302,6 +305,7 @@ def run(
         sources_file=sources_file,
         discovery_mode=discovery_mode,
         block_patterns=block_pattern or [],
+        harvest_input=harvest_input,
     )
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     state = RunState(config=cfg)
@@ -311,6 +315,8 @@ def run(
     console.print(f"[bold]Target-intent model:[/bold] {cfg.target_intent_model}")
     console.print(f"[bold]Discovery mode:[/bold] {cfg.discovery_mode.value}")
     console.print(f"[bold]Sources file:[/bold] {cfg.sources_file}")
+    if cfg.harvest_input:
+        console.print(f"[bold]Harvest input:[/bold] {cfg.harvest_input} (source-provided, unvalidated, untrusted seed data)")
 
     progress_mode = _resolve_progress_mode(
         console,
@@ -401,6 +407,41 @@ def run(
                         state_for_target = target_progress_state[target.target_id]
                         total = max(1, state_for_target.get("total", 0), state_for_target.get("completed", 0))
                         progress.update(task_id, total=total, completed=total, description=f"Discovered {target.target_label or target.canonical_target or target.target_id}")
+
+        if cfg.harvest_input:
+            if progress_mode == "plain":
+                console.print("Progress: loading harvest input...")
+            elif progress_mode == "events":
+                _emit_progress_stream_event("harvest_input_loaded", {"path": str(cfg.harvest_input), "stage": "started"})
+            try:
+                handoff_records = load_harvest_handoff(cfg.harvest_input)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            source_policy = load_source_policy(cfg.sources_file, cfg.block_patterns)
+            total_handoff_candidates = 0
+            for target in runnable_targets:
+                handoff_candidates = harvest_records_to_candidates(
+                    handoff_records,
+                    target_id=target.target_id,
+                    target_index=target.target_index,
+                    target_label=target.target_label or target.canonical_target,
+                    source_policy=source_policy,
+                )
+                total_handoff_candidates += len(handoff_candidates)
+                per_target_sets[f"{target.target_id}:harvest_input"] = CandidateSet(
+                    raw=handoff_candidates,
+                    unique=handoff_candidates,
+                    coordinate_bearing=[c for c in handoff_candidates if c.has_coordinates],
+                    in_scope=[],
+                    review=handoff_candidates,
+                    rejected=[],
+                )
+            state.warnings.append(
+                f"Loaded {total_handoff_candidates} unvalidated/untrusted candidate(s) from harvest input; normal run processing still applies."
+            )
+            console.print(f"[bold]Harvest input candidates:[/bold] {total_handoff_candidates}")
+            if progress_mode == "events":
+                _emit_progress_stream_event("harvest_input_loaded", {"path": str(cfg.harvest_input), "candidates": total_handoff_candidates, "stage": "complete"})
 
         state.candidate_sets_by_target = per_target_sets
         merged = CandidateSet.merge(list(per_target_sets.values()))
@@ -522,6 +563,8 @@ def harvest_urls(
     console.print(f"[bold]camera_urls.csv:[/bold] {cfg.output_dir / 'camera_urls.csv'}")
     console.print(f"[bold]camera_urls.jsonl:[/bold] {cfg.output_dir / 'camera_urls.jsonl'}")
     console.print(f"[bold]harvest_summary.json:[/bold] {summary_path}")
+    for filename in ("camera_records.jsonl", "camera_media_assets.jsonl", "discovered_endpoints.jsonl", "harvest_camera_inventory.jsonl", "harvest_handoff.json"):
+        console.print(f"[bold]{filename}:[/bold] {cfg.output_dir / filename}")
     if summary_path.exists():
         try:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))

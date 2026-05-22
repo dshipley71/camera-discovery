@@ -7,6 +7,7 @@ import json
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
@@ -18,10 +19,19 @@ import httpx
 from camera_discovery.core.models import (
     CameraCandidate,
     DiscoveryMode,
+    DiscoveredEndpointRecord,
     HarvestConfig,
     HarvestResult,
+    HarvestedCameraRecord,
+    HarvestedMediaAsset,
     HarvestedUrlRecord,
     RunConfig,
+)
+from camera_discovery.services.structured_camera_records import (
+    camera_record_to_inventory,
+    endpoint_type_for_url,
+    extract_structured_camera_records,
+    url_record_to_inventory,
 )
 from camera_discovery.services.discovery_engine import (
     CandidateDiscoveryEngine,
@@ -217,6 +227,9 @@ class CameraUrlHarvestEngine:
         self._errors: list[dict[str, Any]] = []
         self._browser_host_counts: dict[str, int] = {}
         self._browser_pages_attempted = 0
+        self._camera_records: dict[str, HarvestedCameraRecord] = {}
+        self._media_assets: dict[str, HarvestedMediaAsset] = {}
+        self._discovered_endpoints: dict[str, DiscoveredEndpointRecord] = {}
         self._browser_summary: dict[str, Any] = {
             "enabled": config.enable_browser_capture,
             "backend": config.browser_backend,
@@ -286,6 +299,9 @@ class CameraUrlHarvestEngine:
             by_source_provider=dict(Counter(record.source_provider or "unknown" for record in written)),
             by_source_host=dict(Counter(urlparse(record.source_url or record.url).netloc.casefold() or "unknown" for record in written)),
             output_files=outputs,
+            camera_records=list(self._camera_records.values()),
+            media_assets=list(self._media_assets.values()),
+            discovered_endpoints=list(self._discovered_endpoints.values()),
             warnings=self._warnings,
         )
         self._emit("harvest_complete", raw_records=result.raw_count, unique_urls=result.unique_count, written_urls=result.written_count)
@@ -432,6 +448,30 @@ class CameraUrlHarvestEngine:
         records.extend(self._extract_with_inventory_helpers(source_url, row, text, content_type))
         json_data = parse_json_payload(text) if is_json_payload(source_url, content_type, text) else None
         if json_data is not None:
+            structured_records = extract_structured_camera_records(
+                json_data,
+                endpoint_url=source_url,
+                source_page_url=row.get("url") if row.get("url") != source_url else None,
+                source_provider=row.get("source_provider"),
+                source_name=row.get("source_name") or row.get("title"),
+            )
+            self._register_endpoint(
+                source_url,
+                content_type=content_type,
+                source_page_url=row.get("url") if row.get("url") != source_url else None,
+                row=row,
+                method=method,
+                record_count=count_json_records(json_data),
+                camera_records=structured_records,
+            )
+            self._register_camera_records(structured_records)
+            for camera_record in structured_records:
+                self._emit("harvest_camera_record_found", camera_record_id=camera_record.camera_record_id, media_assets=len(camera_record.media_assets))
+                for asset in camera_record.media_assets:
+                    if self.source_policy.is_blocked(asset.url):
+                        continue
+                    self._emit("harvest_media_asset_found", asset_id=asset.asset_id, camera_record_id=asset.camera_record_id, media_type=asset.media_type)
+                    records.append(record_from_media_asset(asset, camera_record, row=row))
             records.extend(self._extract_from_json_data(json_data, source_url, row, method=f"{method}_json"))
         records.extend(self._extract_from_text_variants(source_url, row, text, method=f"{method}_text"))
         if "html" in content_type.casefold() or "<html" in text[:1000].casefold():
@@ -718,6 +758,70 @@ class CameraUrlHarvestEngine:
 
         return PlaywrightContext()
 
+
+    def _register_camera_records(self, records: list[HarvestedCameraRecord]) -> None:
+        if not records:
+            return
+        with self._lock:
+            for record in records:
+                existing = self._camera_records.setdefault(record.camera_record_id, record)
+                for asset in record.media_assets:
+                    if not self.source_policy.is_blocked(asset.url):
+                        self._media_assets.setdefault(asset.asset_id, asset)
+                if existing is not record:
+                    for asset in record.media_assets:
+                        if not self.source_policy.is_blocked(asset.url):
+                            self._media_assets.setdefault(asset.asset_id, asset)
+
+    def _register_endpoint(
+        self,
+        endpoint_url: str,
+        *,
+        content_type: str = "",
+        source_page_url: str | None,
+        row: dict[str, str],
+        method: str,
+        record_count: int = 0,
+        camera_records: list[HarvestedCameraRecord] | None = None,
+        status: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        if not endpoint_url or self.source_policy.is_blocked(endpoint_url):
+            return
+        camera_records = camera_records or []
+        endpoint = DiscoveredEndpointRecord(
+            endpoint_url=endpoint_url,
+            endpoint_type=endpoint_type_for_url(endpoint_url, content_type),
+            source_page_url=source_page_url,
+            source_provider=row.get("source_provider"),
+            source_name=row.get("source_name") or row.get("title"),
+            first_seen_method=method,
+            record_count=record_count,
+            camera_record_count=len(camera_records),
+            media_asset_count=sum(len(record.media_assets) for record in camera_records),
+            has_coordinates=any(record.lat is not None and record.lon is not None for record in camera_records),
+            has_timestamps=any(record.timestamp or record.date or record.time or record.last_updated or record.last_refresh for record in camera_records),
+            has_service_status=any(record.in_service is not None or record.status for record in camera_records),
+            has_refresh_metadata=any(record.current_image_update_frequency is not None or record.reference_image_update_frequency is not None for record in camera_records),
+            metadata={k: v for k, v in {"status": status, "error": error, "content_type": content_type}.items() if v not in (None, "")},
+        )
+        with self._lock:
+            existing = self._discovered_endpoints.get(endpoint_url)
+            if existing is None:
+                self._discovered_endpoints[endpoint_url] = endpoint
+            else:
+                existing.record_count = max(existing.record_count, endpoint.record_count)
+                existing.camera_record_count = max(existing.camera_record_count, endpoint.camera_record_count)
+                existing.media_asset_count = max(existing.media_asset_count, endpoint.media_asset_count)
+                existing.has_coordinates = existing.has_coordinates or endpoint.has_coordinates
+                existing.has_timestamps = existing.has_timestamps or endpoint.has_timestamps
+                existing.has_service_status = existing.has_service_status or endpoint.has_service_status
+                existing.has_refresh_metadata = existing.has_refresh_metadata or endpoint.has_refresh_metadata
+                existing.metadata.update(endpoint.metadata)
+        self._emit("harvest_endpoint_discovered", endpoint_url=endpoint_url, endpoint_type=endpoint.endpoint_type)
+        if camera_records or status is not None or error:
+            self._emit("harvest_endpoint_parsed", endpoint_url=endpoint_url, camera_records=len(camera_records), media_assets=endpoint.media_asset_count, status=status)
+
     def _record_block_reason(self, record: HarvestedUrlRecord) -> str | None:
         return self.source_policy.block_reason(record.url) or self.source_policy.block_reason(record.source_url)
 
@@ -742,13 +846,73 @@ class CameraUrlHarvestEngine:
         outputs["camera_urls_txt"] = str(self.output_dir / "camera_urls.txt")
         write_csv(self.output_dir / "camera_urls.csv", records)
         outputs["camera_urls_csv"] = str(self.output_dir / "camera_urls.csv")
-        write_jsonl(self.output_dir / "camera_urls.jsonl", [record_to_dict(record) for record in records])
+        url_dicts = [record_to_dict(record) for record in records]
+        write_jsonl(self.output_dir / "camera_urls.jsonl", url_dicts)
         outputs["camera_urls_jsonl"] = str(self.output_dir / "camera_urls.jsonl")
         for media_type in SUPPORTED_MEDIA_TYPES:
             typed = [record for record in records if record.media_type == media_type]
             path = self.output_dir / f"{media_type}_urls.txt"
             write_plain_urls(path, typed)
             outputs[f"{media_type}_urls_txt"] = str(path)
+
+        camera_records = list(self._camera_records.values())
+        media_assets = [asset for asset in self._media_assets.values() if not self.source_policy.is_blocked(asset.url)]
+        endpoints = [endpoint for endpoint in self._discovered_endpoints.values() if not self.source_policy.is_blocked(endpoint.endpoint_url)]
+
+        camera_record_dicts = [asdict(record) for record in camera_records]
+        media_asset_dicts = [asdict(asset) for asset in media_assets]
+        endpoint_dicts = [asdict(endpoint) for endpoint in endpoints]
+        write_jsonl(self.output_dir / "camera_records.jsonl", camera_record_dicts)
+        outputs["camera_records_jsonl"] = str(self.output_dir / "camera_records.jsonl")
+        write_jsonl(self.output_dir / "camera_media_assets.jsonl", media_asset_dicts)
+        outputs["camera_media_assets_jsonl"] = str(self.output_dir / "camera_media_assets.jsonl")
+        write_jsonl(self.output_dir / "discovered_endpoints.jsonl", endpoint_dicts)
+        outputs["discovered_endpoints_jsonl"] = str(self.output_dir / "discovered_endpoints.jsonl")
+
+        structured_camera_ids = {record.camera_record_id for record in camera_records}
+        inventory_rows = [camera_record_to_inventory(record) for record in camera_records]
+        for record in records:
+            if record.camera_record_id and record.camera_record_id in structured_camera_ids:
+                continue
+            inventory_rows.append(url_record_to_inventory(record_to_dict(record)))
+        write_jsonl(self.output_dir / "harvest_camera_inventory.jsonl", inventory_rows)
+        outputs["harvest_camera_inventory_jsonl"] = str(self.output_dir / "harvest_camera_inventory.jsonl")
+
+        handoff = {
+            "schema_version": "harvest-handoff/v1",
+            "query": self.config.query,
+            "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "mode": "harvest",
+            "source_provided_only": True,
+            "validated": False,
+            "geocoded": False,
+            "scope_filtered": False,
+            "trusted": False,
+            "llm_reviewed": False,
+            "files": {
+                "harvest_camera_inventory": "harvest_camera_inventory.jsonl",
+                "camera_records": "camera_records.jsonl",
+                "camera_media_assets": "camera_media_assets.jsonl",
+                "camera_urls_jsonl": "camera_urls.jsonl",
+                "discovered_endpoints": "discovered_endpoints.jsonl",
+            },
+            "counts": {
+                "camera_records": len(camera_records),
+                "media_assets": len(media_assets),
+                "url_records": len(records),
+                "endpoints": len(endpoints),
+                "records_with_coordinates": sum(1 for record in camera_records if record.lat is not None and record.lon is not None),
+                "records_with_in_service": sum(1 for record in camera_records if record.in_service is not None),
+                "records_with_timestamps": sum(1 for record in camera_records if record.timestamp or record.date or record.time or record.last_updated or record.last_refresh),
+                "records_with_update_frequency": sum(1 for record in camera_records if record.current_image_update_frequency is not None or record.reference_image_update_frequency is not None),
+            },
+            "warnings": self._warnings,
+        }
+        write_json(self.output_dir / "harvest_handoff.json", handoff)
+        write_json(self.logs_dir / "handoff_summary.json", handoff)
+        outputs["harvest_handoff_json"] = str(self.output_dir / "harvest_handoff.json")
+        self._emit("harvest_handoff_written", outputs=outputs, camera_records=len(camera_records), media_assets=len(media_assets))
+
         summary = {
             "query": self.config.query,
             "discovery_mode": self.config.discovery_mode.value,
@@ -763,9 +927,22 @@ class CameraUrlHarvestEngine:
             "by_media_type": dict(Counter(record.media_type for record in records)),
             "by_source_provider": dict(Counter(record.source_provider or "unknown" for record in records)),
             "by_source_host": dict(Counter(urlparse(record.source_url or record.url).netloc.casefold() or "unknown" for record in records)),
+            "structured_camera_records": len(camera_records),
+            "media_assets": len(media_assets),
+            "url_only_records": sum(1 for record in records if not record.camera_record_id),
+            "endpoints_discovered": len(endpoints),
+            "endpoints_parsed": sum(1 for endpoint in endpoints if endpoint.camera_record_count or endpoint.media_asset_count),
             "records_with_coordinates": sum(1 for record in records if record.lat is not None and record.lon is not None),
-            "records_with_orientation": sum(1 for record in records if record.direction or record.bearing is not None or record.heading is not None),
-            "records_with_datetime": sum(1 for record in records if record.date or record.time or record.timestamp),
+            "records_with_orientation": sum(1 for record in records if record.direction or record.bearing is not None or record.heading is not None or record.orientation),
+            "records_with_datetime": sum(1 for record in records if record.date or record.time or record.timestamp or record.last_updated or record.last_refresh),
+            "records_with_in_service": sum(1 for record in records if record.in_service is not None),
+            "records_in_service_true": sum(1 for record in records if record.in_service is True),
+            "records_in_service_false": sum(1 for record in records if record.in_service is False),
+            "records_with_update_frequency": sum(1 for record in records if record.current_image_update_frequency is not None or record.reference_image_update_frequency is not None),
+            "records_with_streaming_video": sum(1 for record in records if record.asset_role in {"streaming_video", "hls_stream", "mjpeg_stream"}),
+            "records_with_current_image": sum(1 for record in records if record.asset_role == "current_image_snapshot"),
+            "records_with_reference_image": sum(1 for record in records if record.asset_role == "reference_image_snapshot"),
+            "records_missing_media_url": sum(1 for record in camera_records if not record.media_assets),
             "blocked_or_filtered_urls": blocked_or_filtered,
             "outputs": outputs,
             "warnings": self._warnings,
@@ -774,6 +951,7 @@ class CameraUrlHarvestEngine:
         write_json(self.output_dir / "harvest_summary.json", summary)
         write_json(self.logs_dir / "harvest_summary.json", summary)
         write_json(self.logs_dir / "browser_capture_summary.json", self._browser_summary)
+        write_json(self.logs_dir / "endpoint_catalog_summary.json", {"endpoints": len(endpoints), "records": endpoint_dicts})
         outputs["harvest_summary_json"] = str(self.output_dir / "harvest_summary.json")
         return outputs
 
@@ -897,7 +1075,7 @@ def merge_record(existing: HarvestedUrlRecord, duplicate: HarvestedUrlRecord) ->
         existing.source_provider = duplicate.source_provider
     if existing.media_type == "unknown_media" and duplicate.media_type != "unknown_media":
         existing.media_type = duplicate.media_type
-    for attr in ("lat", "lon", "coordinate_source", "direction", "bearing", "heading", "date", "time", "timestamp"):
+    for attr in ("camera_record_id", "asset_id", "asset_role", "asset_field", "field_path", "source_endpoint_url", "source_page_url", "json_record_path", "lat", "lon", "coordinate_source", "direction", "bearing", "heading", "orientation", "in_service", "status", "date", "time", "timestamp", "last_updated", "last_refresh", "image_description", "current_image_update_frequency", "reference_image_update_frequency"):
         if getattr(existing, attr) in (None, "") and getattr(duplicate, attr) not in (None, ""):
             setattr(existing, attr, getattr(duplicate, attr))
     for key, value in duplicate.metadata.items():
@@ -929,6 +1107,21 @@ def record_from_candidate(candidate: CameraCandidate, *, include_metadata: bool 
         camera_id=str(metadata.get("camera_id")) if metadata.get("camera_id") not in (None, "") else None,
         source_name=metadata.get("source_name"),
         source_provider=metadata.get("source_provider"),
+        camera_record_id=metadata.get("camera_record_id"),
+        asset_id=metadata.get("asset_id"),
+        asset_role=metadata.get("asset_role"),
+        asset_field=metadata.get("asset_field"),
+        field_path=metadata.get("field_path"),
+        source_endpoint_url=metadata.get("source_endpoint_url") or metadata.get("json_endpoint_url"),
+        source_page_url=metadata.get("source_page_url"),
+        json_record_path=metadata.get("json_record_path"),
+        in_service=coerce_bool(metadata.get("in_service") if "in_service" in metadata else metadata.get("inService")),
+        status=str(metadata.get("status")) if metadata.get("status") not in (None, "") else None,
+        last_updated=str(metadata.get("last_updated") or metadata.get("lastUpdated")) if (metadata.get("last_updated") or metadata.get("lastUpdated")) not in (None, "") else None,
+        last_refresh=str(metadata.get("last_refresh") or metadata.get("lastRefresh")) if (metadata.get("last_refresh") or metadata.get("lastRefresh")) not in (None, "") else None,
+        image_description=str(metadata.get("imageDescription") or metadata.get("image_description")) if (metadata.get("imageDescription") or metadata.get("image_description")) not in (None, "") else None,
+        current_image_update_frequency=metadata.get("currentImageUpdateFrequency") or metadata.get("current_image_update_frequency"),
+        reference_image_update_frequency=metadata.get("referenceImageUpdateFrequency") or metadata.get("reference_image_update_frequency"),
         lat=promoted.get("lat"),
         lon=promoted.get("lon"),
         coordinate_source=promoted.get("coordinate_source"),
@@ -950,6 +1143,60 @@ def normalize_candidate_media_type(value: Any, url: str) -> str:
         return "stream"
     return classify_media_url(url) or "unknown_media"
 
+
+
+def record_from_media_asset(asset: HarvestedMediaAsset, camera_record: HarvestedCameraRecord, *, row: dict[str, str]) -> HarvestedUrlRecord:
+    metadata = dict(camera_record.metadata or {})
+    metadata.update(asset.metadata or {})
+    metadata.setdefault("source_provided_only", True)
+    metadata.setdefault("validated", False)
+    metadata.setdefault("trusted", False)
+    metadata.setdefault("llm_reviewed", False)
+    metadata.setdefault("camera_record_id", camera_record.camera_record_id)
+    metadata.setdefault("asset_id", asset.asset_id)
+    metadata.setdefault("asset_role", asset.asset_role)
+    metadata.setdefault("asset_field", asset.asset_field)
+    metadata.setdefault("field_path", asset.field_path)
+    metadata.setdefault("source_endpoint_url", asset.source_endpoint_url)
+    metadata.setdefault("json_record_path", asset.json_record_path)
+    return HarvestedUrlRecord(
+        url=asset.url,
+        media_type=asset.media_type,
+        source_url=asset.source_url or asset.source_endpoint_url or asset.source_page_url,
+        discovery_method=asset.discovery_method,
+        title=camera_record.title,
+        description=camera_record.description,
+        location_text=camera_record.location_text,
+        camera_id=camera_record.camera_id,
+        source_name=asset.source_name or camera_record.source_name or row.get("source_name") or row.get("title"),
+        source_provider=asset.source_provider or camera_record.source_provider or row.get("source_provider"),
+        camera_record_id=camera_record.camera_record_id,
+        asset_id=asset.asset_id,
+        asset_role=asset.asset_role,
+        asset_field=asset.asset_field,
+        field_path=asset.field_path,
+        source_endpoint_url=asset.source_endpoint_url,
+        source_page_url=asset.source_page_url,
+        json_record_path=asset.json_record_path,
+        lat=camera_record.lat,
+        lon=camera_record.lon,
+        coordinate_source=camera_record.coordinate_source,
+        direction=camera_record.direction,
+        bearing=camera_record.bearing,
+        heading=camera_record.heading,
+        orientation=camera_record.orientation,
+        in_service=camera_record.in_service,
+        status=camera_record.status,
+        date=camera_record.date,
+        time=camera_record.time,
+        timestamp=camera_record.timestamp,
+        last_updated=camera_record.last_updated,
+        last_refresh=camera_record.last_refresh,
+        image_description=camera_record.image_description,
+        current_image_update_frequency=camera_record.current_image_update_frequency,
+        reference_image_update_frequency=camera_record.reference_image_update_frequency,
+        metadata={k: v for k, v in metadata.items() if v not in (None, "", [], {})},
+    )
 
 def record_from_url(
     url: str,
@@ -980,6 +1227,22 @@ def record_from_url(
         camera_id=camera_id,
         source_name=row.get("source_name") or row.get("title"),
         source_provider=row.get("source_provider"),
+        camera_record_id=cleaned_metadata.get("camera_record_id"),
+        asset_id=cleaned_metadata.get("asset_id"),
+        asset_role=cleaned_metadata.get("asset_role"),
+        asset_field=cleaned_metadata.get("asset_field") or cleaned_metadata.get("json_media_key"),
+        field_path=cleaned_metadata.get("field_path"),
+        source_endpoint_url=cleaned_metadata.get("source_endpoint_url") or cleaned_metadata.get("json_endpoint_url"),
+        source_page_url=cleaned_metadata.get("source_page_url"),
+        json_record_path=cleaned_metadata.get("json_record_path"),
+        in_service=coerce_bool(cleaned_metadata.get("in_service") if "in_service" in cleaned_metadata else cleaned_metadata.get("inService")),
+        status=str(cleaned_metadata.get("status")) if cleaned_metadata.get("status") not in (None, "") else None,
+        orientation=str(cleaned_metadata.get("orientation")) if cleaned_metadata.get("orientation") not in (None, "") else None,
+        last_updated=str(cleaned_metadata.get("last_updated") or cleaned_metadata.get("lastUpdated")) if (cleaned_metadata.get("last_updated") or cleaned_metadata.get("lastUpdated")) not in (None, "") else None,
+        last_refresh=str(cleaned_metadata.get("last_refresh") or cleaned_metadata.get("lastRefresh")) if (cleaned_metadata.get("last_refresh") or cleaned_metadata.get("lastRefresh")) not in (None, "") else None,
+        image_description=str(cleaned_metadata.get("imageDescription") or cleaned_metadata.get("image_description")) if (cleaned_metadata.get("imageDescription") or cleaned_metadata.get("image_description")) not in (None, "") else None,
+        current_image_update_frequency=cleaned_metadata.get("currentImageUpdateFrequency") or cleaned_metadata.get("current_image_update_frequency"),
+        reference_image_update_frequency=cleaned_metadata.get("referenceImageUpdateFrequency") or cleaned_metadata.get("reference_image_update_frequency"),
         lat=promoted.get("lat"),
         lon=promoted.get("lon"),
         coordinate_source=promoted.get("coordinate_source"),
@@ -1141,6 +1404,27 @@ def coerce_float(value: Any) -> float | None:
             return None
     return None
 
+
+
+def coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return None
+    text = str(value).strip().casefold()
+    if text in {"1", "true", "yes", "y", "active", "enabled", "online", "inservice", "in service"}:
+        return True
+    if text in {"0", "false", "no", "n", "inactive", "disabled", "offline", "outofservice", "out of service"}:
+        return False
+    return None
+
+
+def count_json_records(value: Any) -> int:
+    if isinstance(value, list):
+        return len(value) + sum(count_json_records(item) for item in value if isinstance(item, (dict, list)))
+    if isinstance(value, dict):
+        return 1 + sum(count_json_records(item) for item in value.values() if isinstance(item, (dict, list)))
+    return 0
 
 def plausible_lat_lon(lat: float | None, lon: float | None) -> bool:
     return lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180
@@ -1336,7 +1620,9 @@ def json_record_metadata(
 
 
 def record_to_dict(record: HarvestedUrlRecord) -> dict[str, Any]:
-    return asdict(record)
+    data = asdict(record)
+    data.setdefault("media_url", data.get("url"))
+    return data
 
 
 def write_plain_urls(path: Path, records: list[HarvestedUrlRecord]) -> None:
@@ -1348,27 +1634,49 @@ def write_csv(path: Path, records: list[HarvestedUrlRecord]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "url",
+        "media_url",
         "media_type",
-        "source_url",
-        "discovery_method",
-        "title",
-        "location_text",
+        "asset_id",
+        "asset_role",
+        "asset_field",
+        "field_path",
+        "camera_record_id",
         "camera_id",
-        "source_name",
-        "source_provider",
+        "title",
+        "description",
+        "location_text",
         "lat",
         "lon",
         "coordinate_source",
         "direction",
         "bearing",
         "heading",
+        "orientation",
+        "in_service",
+        "status",
         "date",
         "time",
         "timestamp",
+        "last_updated",
+        "last_refresh",
+        "image_description",
+        "current_image_update_frequency",
+        "reference_image_update_frequency",
+        "source_url",
+        "source_endpoint_url",
+        "source_page_url",
+        "source_provider",
+        "source_name",
+        "discovery_method",
+        "json_record_path",
+        "metadata",
     ]
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for record in records:
             data = record_to_dict(record)
+            data.setdefault("media_url", data.get("url"))
+            if isinstance(data.get("metadata"), dict):
+                data["metadata"] = json.dumps(data["metadata"], ensure_ascii=False, sort_keys=True)
             writer.writerow({field: data.get(field) for field in fields})

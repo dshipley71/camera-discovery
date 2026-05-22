@@ -53,3 +53,8 @@ camera-discovery/
 The CLI should remain thin. Business logic belongs in the three service modules. `RunState` is the canonical run snapshot, and output artifacts are projections of the service state.
 
 Generated caches such as `__pycache__/` and `.pytest_cache/` are not required source artifacts and should not be committed in normal development.
+
+### Harvest handoff modules
+
+- `src/camera_discovery/services/structured_camera_records.py` — generic, source-agnostic extraction of structured camera records and grouped media assets from public JSON/API/GeoJSON/ArcGIS-style data.
+- `src/camera_discovery/services/harvest_handoff.py` — loads `harvest_handoff.json` or `harvest_camera_inventory.jsonl` and converts source-provided harvest rows into normal `CameraCandidate` objects for `camera-discovery run --harvest-input`.

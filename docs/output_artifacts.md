@@ -123,3 +123,21 @@ target_id
 target_label
 target_index
 ```
+
+## Harvest architecture outputs
+
+`camera-discovery harvest-urls` is an extraction-only workflow. It does not validate, trust, geocode, scope-filter, LLM-review, or write GeoJSON/map/review artifacts. In addition to the plain URL files, harvest mode writes structured source-provided artifacts when public JSON/API/feed endpoints expose camera records.
+
+Harvest outputs include:
+
+- `camera_urls.txt` — plain direct media URLs, one URL per line.
+- `camera_urls.csv` — flattened URL/media rows with grouping, source endpoint, location, service-status, refresh, and timestamp fields when source-provided.
+- `camera_urls.jsonl` — one JSON object per media URL.
+- `camera_records.jsonl` — one JSON object per structured source camera record, including normalized fields, field map, grouped media assets, and the raw source record.
+- `camera_media_assets.jsonl` — one JSON object per media asset extracted from a camera record, including `camera_record_id`, `asset_id`, `asset_role`, `asset_field`, `field_path`, `media_type`, and provenance.
+- `discovered_endpoints.jsonl` — catalog of discovered JSON/API/GeoJSON/ArcGIS/feed endpoints and source-completeness counts.
+- `harvest_camera_inventory.jsonl` — handoff-oriented camera inventory rows marked source-provided, unvalidated, untrusted, ungeocoded, and not scope-filtered.
+- `harvest_handoff.json` — manifest that points to the handoff files and records counts.
+- `harvest_summary.json` — summary counts for URLs, structured records, media assets, endpoints, coordinates, orientation, source-reported `inService`, timestamps, and update frequencies.
+
+`source_url` and `source_endpoint_url` are provenance fields. If a URL row came from a JSON endpoint, those fields should remain the endpoint URL; the direct media URL remains in `url` / `media_url`.

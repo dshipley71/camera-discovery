@@ -100,6 +100,10 @@ class RunConfig:
     # validation is enabled by the selected runtime profile.
     image_snapshot_refresh_delay_seconds: float = 2.0
 
+    # Optional harvest handoff/inventory file used to seed normal run discovery.
+    # This does not bypass target resolution, scope, validation, trust policy, or outputs.
+    harvest_input: Path | None = None
+
     @property
     def validation_enabled(self) -> bool:
         return self.profile in {RuntimeProfile.BALANCED, RuntimeProfile.FULL}
@@ -276,31 +280,133 @@ class HarvestConfig:
 
 
 @dataclass
+class HarvestedMediaAsset:
+    asset_id: str
+    camera_record_id: str | None
+    url: str
+    media_type: str
+    asset_role: str | None = None
+    asset_field: str | None = None
+    source_url: str | None = None
+    source_endpoint_url: str | None = None
+    source_page_url: str | None = None
+    source_provider: str | None = None
+    source_name: str | None = None
+    discovery_method: str = "unknown"
+    json_record_path: str | None = None
+    field_path: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class HarvestedCameraRecord:
+    camera_record_id: str
+    camera_id: str | None = None
+    source_endpoint_url: str | None = None
+    source_page_url: str | None = None
+    source_provider: str | None = None
+    source_name: str | None = None
+    json_record_path: str | None = None
+
+    title: str | None = None
+    description: str | None = None
+    location_text: str | None = None
+
+    lat: float | None = None
+    lon: float | None = None
+    coordinate_source: str | None = None
+    coordinates: Any | None = None
+
+    direction: str | None = None
+    bearing: float | None = None
+    heading: float | None = None
+    orientation: str | None = None
+
+    in_service: bool | None = None
+    status: str | None = None
+    status_source: str | None = None
+
+    date: str | None = None
+    time: str | None = None
+    timestamp: str | None = None
+    last_updated: str | None = None
+    last_refresh: str | None = None
+
+    image_description: str | None = None
+    current_image_update_frequency: str | int | float | None = None
+    reference_image_update_frequency: str | int | float | None = None
+
+    media_assets: list[HarvestedMediaAsset] = field(default_factory=list)
+    normalized_fields: dict[str, Any] = field(default_factory=dict)
+    field_map: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    raw_record: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DiscoveredEndpointRecord:
+    endpoint_url: str
+    endpoint_type: str
+    source_page_url: str | None = None
+    source_provider: str | None = None
+    source_name: str | None = None
+    first_seen_method: str = "unknown"
+    record_count: int = 0
+    camera_record_count: int = 0
+    media_asset_count: int = 0
+    has_coordinates: bool = False
+    has_timestamps: bool = False
+    has_service_status: bool = False
+    has_refresh_metadata: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class HarvestedUrlRecord:
     url: str
     media_type: str
     source_url: str | None = None
     discovery_method: str = "unknown"
     title: str | None = None
+    description: str | None = None
     location_text: str | None = None
     camera_id: str | None = None
     source_name: str | None = None
     source_provider: str | None = None
 
+    # Structured-harvest grouping/provenance. These fields link flat URL rows
+    # back to their source camera object and source JSON field when available.
+    camera_record_id: str | None = None
+    asset_id: str | None = None
+    asset_role: str | None = None
+    asset_field: str | None = None
+    field_path: str | None = None
+    source_endpoint_url: str | None = None
+    source_page_url: str | None = None
+    json_record_path: str | None = None
+
     # Deterministically promoted source metadata. Harvest mode does not infer,
     # geocode, validate, or normalize these from outside services; these fields
-    # are populated only when coordinates/orientation/time values are present in
-    # collected camera/source metadata. The full original metadata remains in
-    # ``metadata`` below.
+    # are populated only when coordinates/orientation/time/status values are
+    # present in collected camera/source metadata. The full original metadata
+    # remains in ``metadata`` below.
     lat: float | None = None
     lon: float | None = None
     coordinate_source: str | None = None
     direction: str | None = None
     bearing: float | None = None
     heading: float | None = None
+    orientation: str | None = None
+    in_service: bool | None = None
+    status: str | None = None
     date: str | None = None
     time: str | None = None
     timestamp: str | None = None
+    last_updated: str | None = None
+    last_refresh: str | None = None
+    image_description: str | None = None
+    current_image_update_frequency: str | int | float | None = None
+    reference_image_update_frequency: str | int | float | None = None
 
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -311,6 +417,9 @@ class HarvestResult:
     unique_count: int = 0
     written_count: int = 0
     records: list[HarvestedUrlRecord] = field(default_factory=list)
+    camera_records: list[HarvestedCameraRecord] = field(default_factory=list)
+    media_assets: list[HarvestedMediaAsset] = field(default_factory=list)
+    discovered_endpoints: list[DiscoveredEndpointRecord] = field(default_factory=list)
     by_media_type: dict[str, int] = field(default_factory=dict)
     by_source_provider: dict[str, int] = field(default_factory=dict)
     by_source_host: dict[str, int] = field(default_factory=dict)

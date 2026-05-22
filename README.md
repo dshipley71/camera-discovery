@@ -289,3 +289,19 @@ PYTHONPATH=src python -m pytest -q
 ```
 
 No tests or docs should add fake camera inventories, synthetic streams, fabricated coordinates, simulated validation success, or hard-coded real-world target/source behavior.
+
+### Harvest architecture and run handoff
+
+`camera-discovery harvest-urls` now has two extraction lanes: a structured camera/feed harvester for public JSON/API/GeoJSON/ArcGIS-style endpoints and a raw camera/media URL harvester for HTML, JavaScript, browser/network capture, direct seeds, linked endpoints, and escaped/encoded text. Harvest mode remains extraction-only: it bypasses target resolution, geocoding, validation, trust classification, scope enforcement, LLM review, GeoJSON/maps, `cameras.md`, and review ZIP generation.
+
+When structured endpoints expose fields such as coordinates, direction/bearing/heading, `inService`, timestamps, image descriptions, refresh/update frequencies, `streamingVideoURL`, `currentImageURL`, and `referenceImageURL`, harvest mode preserves the full raw camera record, normalizes useful fields, groups media assets by `camera_record_id`, and writes `camera_records.jsonl`, `camera_media_assets.jsonl`, `discovered_endpoints.jsonl`, `harvest_camera_inventory.jsonl`, and `harvest_handoff.json` alongside the existing URL files.
+
+A normal run can consume the handoff without bypassing normal inventory behavior:
+
+```bash
+camera-discovery run "California traffic cameras" \
+  --output-dir runs/run-from-harvest \
+  --harvest-input runs/harvest-california/harvest_handoff.json
+```
+
+Harvest handoff data is source-provided and unvalidated. It seeds/enriches candidates so the run workflow can avoid rediscovering metadata the source already exposed, while still applying normal target-aware processing.

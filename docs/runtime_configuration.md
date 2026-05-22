@@ -127,3 +127,15 @@ Provider-specific environment variables:
 | `CAMERA_DISCOVERY_IMAGE_SNAPSHOT_REFRESH_DELAY_SECONDS` | `2.0` | Fallback delay between cache-busted snapshot fetches when source metadata has no refresh rate. |
 
 Image snapshot validation uses real HTTP requests. Static assets, non-image responses, and long-lived cached assets are rejected or left untrusted.
+
+## Harvest handoff input for normal runs
+
+The normal target-aware workflow can be seeded with extraction-only harvest artifacts:
+
+```bash
+camera-discovery run "California traffic cameras" \
+  --output-dir runs/run-from-harvest \
+  --harvest-input runs/harvest-california/harvest_handoff.json
+```
+
+`--harvest-input` also accepts a direct `harvest_camera_inventory.jsonl` path. Handoff rows are treated as source-provided candidate data only. They are not trusted, validated, live/dead classified, geocoded, or scope-filtered merely because they came from harvest output. Normal `run` behavior still resolves the target, applies scope/review/validation/trust/output behavior according to configuration, and writes normal inventory artifacts. Source-provided coordinates are preserved when plausible so the application does not need to rediscover metadata that public endpoints already supplied.
