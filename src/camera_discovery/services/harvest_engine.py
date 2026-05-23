@@ -61,6 +61,18 @@ SUPPORTED_MEDIA_CATEGORIES = {
     "unknown_media",
 }
 SUPPORTED_EXTENSIONS = {".m3u8", ".mjpg", ".mjpeg", ".jpg", ".jpeg", ".png", ".webp", ".mp4", ".webm", ".mov", ".m4v"}
+IMAGE_ASSET_FILTER_MODES = {"raw", "exclude-page-assets", "camera-evidence"}
+PAGE_ASSET_TERMS = {
+    "favicon", "apple-touch-icon", "icon", "logo", "sprite", "badge", "avatar",
+    "profile", "placeholder", "loading", "spinner", "banner", "hero",
+    "background", "bg-", "open-graph", "og:image", "twitter:image", "social",
+    "share", "site-logo", "tracking", "pixel", "1x1",
+}
+CAMERA_IMAGE_EVIDENCE_TERMS = {
+    "camera", "cam", "cctv", "snapshot", "current", "reference", "trafficcam",
+    "webcam", "cctvimage", "stream", "view",
+}
+CAMERA_IMAGE_ASSET_ROLES = {"current_image_snapshot", "reference_image_snapshot", "image_snapshot"}
 CATEGORY_EXTENSIONS = {
     "hls": {".m3u8"},
     "mjpeg": {".mjpg", ".mjpeg"},
@@ -143,6 +155,8 @@ JSON_METADATA_KEYS = {
     "time",
     "timestamp",
     "datetime",
+    "recordepoch",
+    "recorddatetime",
     "last_updated",
     "last_update",
     "last_refresh",
@@ -170,11 +184,13 @@ Y_LATITUDE_KEYS = {"y", "coordy", "mapy", "latitudey"}
 DIRECTION_KEYS = {"direction", "cameradirection", "facing", "facingdirection", "viewdirection", "lookdirection", "orientation"}
 BEARING_KEYS = {"bearing", "camerabearing", "azimuth", "angle", "viewangle"}
 HEADING_KEYS = {"heading", "cameraheading", "viewheading"}
-DATE_KEYS = {"date", "capturedate", "imagedate", "snapshotdate", "lastupdatedate", "updatedate"}
-TIME_KEYS = {"time", "capturetime", "imagetime", "snapshottime", "lastupdatetime", "updatetime"}
+DATE_KEYS = {"date", "recorddate", "capturedate", "imagedate", "snapshotdate", "lastupdatedate", "updatedate"}
+TIME_KEYS = {"time", "recordtime", "capturetime", "imagetime", "snapshottime", "lastupdatetime", "updatetime"}
 TIMESTAMP_KEYS = {
     "timestamp",
     "datetime",
+    "recordepoch",
+    "recorddatetime",
     "capturedat",
     "capturetimestamp",
     "imagetimestamp",
@@ -222,6 +238,9 @@ class CameraUrlHarvestEngine:
         self.logs_dir = self.output_dir / "logs"
         self.source_policy = load_source_policy(config.sources_file, config.block_patterns)
         self.media_filter = parse_media_filter(config.media)
+        if self.config.image_asset_filter not in IMAGE_ASSET_FILTER_MODES:
+            allowed = ", ".join(sorted(IMAGE_ASSET_FILTER_MODES))
+            raise ValueError(f"Invalid image asset filter {self.config.image_asset_filter!r}; expected one of: {allowed}")
         self._lock = threading.RLock()
         self._warnings: list[str] = []
         self._errors: list[dict[str, Any]] = []
@@ -289,14 +308,23 @@ class CameraUrlHarvestEngine:
         pre_filter_unique = len(unique)
         filtered = [record for record in unique if self.media_filter.matches(record)]
         media_filtered = len(filtered)
-        written = filtered if self.config.max_urls == 0 else filtered[: self.config.max_urls]
-        self._emit("harvest_dedupe_complete", raw_records=len(raw_records), unique_urls=len(unique), media_filtered_urls=media_filtered)
+        image_filtered, image_filter_summary = apply_image_asset_filter(filtered, self.config.image_asset_filter)
+        written = image_filtered if self.config.max_urls == 0 else image_filtered[: self.config.max_urls]
+        self._emit(
+            "harvest_dedupe_complete",
+            raw_records=len(raw_records),
+            unique_urls=len(unique),
+            media_filtered_urls=media_filtered,
+            image_filtered_urls=len(image_filtered),
+        )
         outputs = self._write_outputs(
             written,
             raw_records_count=len(raw_records),
             raw_media_records=unblocked,
             unique=unique,
             media_filtered_records=filtered,
+            image_filtered_records=image_filtered,
+            image_filter_summary=image_filter_summary,
             pre_filter_unique=pre_filter_unique,
             media_filtered=media_filtered,
             blocked_or_filtered=len(blocked_filtered),
@@ -869,6 +897,8 @@ class CameraUrlHarvestEngine:
         raw_media_records: list[HarvestedUrlRecord],
         unique: list[HarvestedUrlRecord],
         media_filtered_records: list[HarvestedUrlRecord],
+        image_filtered_records: list[HarvestedUrlRecord],
+        image_filter_summary: dict[str, Any],
         pre_filter_unique: int,
         media_filtered: int,
         blocked_or_filtered: int,
@@ -891,6 +921,7 @@ class CameraUrlHarvestEngine:
             raw_media_records=raw_media_records,
             unique_records=unique,
             media_filtered_records=media_filtered_records,
+            image_filtered_records=image_filtered_records,
         )
         outputs.update(intermediate_outputs)
 
@@ -964,6 +995,12 @@ class CameraUrlHarvestEngine:
             "media_filter": self.media_filter.requested,
             "pre_filter_unique_urls": pre_filter_unique,
             "media_filtered_urls": media_filtered,
+            "image_asset_filter": self.config.image_asset_filter,
+            "image_asset_filter_removed": image_filter_summary.get("removed", 0),
+            "image_asset_filter_kept": image_filter_summary.get("kept", len(records)),
+            "image_asset_filter_removed_by_reason": image_filter_summary.get("removed_by_reason", {}),
+            "pre_image_filter_records": image_filter_summary.get("pre_image_filter_records", media_filtered),
+            "post_image_filter_records": image_filter_summary.get("post_image_filter_records", len(records)),
             "by_media_type": dict(Counter(record.media_type for record in records)),
             "by_source_provider": dict(Counter(record.source_provider or "unknown" for record in records)),
             "by_source_host": dict(Counter(urlparse(record.source_url or record.url).netloc.casefold() or "unknown" for record in records)),
@@ -1001,11 +1038,12 @@ class CameraUrlHarvestEngine:
                 "raw_media_records": len(raw_media_records),
                 "unique_media_records": len(unique),
                 "media_filtered_records": len(media_filtered_records),
+                "image_filtered_records": len(image_filtered_records),
             },
             "intermediate_record_files": {
                 key: value
                 for key, value in outputs.items()
-                if key in {"raw_media_records_jsonl", "unique_media_records_jsonl", "media_filtered_records_jsonl"}
+                if key in {"raw_media_records_jsonl", "unique_media_records_jsonl", "media_filtered_records_jsonl", "image_filtered_records_jsonl"}
             },
             "outputs": outputs,
             "warnings": self._warnings,
@@ -1024,6 +1062,7 @@ class CameraUrlHarvestEngine:
         raw_media_records: list[HarvestedUrlRecord],
         unique_records: list[HarvestedUrlRecord],
         media_filtered_records: list[HarvestedUrlRecord],
+        image_filtered_records: list[HarvestedUrlRecord],
     ) -> dict[str, str]:
         """Optionally write debug/analysis records for each harvest reduction stage.
 
@@ -1038,6 +1077,7 @@ class CameraUrlHarvestEngine:
             "raw_media_records_jsonl": ("raw_media_records.jsonl", raw_media_records),
             "unique_media_records_jsonl": ("unique_media_records.jsonl", unique_records),
             "media_filtered_records_jsonl": ("media_filtered_records.jsonl", media_filtered_records),
+            "image_filtered_records_jsonl": ("image_filtered_records.jsonl", image_filtered_records),
         }
         outputs: dict[str, str] = {}
         for output_key, (filename, records) in stage_records.items():
@@ -1051,8 +1091,9 @@ class CameraUrlHarvestEngine:
                 "raw_media_records": len(raw_media_records),
                 "unique_media_records": len(unique_records),
                 "media_filtered_records": len(media_filtered_records),
+                "image_filtered_records": len(image_filtered_records),
                 "files": outputs,
-                "note": "raw_media_records are block-policy-filtered records before deduplication; media_filtered_records are before the final --max-urls cap.",
+                "note": "raw_media_records are block-policy-filtered records before deduplication; media_filtered_records are after --media and before image filtering; image_filtered_records are before the final --max-urls cap.",
             },
         )
         return outputs
@@ -1198,6 +1239,85 @@ def media_extension(url: str) -> str | None:
         if path.endswith(ext):
             return ext
     return None
+
+
+def apply_image_asset_filter(records: list[HarvestedUrlRecord], mode: str) -> tuple[list[HarvestedUrlRecord], dict[str, Any]]:
+    normalized = (mode or "raw").strip().casefold()
+    if normalized not in IMAGE_ASSET_FILTER_MODES:
+        allowed = ", ".join(sorted(IMAGE_ASSET_FILTER_MODES))
+        raise ValueError(f"Invalid image asset filter {mode!r}; expected one of: {allowed}")
+    removed_by_reason: Counter[str] = Counter()
+    kept: list[HarvestedUrlRecord] = []
+    for record in records:
+        keep, reason = image_asset_filter_decision(record, normalized)
+        if keep:
+            kept.append(record)
+        else:
+            removed_by_reason[reason or "image_asset_filter"] += 1
+    return kept, {
+        "image_asset_filter": normalized,
+        "pre_image_filter_records": len(records),
+        "post_image_filter_records": len(kept),
+        "kept": len(kept),
+        "removed": len(records) - len(kept),
+        "removed_by_reason": dict(removed_by_reason),
+    }
+
+
+def image_asset_filter_decision(record: HarvestedUrlRecord, mode: str) -> tuple[bool, str | None]:
+    if mode == "raw" or record.media_type != "image_snapshot":
+        return True, None
+    if mode == "exclude-page-assets":
+        if has_page_asset_evidence(record):
+            return False, "page_asset_evidence"
+        return True, None
+    if mode == "camera-evidence":
+        if has_camera_image_evidence(record):
+            return True, None
+        return False, "missing_camera_image_evidence"
+    return True, None
+
+
+def has_page_asset_evidence(record: HarvestedUrlRecord) -> bool:
+    haystack = image_record_text(record)
+    if _looks_like_non_camera_asset(record.url):
+        return True
+    return any(term in haystack for term in PAGE_ASSET_TERMS)
+
+
+def has_camera_image_evidence(record: HarvestedUrlRecord) -> bool:
+    if record.asset_role in CAMERA_IMAGE_ASSET_ROLES and record.camera_record_id:
+        return True
+    if normalize_key(record.asset_field or "") in {"currentimageurl", "referenceimageurl", "imageurl", "snapshoturl", "cameraimageurl"}:
+        return True
+    if record.camera_record_id and (record.camera_id or record.lat is not None or record.lon is not None or record.in_service is not None or record.current_image_update_frequency is not None or record.reference_image_update_frequency is not None):
+        return True
+    metadata = record.metadata or {}
+    metadata_keys = {normalize_key(k) for k in metadata}
+    if metadata_keys & {"imagedescription", "currentimageupdatefrequency", "referenceimageupdatefrequency", "refreshrate", "refreshinterval", "cameraid", "camera_id", "inservice", "direction", "lat", "latitude", "lon", "longitude", "route", "intersection"}:
+        return True
+    haystack = image_record_core_text(record)
+    return any(term in haystack for term in CAMERA_IMAGE_EVIDENCE_TERMS)
+
+
+def image_record_core_text(record: HarvestedUrlRecord) -> str:
+    parts = [
+        record.url, record.title, record.description, record.location_text, record.camera_id,
+        record.asset_role, record.asset_field, record.field_path, record.discovery_method,
+    ]
+    return " ".join(str(part or "") for part in parts).casefold()
+
+
+def image_record_text(record: HarvestedUrlRecord) -> str:
+    metadata = record.metadata or {}
+    parts = [
+        record.url, record.title, record.description, record.location_text, record.camera_id,
+        record.asset_role, record.asset_field, record.field_path, record.discovery_method,
+    ]
+    for key, value in metadata.items():
+        if isinstance(value, (str, int, float, bool)):
+            parts.extend([str(key), str(value)])
+    return " ".join(str(part or "") for part in parts).casefold()
 
 
 def canonical_media_url(url: str) -> str:
@@ -1716,7 +1836,10 @@ def promoted_metadata_fields(metadata: dict[str, Any]) -> dict[str, Any]:
 
     timestamp_key, timestamp_value = value_by_normalized_key(metadata, TIMESTAMP_KEYS)
     if timestamp_value not in (None, "", [], {}):
-        out["timestamp"] = str(timestamp_value)
+        if timestamp_key and normalize_key(timestamp_key) in {"recordepoch", "epoch", "timestampms", "timestampepoch"}:
+            out["timestamp"] = epoch_to_utc_iso(timestamp_value) or str(timestamp_value)
+        else:
+            out["timestamp"] = str(timestamp_value)
     date_key, date_value = value_by_normalized_key(metadata, DATE_KEYS)
     if date_value not in (None, "", [], {}):
         out["date"] = str(date_value)
@@ -1724,6 +1847,19 @@ def promoted_metadata_fields(metadata: dict[str, Any]) -> dict[str, Any]:
     if time_value not in (None, "", [], {}):
         out["time"] = str(time_value)
     return out
+
+
+def epoch_to_utc_iso(value: Any) -> str | None:
+    try:
+        if value in (None, ""):
+            return None
+        raw = float(value)
+        seconds = raw / 1000.0 if raw > 100_000_000_000 else raw
+        if seconds <= 0 or seconds > 4_102_444_800:
+            return None
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return None
 
 
 def simple_metadata(record: dict[str, Any]) -> dict[str, Any]:
@@ -1756,6 +1892,9 @@ def json_record_metadata(
     context_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metadata = merge_metadata(context_metadata, simple_metadata(record))
+    if isinstance(record.get("recordTimestamp"), dict):
+        for key, value in record["recordTimestamp"].items():
+            metadata.setdefault(str(key), value)
     metadata["json_endpoint_url"] = source_url
     metadata["json_record_path"] = path
     metadata["json_media_key"] = media_key

@@ -276,6 +276,7 @@ class HarvestConfig:
     max_browser_network_events_logged_per_page: int = 100
     include_source_metadata: bool = True
     write_intermediate_records: bool = False
+    image_asset_filter: str = "raw"
     http_timeout: float = 20.0
     user_agent: str = "camera-discovery/0.1 (+public-camera-research)"
 
@@ -296,6 +297,14 @@ class HarvestedMediaAsset:
     discovery_method: str = "unknown"
     json_record_path: str | None = None
     field_path: str | None = None
+    date: str | None = None
+    time: str | None = None
+    timestamp: str | None = None
+    last_updated: str | None = None
+    last_refresh: str | None = None
+    image_description: str | None = None
+    current_image_update_frequency: str | int | float | None = None
+    reference_image_update_frequency: str | int | float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

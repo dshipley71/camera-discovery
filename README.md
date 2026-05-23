@@ -298,7 +298,9 @@ When structured endpoints expose fields such as coordinates, direction/bearing/h
 
 Harvest summaries also include source-row provenance so users can verify whether `SOURCES.md` was actually used. Check `harvest_summary.json` → `source_rows` or `logs/source_rows_summary.json` for `sources_file_used`, `selected_by_provider`, `selected_directory_rows`, `selected_blind_rows`, and `selected_direct_rows`.
 
-For debug/analysis runs, add `--write-intermediate-records` to write `raw_media_records.jsonl`, `unique_media_records.jsonl`, and `media_filtered_records.jsonl`. These opt-in files expose the raw block-policy-filtered records before deduplication, the deduped records before media filtering, and the media-filtered records before the final `--max-urls` cap. They can be large, so normal harvest runs do not write them by default.
+For debug/analysis runs, add `--write-intermediate-records` to write `raw_media_records.jsonl`, `unique_media_records.jsonl`, `media_filtered_records.jsonl`, and `image_filtered_records.jsonl`. These opt-in files expose the raw block-policy-filtered records before deduplication, the deduped records before media filtering, the media-filtered records before image-asset filtering, and the post-image-filter records before the final `--max-urls` cap. They can be large, so normal harvest runs do not write them by default.
+
+Use `--image-asset-filter raw|exclude-page-assets|camera-evidence` to control image snapshot filtering. `raw` preserves broad extraction, `exclude-page-assets` removes obvious logos/icons/social/static page assets, and `camera-evidence` keeps image records only when camera/snapshot evidence is present.
 
 A normal run can consume the handoff without bypassing normal inventory behavior:
 

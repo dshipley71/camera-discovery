@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import datetime, timezone
 from dataclasses import asdict
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
@@ -47,6 +48,10 @@ TIME_KEYS = {
     "date",
     "time",
     "datetime",
+    "recorddate",
+    "recordtime",
+    "recordepoch",
+    "recorddatetime",
     "lastupdated",
     "lastupdate",
     "lastrefresh",
@@ -151,6 +156,8 @@ def url_record_to_inventory(url_record: dict[str, Any]) -> dict[str, Any]:
         "orientation": url_record.get("orientation"),
         "in_service": url_record.get("in_service"),
         "status": url_record.get("status"),
+        "date": url_record.get("date"),
+        "time": url_record.get("time"),
         "timestamp": url_record.get("timestamp"),
         "last_updated": url_record.get("last_updated"),
         "last_refresh": url_record.get("last_refresh"),
@@ -297,9 +304,9 @@ def _camera_record_from_payload(
     heading = _first_float(flat, ["heading"])
     in_service, status_source = _source_service_status(flat)
     status = _first_str(flat, ["status", "camerastatus", "operationalstatus"])
-    date = _first_str(flat, ["date"])
-    time = _first_str(flat, ["time"])
-    timestamp = _first_str(flat, ["timestamp", "datetime", "imagetimestamp", "snapshottimestamp", "capturetime"])
+    date = _first_str(flat, ["date", "recorddate", "capturedate", "imagedate", "snapshotdate"])
+    time = _first_str(flat, ["time", "recordtime", "capturetime", "imagetime", "snapshottime"])
+    timestamp = _timestamp_from_flat(flat)
     last_updated = _first_str(flat, ["lastupdated", "lastupdate", "updatedat"])
     last_refresh = _first_str(flat, ["lastrefresh", "lastrefreshed"])
     current_freq = _first_value(flat, ["currentimageupdatefrequency", "refreshrate", "refreshinterval", "refreshseconds", "updateinterval", "imagerefreshrate", "snapshotrefreshinterval"])
@@ -344,6 +351,31 @@ def _camera_record_from_payload(
     return record
 
 
+def _timestamp_from_flat(flat: dict[str, tuple[str, Any, str]]) -> str | None:
+    epoch = _first_value(flat, ["recordepoch", "epoch", "timestampms", "timestampepoch"])
+    converted = _epoch_to_utc_iso(epoch)
+    if converted:
+        return converted
+    return _first_str(flat, [
+        "timestamp", "datetime", "recorddatetime", "recordedat", "imagetimestamp",
+        "snapshottimestamp", "capturetimestamp", "createdat", "updatedat",
+    ])
+
+
+def _epoch_to_utc_iso(value: Any) -> str | None:
+    try:
+        if value in (None, ""):
+            return None
+        raw = float(value)
+        # Values above 10^11 are almost certainly milliseconds.
+        seconds = raw / 1000.0 if raw > 100_000_000_000 else raw
+        if seconds <= 0 or seconds > 4_102_444_800:  # 2100-01-01 UTC
+            return None
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return None
+
+
 def _media_assets_from_flat(record: HarvestedCameraRecord, flat: dict[str, tuple[str, Any, str]]) -> list[HarvestedMediaAsset]:
     assets: list[HarvestedMediaAsset] = []
     seen: set[tuple[str, str]] = set()
@@ -379,6 +411,14 @@ def _media_assets_from_flat(record: HarvestedCameraRecord, flat: dict[str, tuple
                         "field_path": path,
                         "source_provided_only": True,
                     },
+                    date=record.date,
+                    time=record.time,
+                    timestamp=record.timestamp,
+                    last_updated=record.last_updated,
+                    last_refresh=record.last_refresh,
+                    image_description=record.image_description,
+                    current_image_update_frequency=record.current_image_update_frequency,
+                    reference_image_update_frequency=record.reference_image_update_frequency,
                 )
             )
     return assets

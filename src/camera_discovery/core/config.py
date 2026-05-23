@@ -176,6 +176,7 @@ def load_harvest_config(
     max_browser_pages_per_host: int | None = None,
     include_source_metadata: bool = True,
     write_intermediate_records: bool | None = None,
+    image_asset_filter: str | None = None,
 ) -> HarvestConfig:
     """Load extraction-only harvest configuration.
 
@@ -187,6 +188,9 @@ def load_harvest_config(
     configured_sources_file = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
     selected_discovery_mode = DiscoveryMode((discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE", "both")).strip().lower())
     configured_browser_backend = (browser_backend or _browser_backend_env()).strip().lower()
+    configured_image_asset_filter = (image_asset_filter or os.getenv("CAMERA_DISCOVERY_HARVEST_IMAGE_ASSET_FILTER") or "raw").strip().lower()
+    if configured_image_asset_filter not in {"raw", "exclude-page-assets", "camera-evidence"}:
+        raise ValueError("Invalid image asset filter {!r}; expected one of: raw, exclude-page-assets, camera-evidence".format(configured_image_asset_filter))
     if configured_browser_backend not in _ALLOWED_BROWSER_BACKENDS:
         allowed = ", ".join(sorted(_ALLOWED_BROWSER_BACKENDS))
         raise ValueError(f"Invalid browser backend {configured_browser_backend!r}; expected one of: {allowed}")
@@ -216,6 +220,7 @@ def load_harvest_config(
         max_browser_network_events_logged_per_page=max(0, _int_env("CAMERA_DISCOVERY_HARVEST_MAX_BROWSER_NETWORK_EVENTS_LOGGED_PER_PAGE", _int_env("CAMERA_DISCOVERY_MAX_BROWSER_NETWORK_EVENTS_LOGGED_PER_PAGE", 100))),
         include_source_metadata=include_source_metadata,
         write_intermediate_records=_bool_env("CAMERA_DISCOVERY_HARVEST_WRITE_INTERMEDIATE_RECORDS", False) if write_intermediate_records is None else bool(write_intermediate_records),
+        image_asset_filter=configured_image_asset_filter,
         http_timeout=_float_env("CAMERA_DISCOVERY_HTTP_TIMEOUT", 20.0),
         user_agent=os.getenv("CAMERA_DISCOVERY_USER_AGENT", "camera-discovery/0.1 (+public-camera-research)"),
     )

@@ -153,6 +153,12 @@ The same behavior can be enabled by environment variable:
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `CAMERA_DISCOVERY_HARVEST_WRITE_INTERMEDIATE_RECORDS` | `false` | When true, write `raw_media_records.jsonl`, `unique_media_records.jsonl`, `media_filtered_records.jsonl`, and `logs/intermediate_records_summary.json`. |
+| `CAMERA_DISCOVERY_HARVEST_WRITE_INTERMEDIATE_RECORDS` | `false` | When true, write `raw_media_records.jsonl`, `unique_media_records.jsonl`, `media_filtered_records.jsonl`, `image_filtered_records.jsonl`, and `logs/intermediate_records_summary.json`. |
+| `CAMERA_DISCOVERY_HARVEST_IMAGE_ASSET_FILTER` | `raw` | Image filter mode: `raw`, `exclude-page-assets`, or `camera-evidence`. |
 
-The raw intermediate file is written after block-policy filtering and before deduplication so blocked URLs are not persisted. The media-filtered file is written before the final `--max-urls` cap.
+The raw intermediate file is written after block-policy filtering and before deduplication so blocked URLs are not persisted. The media-filtered file is written before image-asset filtering, and `image_filtered_records.jsonl` is written before the final `--max-urls` cap. Use `--image-asset-filter camera-evidence` for image harvests where logos, favicons, social cards, and static page assets should be reduced.
+
+
+## `run --harvest-input` credential preflight
+
+`camera-discovery run --harvest-input` still uses the normal target-aware run workflow, including LLM-backed target resolution when configured. If the provider authentication fails, the CLI now prints a concise provider/model credential message instead of surfacing only a raw provider stack trace. In Colab, the harvest notebook checks credentials such as `OLLAMA_API_KEY` before demonstrating the handoff run and skips that cell with a clear message when credentials are missing.

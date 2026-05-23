@@ -94,3 +94,27 @@ def test_run_harvest_input_merges_candidates_into_normal_pipeline(tmp_path, monk
     assert candidate.lat == 38.0
     assert candidate.source_metadata["trusted"] is False
     assert candidate.source_metadata["validated"] is False
+
+
+def test_run_target_resolution_auth_error_is_concise(tmp_path, monkeypatch):
+    import httpx
+
+    def raise_auth_error(self):
+        request = httpx.Request("POST", "https://ollama.com/api/chat")
+        response = httpx.Response(401, request=request)
+        raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=response)
+
+    monkeypatch.setattr(target_resolver.TargetResolver, "resolve_all", raise_auth_error)
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "test cameras",
+            "--output-dir",
+            str(tmp_path / "run"),
+            "--no-progress",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "LLM provider authentication/configuration failed" in result.stdout
+    assert "Set/verify" in result.stdout

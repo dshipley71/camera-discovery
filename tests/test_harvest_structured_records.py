@@ -108,3 +108,41 @@ def test_structured_camera_record_ids_are_deterministic():
     second = extract_structured_camera_records(data, endpoint_url="https://source.example/api", source_page_url=None, source_provider="direct", source_name="Fixture")
     assert first[0].camera_record_id == second[0].camera_record_id
     assert first[0].media_assets[0].asset_id == second[0].media_assets[0].asset_id
+
+
+def test_structured_camera_record_promotes_nested_record_timestamp():
+    data = {
+        "features": [
+            {
+                "geometry": {"x": -121.5, "y": 38.5},
+                "attributes": {
+                    "cameraId": "cam-time-1",
+                    "locationName": "Timed Camera",
+                    "currentImageURL": "https://media.example/cam-time-1/current.jpg",
+                    "recordTimestamp": {
+                        "recordDate": "2026-05-21",
+                        "recordTime": "14:03:00",
+                        "recordEpoch": 1779372180000,
+                    },
+                },
+            }
+        ]
+    }
+    records = extract_structured_camera_records(
+        data,
+        endpoint_url="https://source.example/api",
+        source_page_url=None,
+        source_provider="direct",
+        source_name="Fixture",
+    )
+    assert len(records) == 1
+    record = records[0]
+    assert record.date == "2026-05-21"
+    assert record.time == "14:03:00"
+    assert record.timestamp == "2026-05-21T14:03:00Z"
+    assert record.field_map["recorddate"].endswith("recordTimestamp.recordDate")
+    assert record.field_map["recordtime"].endswith("recordTimestamp.recordTime")
+    assert record.field_map["recordepoch"].endswith("recordTimestamp.recordEpoch")
+    assert record.media_assets[0].date == "2026-05-21"
+    assert record.media_assets[0].time == "14:03:00"
+    assert record.media_assets[0].timestamp == "2026-05-21T14:03:00Z"

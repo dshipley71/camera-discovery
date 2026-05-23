@@ -162,3 +162,34 @@ def test_harvest_promotes_lat_lon_from_same_json_record(tmp_path):
     assert record.heading == 270
     assert record.date == "2026-05-21"
     assert record.time == "13:45:00"
+
+
+def test_image_asset_filter_modes():
+    from camera_discovery.services.harvest_engine import apply_image_asset_filter
+
+    logo = HarvestedUrlRecord(url="https://static.example/assets/site-logo.png", media_type="image_snapshot")
+    camera = HarvestedUrlRecord(
+        url="https://media.example/cameras/cam1/current.jpg",
+        media_type="image_snapshot",
+        camera_record_id="cam:1",
+        asset_role="current_image_snapshot",
+        asset_field="currentImageURL",
+        current_image_update_frequency=30,
+    )
+    hls = HarvestedUrlRecord(url="https://media.example/cam1/playlist.m3u8", media_type="hls")
+
+    raw_kept, raw_summary = apply_image_asset_filter([logo, camera, hls], "raw")
+    assert raw_kept == [logo, camera, hls]
+    assert raw_summary["removed"] == 0
+
+    page_filtered, page_summary = apply_image_asset_filter([logo, camera, hls], "exclude-page-assets")
+    assert logo not in page_filtered
+    assert camera in page_filtered
+    assert hls in page_filtered
+    assert page_summary["removed_by_reason"] == {"page_asset_evidence": 1}
+
+    evidence_filtered, evidence_summary = apply_image_asset_filter([logo, camera, hls], "camera-evidence")
+    assert logo not in evidence_filtered
+    assert camera in evidence_filtered
+    assert hls in evidence_filtered
+    assert evidence_summary["removed_by_reason"] == {"missing_camera_image_evidence": 1}

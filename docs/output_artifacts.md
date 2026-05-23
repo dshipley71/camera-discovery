@@ -145,9 +145,12 @@ Optional debug/analysis outputs, written only when `harvest-urls --write-interme
 
 - `raw_media_records.jsonl` — block-policy-filtered media records before deduplication.
 - `unique_media_records.jsonl` — deduped media records before media filtering.
-- `media_filtered_records.jsonl` — deduped media records after the requested `--media` filter and before the final `--max-urls` cap.
+- `media_filtered_records.jsonl` — deduped media records after the requested `--media` filter and before image-asset filtering.
+- `image_filtered_records.jsonl` — media-filtered records after `--image-asset-filter` and before the final `--max-urls` cap.
 - `logs/intermediate_records_summary.json` — counts and file paths for the optional intermediate records.
 
 These files are intentionally opt-in because broad harvest runs can produce very large intermediate outputs.
+
+`--image-asset-filter raw|exclude-page-assets|camera-evidence` controls only image-like records. The default `raw` mode preserves broad extraction. `exclude-page-assets` removes obvious page assets such as logos, favicons, icons, OpenGraph/social images, and placeholders. `camera-evidence` keeps image records with camera/snapshot evidence such as structured camera fields, update frequency, camera IDs, coordinates, or camera terms.
 
 `source_url` and `source_endpoint_url` are provenance fields. If a URL row came from a JSON endpoint, those fields should remain the endpoint URL; the direct media URL remains in `url` / `media_url`.

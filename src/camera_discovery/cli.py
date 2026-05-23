@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 
 from camera_discovery.core.config import load_harvest_config, load_run_config
-from camera_discovery.core.models import CandidateSet, RunState, TrustPolicy
+from camera_discovery.core.models import CandidateSet, RunConfig, RunState, TrustPolicy
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
 from camera_discovery.services.harvest_engine import CameraUrlHarvestEngine
 from camera_discovery.services.harvest_handoff import harvest_records_to_candidates, load_harvest_handoff
@@ -345,7 +345,14 @@ def run(
         elif progress_mode == "events":
             _emit_progress_stream_event("target_resolution_started", {"completed": 0, "total": 1, "description": "Resolving targets"})
 
-        targets = TargetResolver(cfg).resolve_all()
+        try:
+            targets = TargetResolver(cfg).resolve_all()
+        except Exception as exc:
+            message = _friendly_llm_error(exc, cfg)
+            if message:
+                console.print(f"[red]{message}[/red]")
+                raise typer.Exit(code=2) from exc
+            raise
 
         if progress_mode == "rich":
             assert progress is not None
@@ -522,6 +529,7 @@ def harvest_urls(
     media: Optional[list[str]] = typer.Option(None, "--media", help="Comma-separated/repeatable extensions or categories: .m3u8, mp4, hls, image, stream, video_file."),
     include_source_metadata: bool = typer.Option(True, "--include-source-metadata/--no-source-metadata"),
     write_intermediate_records: bool = typer.Option(False, "--write-intermediate-records/--no-write-intermediate-records", help="Write debug JSONL files for raw, unique, and media-filtered harvest records."),
+    image_asset_filter: str = typer.Option("raw", "--image-asset-filter", help="Image filtering mode: raw, exclude-page-assets, or camera-evidence."),
     show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show harvest progress."),
     progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, plain, or events."),
 ) -> None:
@@ -550,6 +558,7 @@ def harvest_urls(
             max_browser_pages_per_host=max_browser_pages_per_host,
             include_source_metadata=include_source_metadata,
             write_intermediate_records=write_intermediate_records,
+            image_asset_filter=image_asset_filter,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -570,6 +579,7 @@ def harvest_urls(
     console.print(f"[bold]Sources file:[/bold] {cfg.sources_file}")
     console.print(f"[bold]Media filter:[/bold] {', '.join(cfg.media) if cfg.media else 'all'}")
     console.print(f"[bold]Intermediate records:[/bold] {'enabled' if cfg.write_intermediate_records else 'disabled'}")
+    console.print(f"[bold]Image asset filter:[/bold] {cfg.image_asset_filter}")
     result = engine.harvest()
     summary_path = cfg.output_dir / "harvest_summary.json"
     console.print(f"[bold]Harvested URLs:[/bold] raw={result.raw_count} unique={result.unique_count} written={result.written_count}")
@@ -580,7 +590,7 @@ def harvest_urls(
     for filename in ("camera_records.jsonl", "camera_media_assets.jsonl", "discovered_endpoints.jsonl", "harvest_camera_inventory.jsonl", "harvest_handoff.json"):
         console.print(f"[bold]{filename}:[/bold] {cfg.output_dir / filename}")
     if cfg.write_intermediate_records:
-        for filename in ("raw_media_records.jsonl", "unique_media_records.jsonl", "media_filtered_records.jsonl"):
+        for filename in ("raw_media_records.jsonl", "unique_media_records.jsonl", "media_filtered_records.jsonl", "image_filtered_records.jsonl"):
             console.print(f"[bold]{filename}:[/bold] {cfg.output_dir / filename}")
     if summary_path.exists():
         try:
@@ -597,6 +607,21 @@ def harvest_urls(
                 )
         except Exception:
             pass
+
+
+def _friendly_llm_error(exc: Exception, cfg: RunConfig) -> str | None:
+    text = repr(exc)
+    lowered = text.casefold()
+    if "401" not in lowered and "unauthorized" not in lowered and "api_key" not in lowered and "authentication" not in lowered:
+        return None
+    provider = (cfg.llm_provider or "unknown").strip().lower()
+    model = cfg.target_intent_model or cfg.geocoder_referee_model or cfg.llm_model or "unknown"
+    key_hint = "OLLAMA_API_KEY" if provider in {"ollama", "ollama-cloud"} else "OPENAI_COMPATIBLE_API_KEY" if provider in {"openai", "openai-compatible", "openai_compatible"} else "AWS credentials" if provider == "bedrock" else "provider credentials"
+    return (
+        "LLM provider authentication/configuration failed while resolving the target query. "
+        f"Provider: {provider}; model: {model}. "
+        f"Set/verify {key_hint} or select a provider with valid credentials."
+    )
 
 
 if __name__ == "__main__":

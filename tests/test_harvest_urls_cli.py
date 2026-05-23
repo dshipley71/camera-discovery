@@ -248,11 +248,13 @@ def test_harvest_write_intermediate_records_opt_in(tmp_path):
         "raw_media_records": 3,
         "unique_media_records": 2,
         "media_filtered_records": 1,
+        "image_filtered_records": 1,
     }
     assert set(summary["intermediate_record_files"]) == {
         "raw_media_records_jsonl",
         "unique_media_records_jsonl",
         "media_filtered_records_jsonl",
+        "image_filtered_records_jsonl",
     }
     assert (out / "logs" / "intermediate_records_summary.json").exists()
     assert "raw_media_records.jsonl" in result.stdout
