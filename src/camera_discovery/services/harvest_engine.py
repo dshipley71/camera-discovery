@@ -291,7 +291,16 @@ class CameraUrlHarvestEngine:
         media_filtered = len(filtered)
         written = filtered if self.config.max_urls == 0 else filtered[: self.config.max_urls]
         self._emit("harvest_dedupe_complete", raw_records=len(raw_records), unique_urls=len(unique), media_filtered_urls=media_filtered)
-        outputs = self._write_outputs(written, raw_records=len(raw_records), unique=unique, pre_filter_unique=pre_filter_unique, media_filtered=media_filtered, blocked_or_filtered=len(blocked_filtered))
+        outputs = self._write_outputs(
+            written,
+            raw_records_count=len(raw_records),
+            raw_media_records=unblocked,
+            unique=unique,
+            media_filtered_records=filtered,
+            pre_filter_unique=pre_filter_unique,
+            media_filtered=media_filtered,
+            blocked_or_filtered=len(blocked_filtered),
+        )
         self._emit("harvest_outputs_written", outputs=outputs, written_urls=len(written))
         result = HarvestResult(
             raw_count=len(raw_records),
@@ -856,8 +865,10 @@ class CameraUrlHarvestEngine:
         self,
         records: list[HarvestedUrlRecord],
         *,
-        raw_records: int,
+        raw_records_count: int,
+        raw_media_records: list[HarvestedUrlRecord],
         unique: list[HarvestedUrlRecord],
+        media_filtered_records: list[HarvestedUrlRecord],
         pre_filter_unique: int,
         media_filtered: int,
         blocked_or_filtered: int,
@@ -875,6 +886,13 @@ class CameraUrlHarvestEngine:
             path = self.output_dir / f"{media_type}_urls.txt"
             write_plain_urls(path, typed)
             outputs[f"{media_type}_urls_txt"] = str(path)
+
+        intermediate_outputs = self._write_intermediate_records(
+            raw_media_records=raw_media_records,
+            unique_records=unique,
+            media_filtered_records=media_filtered_records,
+        )
+        outputs.update(intermediate_outputs)
 
         camera_records = list(self._camera_records.values())
         media_assets = [asset for asset in self._media_assets.values() if not self.source_policy.is_blocked(asset.url)]
@@ -938,7 +956,7 @@ class CameraUrlHarvestEngine:
         summary = {
             "query": self.config.query,
             "discovery_mode": self.config.discovery_mode.value,
-            "raw_records": raw_records,
+            "raw_records": raw_records_count,
             "unique_urls": len(unique),
             "written_urls": len(records),
             "max_urls": self.config.max_urls,
@@ -978,6 +996,17 @@ class CameraUrlHarvestEngine:
             "directory_source_rows_selected": self._source_rows_summary.get("selected_by_provider", {}).get("directory", 0),
             "blind_source_rows_selected": self._source_rows_summary.get("selected_by_provider", {}).get("blind", 0),
             "direct_source_rows_selected": self._source_rows_summary.get("selected_by_provider", {}).get("direct", 0),
+            "intermediate_records_written": self.config.write_intermediate_records,
+            "intermediate_record_counts": {
+                "raw_media_records": len(raw_media_records),
+                "unique_media_records": len(unique),
+                "media_filtered_records": len(media_filtered_records),
+            },
+            "intermediate_record_files": {
+                key: value
+                for key, value in outputs.items()
+                if key in {"raw_media_records_jsonl", "unique_media_records_jsonl", "media_filtered_records_jsonl"}
+            },
             "outputs": outputs,
             "warnings": self._warnings,
             "browser_capture": self._browser_summary,
@@ -987,6 +1016,45 @@ class CameraUrlHarvestEngine:
         write_json(self.logs_dir / "browser_capture_summary.json", self._browser_summary)
         write_json(self.logs_dir / "endpoint_catalog_summary.json", {"endpoints": len(endpoints), "records": endpoint_dicts})
         outputs["harvest_summary_json"] = str(self.output_dir / "harvest_summary.json")
+        return outputs
+
+    def _write_intermediate_records(
+        self,
+        *,
+        raw_media_records: list[HarvestedUrlRecord],
+        unique_records: list[HarvestedUrlRecord],
+        media_filtered_records: list[HarvestedUrlRecord],
+    ) -> dict[str, str]:
+        """Optionally write debug/analysis records for each harvest reduction stage.
+
+        These files are intentionally opt-in because raw harvest runs can produce
+        large outputs. Raw debug records are written after block-policy filtering
+        and before deduplication so blocked URLs are not persisted.
+        """
+
+        if not self.config.write_intermediate_records:
+            return {}
+        stage_records = {
+            "raw_media_records_jsonl": ("raw_media_records.jsonl", raw_media_records),
+            "unique_media_records_jsonl": ("unique_media_records.jsonl", unique_records),
+            "media_filtered_records_jsonl": ("media_filtered_records.jsonl", media_filtered_records),
+        }
+        outputs: dict[str, str] = {}
+        for output_key, (filename, records) in stage_records.items():
+            path = self.output_dir / filename
+            write_jsonl(path, [record_to_dict(record) for record in records])
+            outputs[output_key] = str(path)
+        write_json(
+            self.logs_dir / "intermediate_records_summary.json",
+            {
+                "enabled": True,
+                "raw_media_records": len(raw_media_records),
+                "unique_media_records": len(unique_records),
+                "media_filtered_records": len(media_filtered_records),
+                "files": outputs,
+                "note": "raw_media_records are block-policy-filtered records before deduplication; media_filtered_records are before the final --max-urls cap.",
+            },
+        )
         return outputs
 
 

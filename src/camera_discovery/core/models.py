@@ -275,6 +275,7 @@ class HarvestConfig:
     max_browser_json_endpoints_per_page: int = 100
     max_browser_network_events_logged_per_page: int = 100
     include_source_metadata: bool = True
+    write_intermediate_records: bool = False
     http_timeout: float = 20.0
     user_agent: str = "camera-discovery/0.1 (+public-camera-research)"
 

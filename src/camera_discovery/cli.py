@@ -521,6 +521,7 @@ def harvest_urls(
     max_browser_pages_per_host: Optional[int] = typer.Option(None, "--max-browser-pages-per-host"),
     media: Optional[list[str]] = typer.Option(None, "--media", help="Comma-separated/repeatable extensions or categories: .m3u8, mp4, hls, image, stream, video_file."),
     include_source_metadata: bool = typer.Option(True, "--include-source-metadata/--no-source-metadata"),
+    write_intermediate_records: bool = typer.Option(False, "--write-intermediate-records/--no-write-intermediate-records", help="Write debug JSONL files for raw, unique, and media-filtered harvest records."),
     show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show harvest progress."),
     progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, plain, or events."),
 ) -> None:
@@ -548,6 +549,7 @@ def harvest_urls(
             max_browser_pages=max_browser_pages,
             max_browser_pages_per_host=max_browser_pages_per_host,
             include_source_metadata=include_source_metadata,
+            write_intermediate_records=write_intermediate_records,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -567,6 +569,7 @@ def harvest_urls(
     console.print(f"[bold]Discovery mode:[/bold] {cfg.discovery_mode.value}")
     console.print(f"[bold]Sources file:[/bold] {cfg.sources_file}")
     console.print(f"[bold]Media filter:[/bold] {', '.join(cfg.media) if cfg.media else 'all'}")
+    console.print(f"[bold]Intermediate records:[/bold] {'enabled' if cfg.write_intermediate_records else 'disabled'}")
     result = engine.harvest()
     summary_path = cfg.output_dir / "harvest_summary.json"
     console.print(f"[bold]Harvested URLs:[/bold] raw={result.raw_count} unique={result.unique_count} written={result.written_count}")
@@ -576,6 +579,9 @@ def harvest_urls(
     console.print(f"[bold]harvest_summary.json:[/bold] {summary_path}")
     for filename in ("camera_records.jsonl", "camera_media_assets.jsonl", "discovered_endpoints.jsonl", "harvest_camera_inventory.jsonl", "harvest_handoff.json"):
         console.print(f"[bold]{filename}:[/bold] {cfg.output_dir / filename}")
+    if cfg.write_intermediate_records:
+        for filename in ("raw_media_records.jsonl", "unique_media_records.jsonl", "media_filtered_records.jsonl"):
+            console.print(f"[bold]{filename}:[/bold] {cfg.output_dir / filename}")
     if summary_path.exists():
         try:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))

@@ -175,6 +175,7 @@ def load_harvest_config(
     max_browser_pages: int | None = None,
     max_browser_pages_per_host: int | None = None,
     include_source_metadata: bool = True,
+    write_intermediate_records: bool | None = None,
 ) -> HarvestConfig:
     """Load extraction-only harvest configuration.
 
@@ -214,6 +215,7 @@ def load_harvest_config(
         max_browser_json_endpoints_per_page=max(0, _int_env("CAMERA_DISCOVERY_HARVEST_MAX_BROWSER_JSON_ENDPOINTS_PER_PAGE", _int_env("CAMERA_DISCOVERY_MAX_BROWSER_JSON_ENDPOINTS_PER_PAGE", 100))),
         max_browser_network_events_logged_per_page=max(0, _int_env("CAMERA_DISCOVERY_HARVEST_MAX_BROWSER_NETWORK_EVENTS_LOGGED_PER_PAGE", _int_env("CAMERA_DISCOVERY_MAX_BROWSER_NETWORK_EVENTS_LOGGED_PER_PAGE", 100))),
         include_source_metadata=include_source_metadata,
+        write_intermediate_records=_bool_env("CAMERA_DISCOVERY_HARVEST_WRITE_INTERMEDIATE_RECORDS", False) if write_intermediate_records is None else bool(write_intermediate_records),
         http_timeout=_float_env("CAMERA_DISCOVERY_HTTP_TIMEOUT", 20.0),
         user_agent=os.getenv("CAMERA_DISCOVERY_USER_AGENT", "camera-discovery/0.1 (+public-camera-research)"),
     )

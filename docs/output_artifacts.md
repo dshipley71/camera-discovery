@@ -141,4 +141,13 @@ Harvest outputs include:
 - `harvest_summary.json` — summary counts for URLs, structured records, media assets, endpoints, coordinates, orientation, source-reported `inService`, timestamps, update frequencies, and source-row provenance. The `source_rows` object reports whether `SOURCES.md` existed, was loaded, and contributed directory rows, plus counts by provider (`directory`, `blind`, `direct`) and source kind.
 - `logs/source_rows_summary.json` — the same source-row provenance summary written as a standalone log for quick debugging of `--discovery-mode both`, `--sources-file`, and directory-vs-blind behavior.
 
+Optional debug/analysis outputs, written only when `harvest-urls --write-intermediate-records` is set:
+
+- `raw_media_records.jsonl` — block-policy-filtered media records before deduplication.
+- `unique_media_records.jsonl` — deduped media records before media filtering.
+- `media_filtered_records.jsonl` — deduped media records after the requested `--media` filter and before the final `--max-urls` cap.
+- `logs/intermediate_records_summary.json` — counts and file paths for the optional intermediate records.
+
+These files are intentionally opt-in because broad harvest runs can produce very large intermediate outputs.
+
 `source_url` and `source_endpoint_url` are provenance fields. If a URL row came from a JSON endpoint, those fields should remain the endpoint URL; the direct media URL remains in `url` / `media_url`.

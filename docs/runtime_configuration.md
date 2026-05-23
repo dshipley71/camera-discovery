@@ -139,3 +139,20 @@ camera-discovery run "California traffic cameras" \
 ```
 
 `--harvest-input` also accepts a direct `harvest_camera_inventory.jsonl` path. Handoff rows are treated as source-provided candidate data only. They are not trusted, validated, live/dead classified, geocoded, or scope-filtered merely because they came from harvest output. Normal `run` behavior still resolves the target, applies scope/review/validation/trust/output behavior according to configuration, and writes normal inventory artifacts. Source-provided coordinates are preserved when plausible so the application does not need to rediscover metadata that public endpoints already supplied.
+
+
+## Harvest debug/intermediate outputs
+
+`camera-discovery harvest-urls` normally writes only final URL/media outputs plus structured harvest artifacts. For debugging the raw → unique → media-filtered → written pipeline, use:
+
+```bash
+camera-discovery harvest-urls "California traffic cameras"   --output-dir runs/harvest-california-hls   --media .m3u8   --write-intermediate-records
+```
+
+The same behavior can be enabled by environment variable:
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `CAMERA_DISCOVERY_HARVEST_WRITE_INTERMEDIATE_RECORDS` | `false` | When true, write `raw_media_records.jsonl`, `unique_media_records.jsonl`, `media_filtered_records.jsonl`, and `logs/intermediate_records_summary.json`. |
+
+The raw intermediate file is written after block-policy filtering and before deduplication so blocked URLs are not persisted. The media-filtered file is written before the final `--max-urls` cap.

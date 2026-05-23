@@ -298,6 +298,8 @@ When structured endpoints expose fields such as coordinates, direction/bearing/h
 
 Harvest summaries also include source-row provenance so users can verify whether `SOURCES.md` was actually used. Check `harvest_summary.json` → `source_rows` or `logs/source_rows_summary.json` for `sources_file_used`, `selected_by_provider`, `selected_directory_rows`, `selected_blind_rows`, and `selected_direct_rows`.
 
+For debug/analysis runs, add `--write-intermediate-records` to write `raw_media_records.jsonl`, `unique_media_records.jsonl`, and `media_filtered_records.jsonl`. These opt-in files expose the raw block-policy-filtered records before deduplication, the deduped records before media filtering, and the media-filtered records before the final `--max-urls` cap. They can be large, so normal harvest runs do not write them by default.
+
 A normal run can consume the handoff without bypassing normal inventory behavior:
 
 ```bash

@@ -203,6 +203,86 @@ def test_harvest_notebook_exists_and_is_cli_harness():
     assert "TargetResolver" not in text
 
 
+
+def test_harvest_write_intermediate_records_opt_in(tmp_path):
+    out = tmp_path / "harvest"
+    result = runner.invoke(
+        app,
+        [
+            "harvest-urls",
+            "test cameras",
+            "--discovery-mode",
+            "direct",
+            "--seed-url",
+            "https://MEDIA.EXAMPLE/cam1.m3u8",
+            "--seed-url",
+            "https://media.example/cam1.m3u8",
+            "--seed-url",
+            "https://media.example/cam2.jpg",
+            "--media",
+            ".m3u8",
+            "--output-dir",
+            str(out),
+            "--write-intermediate-records",
+            "--disable-browser-capture",
+            "--no-progress",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    raw_path = out / "raw_media_records.jsonl"
+    unique_path = out / "unique_media_records.jsonl"
+    filtered_path = out / "media_filtered_records.jsonl"
+    assert raw_path.exists()
+    assert unique_path.exists()
+    assert filtered_path.exists()
+    raw_rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+    unique_rows = [json.loads(line) for line in unique_path.read_text(encoding="utf-8").splitlines()]
+    filtered_rows = [json.loads(line) for line in filtered_path.read_text(encoding="utf-8").splitlines()]
+    assert len(raw_rows) == 3
+    assert len(unique_rows) == 2
+    assert [row["url"] for row in filtered_rows] == ["https://media.example/cam1.m3u8"]
+    assert (out / "camera_urls.txt").read_text(encoding="utf-8").splitlines() == ["https://media.example/cam1.m3u8"]
+    summary = json.loads((out / "harvest_summary.json").read_text(encoding="utf-8"))
+    assert summary["intermediate_records_written"] is True
+    assert summary["intermediate_record_counts"] == {
+        "raw_media_records": 3,
+        "unique_media_records": 2,
+        "media_filtered_records": 1,
+    }
+    assert set(summary["intermediate_record_files"]) == {
+        "raw_media_records_jsonl",
+        "unique_media_records_jsonl",
+        "media_filtered_records_jsonl",
+    }
+    assert (out / "logs" / "intermediate_records_summary.json").exists()
+    assert "raw_media_records.jsonl" in result.stdout
+
+
+def test_harvest_intermediate_records_default_not_written(tmp_path):
+    out = tmp_path / "harvest"
+    result = runner.invoke(
+        app,
+        [
+            "harvest-urls",
+            "test cameras",
+            "--discovery-mode",
+            "direct",
+            "--seed-url",
+            "https://media.example/cam1.m3u8",
+            "--output-dir",
+            str(out),
+            "--disable-browser-capture",
+            "--no-progress",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert not (out / "raw_media_records.jsonl").exists()
+    assert not (out / "unique_media_records.jsonl").exists()
+    assert not (out / "media_filtered_records.jsonl").exists()
+    summary = json.loads((out / "harvest_summary.json").read_text(encoding="utf-8"))
+    assert summary["intermediate_records_written"] is False
+    assert summary["intermediate_record_files"] == {}
+
 def test_harvest_reports_sources_md_directory_usage(tmp_path, monkeypatch):
     from camera_discovery.services import harvest_engine
 
