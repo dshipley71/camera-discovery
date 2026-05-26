@@ -424,6 +424,25 @@ def _media_assets_from_flat(record: HarvestedCameraRecord, flat: dict[str, tuple
     return assets
 
 
+def _role_for_field_key(key: str, media_type: str) -> str:
+    """Return the canonical asset role for a normalised field key.
+
+    Exact-match MEDIA_FIELD_ROLES first, then apply pattern-based recognition
+    for multi-variant reference-image field names.  Public traffic camera APIs
+    such as Caltrans expose reference images under numbered field names
+    (referenceimage1updateagourl … referenceimage12updatesagourl) that do not
+    appear in the verbatim MEDIA_FIELD_ROLES dictionary.  Classifying them by
+    prefix/suffix keeps the role mapping deterministic without enumerating every
+    possible variant.
+    """
+    exact = MEDIA_FIELD_ROLES.get(key)
+    if exact:
+        return exact
+    if key.startswith("referenceimage") and key.endswith("url"):
+        return "reference_image_snapshot"
+    return _asset_role_for_media_type(media_type)
+
+
 def _media_urls_from_value(value: Any, key_hint: str) -> list[tuple[str, str]]:
     urls: list[tuple[str, str]] = []
     if isinstance(value, str):
