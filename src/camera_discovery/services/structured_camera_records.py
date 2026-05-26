@@ -84,8 +84,11 @@ def extract_structured_camera_records(
     but does not validate, geocode, trust, scope, or infer missing fields.
     """
     records: list[HarvestedCameraRecord] = []
+    accepted_paths: list[str] = []
     for path, obj in _walk_objects(data):
         if not isinstance(obj, dict):
+            continue
+        if any(path.startswith(f"{accepted}.") or path.startswith(f"{accepted}[") for accepted in accepted_paths):
             continue
         # Feature wrappers merge sibling geometry with attributes/properties.
         # Skip the nested attributes/properties object itself so one camera does
@@ -106,6 +109,7 @@ def extract_structured_camera_records(
         )
         if record.media_assets or record.lat is not None or record.lon is not None or record.camera_id or record.title:
             records.append(record)
+            accepted_paths.append(path)
     return _dedupe_camera_records(records)
 
 
