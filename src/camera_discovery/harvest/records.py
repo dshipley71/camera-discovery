@@ -18,6 +18,7 @@ from camera_discovery.harvest.media_filter import (
     image_record_text,
     media_extension,
 )
+from camera_discovery.extraction.media import _dedupe_strings
 
 
 def dedupe_records(records: list[HarvestedUrlRecord]) -> list[HarvestedUrlRecord]:
