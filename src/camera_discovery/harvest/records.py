@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import quote_plus, unquote, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 
 from camera_discovery.core.models import (
     CameraCandidate,
@@ -19,6 +19,7 @@ from camera_discovery.harvest.media_filter import (
     media_extension,
 )
 from camera_discovery.extraction.media import _dedupe_strings
+from camera_discovery.extraction.search import clean_ddg_result_url
 
 
 def dedupe_records(records: list[HarvestedUrlRecord]) -> list[HarvestedUrlRecord]:
@@ -255,12 +256,7 @@ def harvest_search_queries(query: str, max_queries: int) -> list[str]:
     return _dedupe_strings(candidates)[:max_queries] if max_queries else []
 
 def clean_ddg_url(href: str) -> str:
-    if not href:
-        return ""
-    if "duckduckgo.com/l/" in href or href.startswith("//duckduckgo.com/l/"):
-        parsed = urlparse(href if href.startswith("http") else "https:" + href)
-        return unquote(parse_qs(parsed.query).get("uddg", [""])[0])
-    return href
+    return clean_ddg_result_url(href)
 
 def clean_extracted_url(value: str) -> str:
     return value.strip().strip("'\"),;]")

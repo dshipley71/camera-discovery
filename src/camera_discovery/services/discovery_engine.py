@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict
 from typing import Any, Callable
-from urllib.parse import parse_qs, quote_plus, urlencode, urljoin, urlparse
+from urllib.parse import quote_plus, urlencode, urljoin, urlparse
 
 import httpx
 
@@ -483,21 +483,15 @@ class CandidateDiscoveryEngine:
         return rows
 
     def _parse_ddg(self, query: str, html: str) -> list[dict[str, str]]:
-        soup = _html_soup(html)
-        results: list[dict[str, str]] = []
-        for anchor in soup.select("a.result__a")[: self.config.max_search_results_per_query]:
-            url = self._clean(anchor.get("href") or "")
-            if url:
-                results.append({"query": query, "title": anchor.get_text(" ", strip=True), "url": url, "snippet": "", "source_provider": "blind"})
-        return results
+        return parse_ddg_result_rows(
+            query,
+            html,
+            max_results=self.config.max_search_results_per_query,
+            include_source_kind=False,
+        )
 
     def _clean(self, href: str) -> str:
-        if not href:
-            return ""
-        if "duckduckgo.com/l/" in href or href.startswith("//duckduckgo.com/l/"):
-            parsed = urlparse(href if href.startswith("http") else "https:" + href)
-            return unquote(parse_qs(parsed.query).get("uddg", [""])[0])
-        return href
+        return clean_ddg_result_url(href)
 
     def _select_rows(self, rows: list[dict[str, str]]) -> list[dict[str, str]]:
         seen: set[str] = set()

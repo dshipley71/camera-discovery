@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Callable
-from urllib.parse import parse_qs, urljoin, urlparse, urlsplit, urlunsplit
+from urllib.parse import quote_plus, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 
@@ -28,6 +28,7 @@ from camera_discovery.extraction.html import _html_soup
 from camera_discovery.extraction.http import _get_with_retry
 from camera_discovery.extraction.media import _dedupe_strings, _looks_like_non_camera_asset
 from camera_discovery.extraction.pagination import _expand_structured_endpoint_urls, _pagination_rows
+from camera_discovery.extraction.search import parse_ddg_result_rows
 from camera_discovery.harvest.json_records import (
     count_json_records,
     extract_json_blobs,
@@ -59,7 +60,6 @@ from camera_discovery.harvest.outputs import (
     write_plain_urls,
 )
 from camera_discovery.harvest.records import (
-    clean_ddg_url,
     clean_extracted_url,
     dedupe_records,
     harvest_search_queries,
@@ -111,6 +111,7 @@ class CameraUrlHarvestEngine:
         self._discovered_endpoints: dict[str, DiscoveredEndpointRecord] = {}
         self._blocked_source_rows: list[dict[str, Any]] = []
         self._source_rows_summary: dict[str, Any] = {}
+        self._blind_search_diagnostics: list[dict[str, Any]] = []
         self._browser_summary: dict[str, Any] = {
             "enabled": config.enable_browser_capture,
             "backend": config.browser_backend,
@@ -245,6 +246,7 @@ class CameraUrlHarvestEngine:
             selected=selected,
             blocked_rows=self._blocked_source_rows,
             max_source_rows_applied=max_source_rows_applied,
+            blind_search_diagnostics=self._blind_search_diagnostics,
         )
         return selected
 
@@ -283,28 +285,42 @@ class CameraUrlHarvestEngine:
     def _blind_rows(self) -> list[dict[str, str]]:
         queries = harvest_search_queries(self.config.query, self.config.max_search_queries)
         rows: list[dict[str, str]] = []
+        diagnostics: list[dict[str, Any]] = []
         client = self._make_client()
         try:
             for query in queries:
+                search_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
                 try:
-                    resp = _get_with_retry(client, f"https://duckduckgo.com/html/?q={quote_plus(query)}")
+                    resp = _get_with_retry(client, search_url)
                     resp.raise_for_status()
-                    rows.extend(self._parse_ddg(query, resp.text))
+                    parsed = self._parse_ddg(query, resp.text)
+                    diagnostics.append(
+                        {
+                            "query": query,
+                            "url": search_url,
+                            "status_code": resp.status_code,
+                            "response_bytes": len(resp.content or b""),
+                            "parsed_rows": len(parsed),
+                        }
+                    )
+                    rows.extend(parsed)
                 except Exception as exc:
+                    diagnostics.append({"query": query, "url": search_url, "error": repr(exc), "parsed_rows": 0})
                     self._log_error("blind_search_error", query, exc)
         finally:
             client.close()
+        if diagnostics:
+            write_jsonl(self.logs_dir / "harvest_blind_search_diagnostics.jsonl", diagnostics)
+        self._blind_search_diagnostics = diagnostics
         return rows
 
     def _parse_ddg(self, query: str, text: str) -> list[dict[str, str]]:
-        soup = _html_soup(text)
-        rows: list[dict[str, str]] = []
-        for anchor in soup.select("a.result__a")[: self.config.max_search_results_per_query]:
-            url = clean_ddg_url(anchor.get("href") or "")
-            if not url:
-                continue
-            rows.append({"query": query, "title": anchor.get_text(" ", strip=True), "url": url, "snippet": "", "source_provider": "blind", "source_kind": "search_result", "source_name": "DuckDuckGo"})
-        return rows
+        return parse_ddg_result_rows(
+            query,
+            text,
+            max_results=self.config.max_search_results_per_query,
+            include_source_kind=True,
+        )
 
     def _select_rows(self, rows: list[dict[str, str]]) -> list[dict[str, str]]:
         selected: list[dict[str, str]] = []

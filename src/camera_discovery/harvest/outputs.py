@@ -21,6 +21,7 @@ def build_source_rows_summary(
     selected: list[dict[str, str]],
     blocked_rows: list[dict[str, Any]],
     max_source_rows_applied: bool,
+    blind_search_diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Summarize harvest source-row provenance for reporting/debugging.
 
@@ -35,6 +36,7 @@ def build_source_rows_summary(
     direct_requested = config.discovery_mode in {DiscoveryMode.DIRECT, DiscoveryMode.BOTH, DiscoveryMode.BLIND, DiscoveryMode.DIRECTORY}
     selected_by_provider = count_rows_by_key(selected, "source_provider")
     generated_by_provider = count_rows_by_key([*directory_rows, *blind_rows, *direct_rows], "source_provider")
+    blind_diagnostics = blind_search_diagnostics or []
     summary = {
         "discovery_mode": config.discovery_mode.value,
         "sources_file": sources_file,
@@ -59,6 +61,11 @@ def build_source_rows_summary(
         "selected_direct_rows": selected_by_provider.get("direct", 0),
         "blocked_source_rows": len(blocked_rows),
         "blocked_source_rows_by_provider": count_rows_by_key(blocked_rows, "source_provider"),
+        "blind_search_queries": [item.get("query") for item in blind_diagnostics if item.get("query")],
+        "blind_search_query_count": len(blind_diagnostics),
+        "blind_search_parsed_rows": sum(int(item.get("parsed_rows") or 0) for item in blind_diagnostics),
+        "blind_search_errors": sum(1 for item in blind_diagnostics if item.get("error")),
+        "blind_search_results_by_query": {str(item.get("query") or ""): int(item.get("parsed_rows") or 0) for item in blind_diagnostics if item.get("query")},
         "max_source_rows": config.max_source_rows,
         "max_source_rows_applied": max_source_rows_applied,
     }
