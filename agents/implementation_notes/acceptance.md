@@ -4,7 +4,7 @@ The implementation is accepted when the documentation and code agree on the foll
 
 ## Architecture and trust boundary
 
-1. The application is organized around `TargetResolver`, `CandidateDiscoveryEngine`, and `ReviewAndValidationPipeline`.
+1. The target-aware workflow is organized around thin CLI commands, `runners/discovery_run.py`, `TargetResolver`, `CandidateDiscoveryEngine`, and `ReviewAndValidationPipeline`.
 2. `RunState` remains the canonical run snapshot written to `logs/run_summary.json`.
 3. LLMs are advisory evidence interpreters for target intent, geocoder referee ranking, candidate location-name inference, and candidate semantic review.
 4. Deterministic code remains the authority for geometry verification, coordinate acceptance, stream/image validation, trusted-output authorization, and artifact writing.
@@ -28,6 +28,13 @@ The implementation is accepted when the documentation and code agree on the foll
 6. Browser capture is optional, budgeted, logged, and available through Playwright by default or CloakBrowser when configured.
 7. JSON endpoint metadata is preserved into candidates, tables, GeoJSON, and maps when available.
 8. Candidate budgets separately account for HLS, image snapshot, and total candidates.
+
+## Harvest
+
+1. Harvest mode is extraction-only and is coordinated by `runners/harvest_run.py` and `CameraUrlHarvestEngine`.
+2. Harvest mode bypasses target resolution, geocoding, validation, trust classification, scope enforcement, LLM review, GeoJSON/maps, `cameras.md`, and review ZIP generation.
+3. `run --harvest-input` consumes source-provided harvest data only as candidate seed/enrichment data and still applies the normal target-aware trust, scope, validation, and output workflow.
+4. Harvest helper responsibilities stay under `harvest/`; shared extraction helpers stay under `extraction/`.
 
 ## Coordinates and scope
 

@@ -1,6 +1,6 @@
 # 04 — CandidateDiscoveryEngine Agent
 
-`CandidateDiscoveryEngine` is the single discovery service. Keep discovery providers as input adapters inside this service.
+`CandidateDiscoveryEngine` is the single discovery service and public orchestration/import contract. Keep discovery providers as input adapters inside this service, but keep reusable helper logic in focused modules such as `discovery/source_rows.py`, `extraction/`, and `enrichment/location.py`. Do not move low-level parsing, HTTP, browser, JSON, pagination, or media-classification logic back into a monolithic engine file.
 
 ## Discovery providers
 

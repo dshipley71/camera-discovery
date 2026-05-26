@@ -13,7 +13,7 @@ openai_compatible
 bedrock
 ```
 
-Factory functions currently used by the services:
+Factory functions currently used by the runners and services:
 
 ```text
 build_llm_client

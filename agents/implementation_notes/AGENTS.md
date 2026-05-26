@@ -1,10 +1,12 @@
 # AGENTS.md — Camera Discovery Source-Aligned Build Rules
 
-The current application is a streamlined public-camera discovery pipeline built around three service modules:
+The current application is a streamlined public-camera discovery pipeline built around thin CLI commands, workflow runners, and three primary target-aware workflow services:
 
 1. `TargetResolver`
 2. `CandidateDiscoveryEngine`
 3. `ReviewAndValidationPipeline`
+
+Harvest mode is an extraction-only workflow coordinated by `runners/harvest_run.py` and `CameraUrlHarvestEngine`. Shared helpers belong in focused modules such as `extraction/`, `discovery/`, `harvest/`, and `enrichment/`; do not collapse them back into god files.
 
 Use one canonical `RunState`. Avoid scattered state mutation, duplicated artifact writers, synthetic fallbacks, and source-specific hacks.
 
@@ -64,7 +66,7 @@ Each target must receive stable target metadata, target-specific diagnostics, ta
 
 ## Source providers and global block policy
 
-`DirectorySourceProvider` is an input adapter inside `CandidateDiscoveryEngine`, not a separate orchestration layer. It reads enabled allowed source URLs from `SOURCES.md`.
+`DirectorySourceProvider` is an input adapter used by the `CandidateDiscoveryEngine` workflow, not a separate orchestration layer. Its implementation lives with source-row helpers in `discovery/source_rows.py` and reads enabled allowed source URLs from `SOURCES.md`.
 
 Allowed source rows are used only in `directory` and `both` modes. Blocked rows are global deny rules and must be applied to blind search, directory rows, direct seed URLs, fetched pages/endpoints, extracted media URLs, and final candidates.
 
