@@ -7,6 +7,6 @@ This folder contains source-aligned project documentation for the current `camer
 - `output_artifacts.md` — trusted/review outputs and diagnostic files.
 - `acceptance.md` — behavior and validation criteria aligned with the implemented source code.
 - `sources_blueprint.md` — `SOURCES.md` schema and source-policy behavior.
-- `codex_prompt_*.md` — historical implementation prompts retained for traceability. They are references, not the primary runtime documentation.
+- `codex_prompt_*.md` — historical implementation prompts retained for traceability. They may mention earlier module locations or pre-refactor implementation preferences; they are references, not the primary runtime documentation.
 
 The root `README.md` is the primary user/developer guide. The files under `agents/` are coding-agent instructions that should stay aligned with `src/camera_discovery/`.

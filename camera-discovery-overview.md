@@ -1,10 +1,12 @@
 # Camera Discovery — Architecture Overview
 
-`camera-discovery` is a Python CLI and notebook-supported application for discovering public camera media for a user-specified geography, such as public traffic, weather, webcam, HLS, or refreshing image snapshot cameras. The current implementation is built around three services:
+`camera-discovery` is a Python CLI and notebook-supported application for discovering public camera media for a user-specified geography, such as public traffic, weather, webcam, HLS, or refreshing image snapshot cameras. The current implementation is organized around thin CLI commands, workflow runners, and three primary target-aware workflow services:
 
 1. `TargetResolver`
 2. `CandidateDiscoveryEngine`
 3. `ReviewAndValidationPipeline`
+
+`camera-discovery harvest-urls` is handled by the harvest runner and `CameraUrlHarvestEngine` as an extraction-only workflow. Shared implementation details live in focused modules such as `extraction/`, `discovery/`, `harvest/`, and `enrichment/`; the service modules retain the public orchestration/import contracts.
 
 The important trust boundary is unchanged: LLMs interpret and rank evidence, while deterministic code verifies geometry, validates media, authorizes trusted output, and writes artifacts.
 
@@ -13,6 +15,12 @@ The important trust boundary is unchanged: LLMs interpret and rank evidence, whi
 ![Pipeline](architecture.svg)
 
 ## Architecture
+
+### 0. CLI and workflow runners
+
+`camera_discovery.cli` is intentionally thin. It declares Typer commands/options, loads runtime configuration, builds progress callbacks, delegates target-aware runs to `runners/discovery_run.py`, delegates extraction-only harvest runs to `runners/harvest_run.py`, and formats user-facing summaries.
+
+Low-level shared logic is split out of the service orchestration files: HTTP/HTML/media/JSON/pagination/browser extraction helpers live under `extraction/`, source-row helpers live under `discovery/`, candidate location evidence helpers live under `enrichment/`, and harvest-specific record/filter/output helpers live under `harvest/`.
 
 ### 1. Target resolution
 
