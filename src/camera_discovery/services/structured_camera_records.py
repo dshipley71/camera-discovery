@@ -386,7 +386,7 @@ def _media_assets_from_flat(record: HarvestedCameraRecord, flat: dict[str, tuple
             if pair in seen:
                 continue
             seen.add(pair)
-            role = MEDIA_FIELD_ROLES.get(key) or _asset_role_for_media_type(media_type)
+            role = _role_for_field_key(key, media_type)
             asset_id = "asset:" + _stable_hash("|".join([record.camera_record_id, path, canonical]))
             assets.append(
                 HarvestedMediaAsset(
