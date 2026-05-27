@@ -233,6 +233,23 @@ class CandidateSet:
 
     @classmethod
     def merge(cls, sets: list[CandidateSet]) -> CandidateSet:
+        """Merge per-target candidate sets with deterministic first-seen semantics.
+
+        The unique-candidate dedupe key is ``(stream_url_without_fragment,
+        target_id)``. URL fragments are ignored because they do not identify a
+        different stream endpoint for this pipeline, while ``target_id`` is kept
+        in the key so the same stream discovered for different targets remains
+        represented once per target.
+
+        When multiple candidates collide on the same key, the first candidate
+        encountered in the supplied ``sets`` order is retained and later
+        duplicates are dropped without merging enrichment, coordinate,
+        validation, source-metadata, or target-provenance fields. This preserves
+        deterministic insertion order and avoids accidental priority decisions
+        hidden inside merge order. Any future enrichment-priority or
+        source-quality behavior must be implemented as an explicit merge
+        strategy rather than changing this implicit first-seen contract.
+        """
         raw = [c for s in sets for c in s.raw]
         unique_by_key: dict[tuple[str, str | None], CameraCandidate] = {}
         for s in sets:

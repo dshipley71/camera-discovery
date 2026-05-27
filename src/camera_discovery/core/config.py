@@ -50,6 +50,37 @@ def _deprecated_max_streams_env(default: int) -> int:
     return _int_env("CAMERA_DISCOVERY_MAX_STREAMS", default)
 
 
+
+def _repo_root_sources_file() -> Path | None:
+    """Return the repository-root SOURCES.md when running from an editable checkout."""
+
+    # src/camera_discovery/core/config.py -> src/camera_discovery/core ->
+    # src/camera_discovery -> src -> repository root
+    candidate = Path(__file__).resolve().parents[3] / "SOURCES.md"
+    return candidate if candidate.exists() else None
+
+
+def _resolve_sources_file(value: str | Path | None, *, explicit: bool) -> Path | None:
+    """Resolve SOURCES.md robustly for CLI runs launched outside the repo root.
+
+    Explicit paths keep their historical current-working-directory behavior unless
+    they are exactly the default SOURCES.md name and are missing from cwd. The
+    implicit default also falls back to the editable repository root so notebook
+    and console-script runs still use the checked-in source registry.
+    """
+
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    if path.is_absolute() or path.exists():
+        return path
+    if path.name == "SOURCES.md" and path.parent == Path("."):
+        root_sources = _repo_root_sources_file()
+        if root_sources is not None and (not explicit or not path.exists()):
+            return root_sources
+    return path
+
+
 def _stage_model(stage_var: str, llm_model: str | None, default: str = "gemma3:4b") -> str | None:
     return os.getenv(stage_var) or llm_model or default
 
@@ -112,7 +143,8 @@ def load_run_config(
     if configured_browser_backend not in _ALLOWED_BROWSER_BACKENDS:
         allowed = ", ".join(sorted(_ALLOWED_BROWSER_BACKENDS))
         raise ValueError(f"Invalid browser backend {configured_browser_backend!r}; expected one of: {allowed}")
-    configured_sources_file = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
+    configured_sources_value = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
+    sources_file_explicit = sources_file is not None or bool(os.getenv("CAMERA_DISCOVERY_SOURCES_FILE"))
     max_hls_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_HLS_CANDIDATES", 100))
     max_image_snapshot_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES", 50))
     default_candidate_budget = max_hls_candidates + max_image_snapshot_candidates
@@ -163,7 +195,7 @@ def load_run_config(
         max_state_scale_candidate_geocodes=max(0, _int_env("CAMERA_DISCOVERY_MAX_STATE_SCALE_CANDIDATE_GEOCODES", max_total_candidates)),
         http_timeout=_float_env("CAMERA_DISCOVERY_HTTP_TIMEOUT", 20.0),
         seed_urls=seed_urls or [],
-        sources_file=Path(configured_sources_file).expanduser() if configured_sources_file else None,
+        sources_file=_resolve_sources_file(configured_sources_value, explicit=sources_file_explicit),
         discovery_mode=selected_discovery_mode,
         block_patterns=block_patterns or _split_csv_env("CAMERA_DISCOVERY_BLOCK_PATTERNS"),
         enable_candidate_geocoding=_bool_env("CAMERA_DISCOVERY_ENABLE_CANDIDATE_GEOCODING", True),
@@ -204,7 +236,8 @@ def load_harvest_config(
     policy, HTTP, search, browser, and crawl-budget settings.
     """
     load_dotenv(override=False)
-    configured_sources_file = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
+    configured_sources_value = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
+    sources_file_explicit = sources_file is not None or bool(os.getenv("CAMERA_DISCOVERY_SOURCES_FILE"))
     discovery_mode_value = discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE") or "both"
     selected_discovery_mode = DiscoveryMode(discovery_mode_value.strip().lower())
     configured_browser_backend = (browser_backend or _browser_backend_env()).strip().lower()
@@ -220,7 +253,7 @@ def load_harvest_config(
         discovery_mode=selected_discovery_mode,
         seed_urls=seed_urls or [],
         seed_file=Path(seed_file).expanduser() if seed_file else None,
-        sources_file=Path(configured_sources_file).expanduser() if configured_sources_file else None,
+        sources_file=_resolve_sources_file(configured_sources_value, explicit=sources_file_explicit),
         block_patterns=block_patterns or _split_csv_env("CAMERA_DISCOVERY_BLOCK_PATTERNS"),
         max_urls=max(0, int(max_urls if max_urls is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_URLS", 10000))),
         media=media or [],
