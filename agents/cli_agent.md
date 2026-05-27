@@ -1,16 +1,17 @@
-# 06 — CLI Agent
+# CLI Agent
 
-Keep `camera_discovery.cli` thin. It should orchestrate services, not contain business logic.
+Maintain `src/camera_discovery/cli.py` as a thin Typer entry point. It should declare options, load config, resolve progress mode, and delegate to runners.
 
-## Implemented command
+## Commands
 
 ```bash
-camera-discovery run "Get me all public live cameras in California" \
-  --profile fast \
-  --output-dir runs/test
+camera-discovery run [OPTIONS] QUERY
+camera-discovery harvest-urls [OPTIONS] QUERY
 ```
 
-Options:
+`run` delegates to `runners/discovery_run.py`. `harvest-urls` delegates to `runners/harvest_run.py`.
+
+## `run` options
 
 ```text
 --output-dir / -o
@@ -19,22 +20,44 @@ Options:
 --sources-file
 --discovery-mode
 --block-pattern
+--harvest-input
+--browser-backend
 --progress / --no-progress
---progress-style auto|rich|plain|events
+--progress-style
 ```
 
-## CLI flow
+## `harvest-urls` options
 
-1. Load `RunConfig` from CLI and environment.
-2. Create `RunState`.
-3. Run `TargetResolver.resolve_all()`.
-4. Stop only targets with `trust_policy=stop`; continue runnable targets.
-5. Run `CandidateDiscoveryEngine.discover(target)` once per runnable target, in parallel across targets.
-6. Merge candidate sets.
-7. Run `ReviewAndValidationPipeline` with runnable targets and merged candidates.
-8. Write `logs/run_summary.json`.
-9. Print trusted/untrusted GeoJSON counts, review package path, and run explanation summary.
+```text
+--output-dir / -o
+--max-urls
+--discovery-mode
+--seed-url
+--seed-file
+--sources-file
+--block-pattern
+--enable-browser-capture / --disable-browser-capture
+--browser-backend
+--max-search-queries
+--max-search-results-per-query
+--max-source-rows
+--max-pages-per-source
+--max-structured-endpoints-per-page
+--max-browser-pages
+--max-browser-pages-per-host
+--media
+--include-source-metadata / --no-source-metadata
+--write-intermediate-records / --no-write-intermediate-records
+--image-asset-filter
+--progress / --no-progress
+--progress-style
+```
 
-## Progress
+## Rules
 
-Support rich, plain, and event-stream progress. Event mode emits machine-readable JSON lines for external UIs.
+- Keep command bodies thin; no business workflow logic in `cli.py`.
+- Do not duplicate config parsing outside `core/config.py`.
+- Do not add notebook helper code to `src/`.
+- Preserve command names/options unless explicitly requested.
+- Progress styles are `auto`, `rich`, `plain`, and `events`.
+- `events` output is intended for external UIs and notebooks.

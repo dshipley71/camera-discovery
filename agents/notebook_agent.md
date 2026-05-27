@@ -1,28 +1,26 @@
-# 07 — Notebook Agent
+# Notebook Agent
 
-Maintain `notebooks/camera_discovery_live_test.ipynb` as a live-test notebook for the real application.
+Maintain notebooks as live tests and analyst review helpers for the real CLI. Notebook-specific helper/display code belongs in notebooks, not in `src/`.
 
-Notebook-specific helper/display code belongs in the notebook, not in `src/`.
+Current notebooks:
 
-## Notebook must show
+```text
+notebooks/camera_discovery_live_test.ipynb
+notebooks/camera_discovery_harvest_urls_test.ipynb
+```
 
-- query, profile, output directory, discovery mode, and source file;
-- provider/model settings for all advisory LLM stages;
-- target-resolution diagnostics;
-- geocoder-referee diagnostics;
-- candidate discovery summary;
-- browser capture summary;
-- coordinate enrichment diagnostics;
-- candidate semantic-review diagnostics;
-- trusted/untrusted output counts;
-- artifact links;
-- candidate table and embedded map.
+## Required notebook behavior
 
-Do not run `git pull`. Do not hard-code stale external source state. Do not add fake camera feeds, fake coordinates, or simulated validation results.
+- Install/use the current package checkout, not stale remote code.
+- Show query, profile, output directory, discovery mode, source file, browser backend, and media filter.
+- Retrieve `OLLAMA_API_KEY` from Colab userdata when available and configure Ollama Cloud variables explicitly.
+- Show target-resolution diagnostics, source-row summaries, browser preflight/capture diagnostics, harvest summaries, validation summaries, and artifact links.
+- Display candidate tables and maps when artifacts exist.
+- Do not use fake camera feeds, fake coordinates, or simulated validation results.
 
 ## GeoJSON selection
 
-The notebook and map utilities should load camera features in this order or merge available files when appropriate:
+Load camera features in this order or merge available files when appropriate:
 
 ```text
 camera.geojson
@@ -30,38 +28,18 @@ untrusted_camera_candidates.geojson
 untrusted_camera.geojson
 ```
 
-If no GeoJSON exists, show a clear message and leave run diagnostics visible.
+If no GeoJSON exists, show a clear message and leave diagnostics visible.
 
-## Table display
+## Harvest notebooks
 
-Display camera rows with fields such as:
+For HLS-focused testing, prefer no intermediate records unless debugging extraction size or dedupe:
 
-```text
-name/title
-target_label
-location_text
-location_display
-camera_type
-camera_id
-media_type
-stream_url
-source_url
-latitude
-longitude
-thumbnail_url
-camera_refresh_rate
-map_refresh_rate_seconds
-trust_level
-validation_status
-scope_status
-discovery_method
-review_required
+```bash
+camera-discovery harvest-urls "California traffic cameras" \
+  --media .m3u8 \
+  --max-urls 0 \
+  --disable-browser-capture \
+  --progress-style plain
 ```
 
-`camera_candidates_table.csv` is written by the application output pipeline and should be displayed when available.
-
-## Map display
-
-Render an embedded Leaflet map that works in Colab by embedding GeoJSON in the HTML. Popups should include GeoJSON metadata, thumbnail/snapshot images when present, source/media links, and a playback attempt button for HLS/native video. Image snapshot candidates should display snapshot refresh information when available.
-
-Remote playback can fail because of browser/CORS restrictions; do not treat playback failure alone as proof that a stream is invalid.
+For handoff tests, use `run --harvest-input harvest_handoff.json` and show the handoff media filter/default artifact.

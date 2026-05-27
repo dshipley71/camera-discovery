@@ -1,59 +1,41 @@
-# 01 — Core Data Contracts Agent
+# Core Data Contracts Agent
 
-Maintain canonical dataclasses in `src/camera_discovery/core/models.py`:
+Maintain `src/camera_discovery/core/models.py` and `core/config.py` as the canonical runtime contract modules.
 
-- `RunConfig`
-- `TargetIntent`
-- `GeocoderCandidate`
-- `TargetContext`
-- `CameraCandidate`
-- `CandidateSet`
-- `ValidationSummary`
-- `OutputSummary`
-- `RunState`
-
-`RunState` is the single run snapshot. Artifacts are projections of service state, not separate truth sources.
-
-## Required contract fields
-
-Target and candidate contracts must preserve:
+## Key dataclasses/enums
 
 ```text
-target_id
-target_index
-target_label
-canonical_target
-scope_type
-bbox
-bbox_verified
-geometry_status
-trust_policy
-stream_url
-source_url
-discovery_method
-source_metadata
-lat/lon
-coordinate_source
-scope_status
-validation_status
-trust_level
-reasons
+RuntimeProfile: fast, balanced, full
+DiscoveryMode: blind, directory, both, direct
+TrustPolicy: trusted_allowed, review_only, stop
+RunConfig
+HarvestConfig
+TargetIntent
+GeocoderCandidate
+TargetContext
+CameraCandidate
+CandidateSet
+RunState
+HarvestResult
 ```
 
-LLM advisory fields must remain advisory:
+## Config rules
 
-```text
-llm_rank
-llm_relevance_score
-llm_referee_recommendation
-llm_referee_reason
-llm_semantic_decision
-llm_semantic_confidence
-llm_semantic_reason
-```
+- `load_run_config()` loads the normal pipeline configuration.
+- `load_harvest_config()` loads extraction-only harvest configuration.
+- Helper functions such as `_bool_env` and `_split_csv_env` live above the config loader functions.
+- `CAMERA_DISCOVERY_MAX_STREAMS` is deprecated but compatible. Explicit usage emits a `DeprecationWarning`.
+- `SOURCES.md` defaults should resolve from the working directory or the editable repository root.
 
-Do not let advisory fields imply verified geometry, accepted coordinates, validated streams, or trusted output.
+## CandidateSet.merge contract
 
-## Multi-location requirement
+`CandidateSet.merge()` dedupes unique candidates by `(stream_url_without_fragment, target_id)`.
 
-Every candidate and GeoJSON feature must preserve `target_id`, `target_label`, and `target_index`. Merged outputs are allowed only when target provenance remains explicit.
+- First-seen candidate wins for the same stream and target.
+- Same stream under different target IDs is preserved once per target.
+- Later duplicates do not overwrite enrichment, coordinates, source metadata, validation status, or target fields.
+- Any future priority/quality merge behavior must be explicit, not hidden in merge order.
+
+## Trust boundary
+
+Coordinates, validation status, trust level, and final output authorization must be set by deterministic logic. LLMs cannot create trusted camera inventory.
