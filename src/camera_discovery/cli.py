@@ -57,7 +57,7 @@ def run(
             browser_backend=browser_backend,
         )
     except ValueError as exc:
-        console.print(f"Error: {exc}")
+        typer.echo(f"Error: {exc}")
         raise typer.Exit(2) from exc
     progress_mode = _resolve_progress_mode(
         console,
@@ -121,7 +121,7 @@ def harvest_urls(
             image_asset_filter=image_asset_filter,
         )
     except ValueError as exc:
-        console.print(f"Error: {exc}")
+        typer.echo(f"Error: {exc}")
         raise typer.Exit(2) from exc
     progress_mode = _resolve_progress_mode(
         console,
