@@ -60,7 +60,7 @@ camera-discovery/
       harvest_run.py                # Extraction-only harvest workflow used by the CLI
     services/
       target_resolver.py            # Multi-target intent, geocoding, deterministic geometry trust
-      discovery_engine.py           # CandidateDiscoveryEngine orchestration/public compatibility module
+      discovery_engine.py           # CandidateDiscoveryEngine orchestration/public compatibility facade
       harvest_engine.py             # CameraUrlHarvestEngine orchestration/public compatibility module
       harvest_handoff.py            # Harvest handoff/inventory loader for run --harvest-input
       structured_camera_records.py  # Source-provided structured camera record extraction/inventory rows
@@ -84,7 +84,7 @@ Generated caches such as `__pycache__/` and `.pytest_cache/` are not required so
 
 ## Public compatibility modules
 
-- `src/camera_discovery/services/discovery_engine.py` — keeps `CandidateDiscoveryEngine` importable from the historical path while delegating HTTP, HTML, media, JSON, pagination, browser, source-row, and location helper work to focused modules.
+- `src/camera_discovery/services/discovery_engine.py` — keeps `CandidateDiscoveryEngine` importable from the historical path while delegating stage implementation to `discovery/`, `extraction/`, and `enrichment/` modules.
 - `src/camera_discovery/services/harvest_engine.py` — keeps `CameraUrlHarvestEngine` importable from the historical path while delegating media filtering, JSON parsing, record conversion, and output writing to `harvest/` and shared extraction helpers.
 - `src/camera_discovery/services/structured_camera_records.py` — generic, source-agnostic extraction of structured camera records and grouped media assets from public JSON/API/GeoJSON/ArcGIS-style data.
 - `src/camera_discovery/services/harvest_handoff.py` — loads `harvest_handoff.json` or `harvest_camera_inventory.jsonl` and converts source-provided harvest rows into normal `CameraCandidate` objects for `camera-discovery run --harvest-input`.
