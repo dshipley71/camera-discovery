@@ -1,4 +1,4 @@
-# 02 — LLM Provider Agent
+# LLM Provider Agent
 
 Maintain one shared provider factory in `src/camera_discovery/llm/factory.py`.
 
@@ -13,7 +13,7 @@ openai_compatible
 bedrock
 ```
 
-Factory functions currently used by the runners and services:
+Factory functions currently used by runners/services:
 
 ```text
 build_llm_client
@@ -32,4 +32,4 @@ Connection settings:
 - OpenAI-compatible uses `OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_API_KEY`, and `/chat/completions`.
 - Bedrock uses AWS credentials and `AWS_REGION` / `AWS_DEFAULT_REGION`.
 
-Never log secrets.
+Never log secrets. LLMs remain advisory and must not produce coordinates or trusted inventory.

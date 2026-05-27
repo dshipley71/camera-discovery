@@ -1,4 +1,4 @@
-# 03 — TargetResolver Agent
+# Target Resolver Agent
 
 Maintain `TargetResolver.resolve_all() -> list[TargetContext]` and the backward-compatible `resolve()` first-target helper.
 
