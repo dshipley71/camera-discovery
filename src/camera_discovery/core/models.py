@@ -19,6 +19,11 @@ class DiscoveryMode(str, Enum):
     DIRECT = "direct"
 
 
+class HarvestInputMode(str, Enum):
+    HANDOFF_ONLY = "handoff-only"
+    SEED = "seed"
+
+
 class TrustPolicy(str, Enum):
     TRUSTED_ALLOWED = "trusted_allowed"
     REVIEW_ONLY = "review_only"
@@ -100,9 +105,12 @@ class RunConfig:
     # validation is enabled by the selected runtime profile.
     image_snapshot_refresh_delay_seconds: float = 2.0
 
-    # Optional harvest handoff/inventory file used to seed normal run discovery.
-    # This does not bypass target resolution, scope, validation, trust policy, or outputs.
+    # Optional harvest handoff/inventory file used by the normal run workflow.
+    # handoff-only processes only the loaded handoff candidates; seed also runs
+    # native discovery and merges the two candidate sets. Neither mode bypasses
+    # target resolution, scope, validation, trust policy, or outputs.
     harvest_input: Path | None = None
+    harvest_input_mode: HarvestInputMode = HarvestInputMode.HANDOFF_ONLY
 
     @property
     def validation_enabled(self) -> bool:
@@ -233,6 +241,23 @@ class CandidateSet:
 
     @classmethod
     def merge(cls, sets: list[CandidateSet]) -> CandidateSet:
+        """Merge per-target candidate sets with deterministic first-seen semantics.
+
+        The unique-candidate dedupe key is ``(stream_url_without_fragment,
+        target_id)``. URL fragments are ignored because they do not identify a
+        different stream endpoint for this pipeline, while ``target_id`` is kept
+        in the key so the same stream discovered for different targets remains
+        represented once per target.
+
+        When multiple candidates collide on the same key, the first candidate
+        encountered in the supplied ``sets`` order is retained and later
+        duplicates are dropped without merging enrichment, coordinate,
+        validation, source-metadata, or target-provenance fields. This preserves
+        deterministic insertion order and avoids accidental priority decisions
+        hidden inside merge order. Any future enrichment-priority or
+        source-quality behavior must be implemented as an explicit merge
+        strategy rather than changing this implicit first-seen contract.
+        """
         raw = [c for s in sets for c in s.raw]
         unique_by_key: dict[tuple[str, str | None], CameraCandidate] = {}
         for s in sets:

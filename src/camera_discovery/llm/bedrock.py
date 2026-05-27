@@ -14,7 +14,7 @@ class BedrockConverseClient:
         self.region = region or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
         self.timeout = timeout
         try:
-            import boto3  # type: ignore
+            import boto3
         except ImportError as exc:
             raise RuntimeError("Install camera-discovery[bedrock] or boto3 to use Bedrock") from exc
         self.client = boto3.client("bedrock-runtime", region_name=self.region)
