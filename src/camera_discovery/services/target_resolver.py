@@ -384,14 +384,29 @@ class TargetResolver:
             }
             for i, c in enumerate(candidates[:12])
         ]
-        raw = client.chat(
-            [
-                ChatMessage("system", "Return strict JSON only. You are an advisory geocoder-candidate referee; you cannot verify geometry."),
-                ChatMessage("user", self._geocoder_referee_prompt(intent, payload)),
-            ],
-            temperature=0.0,
-        )
-        data = extract_json_object(raw)
+        try:
+            raw = client.chat(
+                [
+                    ChatMessage("system", "Return strict JSON only. You are an advisory geocoder-candidate referee; you cannot verify geometry."),
+                    ChatMessage("user", self._geocoder_referee_prompt(intent, payload)),
+                ],
+                temperature=0.0,
+            )
+            data = extract_json_object(raw)
+        except Exception as exc:
+            write_json(
+                target_logs / "geocoder_referee_llm_error.json",
+                {
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "model": getattr(client, "model", None),
+                    "fallback": "deterministic_geocoder_scores_preserved",
+                },
+            )
+            for c in candidates:
+                c.warnings.append("LLM geocoder referee failed; deterministic geocoder score preserved.")
+            return
+
         write_json(target_logs / "geocoder_referee_llm_raw.json", {"raw": raw, "model": getattr(client, "model", None)})
         write_json(target_logs / "geocoder_referee.json", data)
         rankings = data.get("rankings") if isinstance(data.get("rankings"), list) else []
