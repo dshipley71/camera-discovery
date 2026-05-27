@@ -4,7 +4,7 @@ import warnings
 from typing import Any
 from urllib.parse import urljoin
 
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+from bs4 import BeautifulSoup, FeatureNotFound, XMLParsedAsHTMLWarning
 
 from camera_discovery.extraction.media import _dedupe_media_urls, _looks_like_hls, _looks_like_image
 
@@ -22,7 +22,13 @@ def _html_soup(html: str) -> BeautifulSoup:
     parser = "xml" if (prefix.startswith("<?xml") or prefix.startswith("<rss") or prefix.startswith("<feed") or prefix.startswith("<kml")) else "html.parser"
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-        return BeautifulSoup(html, parser)
+        try:
+            return BeautifulSoup(html, parser)
+        except FeatureNotFound:
+            # Some minimal CI/runtime environments have BeautifulSoup installed
+            # without an XML parser such as lxml. Fall back to the built-in HTML
+            # parser while preserving the warning-suppression contract.
+            return BeautifulSoup(html, "html.parser")
 
 def _media_urls_from_html_tag(tag: Any, base_url: str) -> list[tuple[str, str]]:
     urls: list[tuple[str, str]] = []
