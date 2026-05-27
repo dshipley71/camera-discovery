@@ -346,6 +346,11 @@ def canonical_media_url(url: str) -> str:
     scheme = split.scheme.casefold()
     host = (split.hostname or "").casefold()
     port = split.port
+    if not scheme and split.netloc:
+        # Scheme-relative media URLs are common in JSON payloads after unescaping
+        # strings such as \/\/media.example\/cam.m3u8. Normalize them to https
+        # before writing artifacts so downstream files contain directly usable URLs.
+        scheme = "https"
     if port and not ((scheme == "https" and port == 443) or (scheme == "http" and port == 80)):
         host = f"{host}:{port}"
     netloc = host
@@ -362,7 +367,30 @@ def _strip_extraction_trailers(url: str) -> str:
     # Text/JSON/HTML extraction often leaves escape characters or closing punctuation
     # immediately after the URL. Keep query tokens intact, but trim unambiguous
     # delimiters that cannot be part of a usable media URL.
-    trailing = "\\'\"),;]}"
+    value = _decode_json_url_escapes(value)
+    trailing = "\\\'\"),;}]"
     while value and value[-1] in trailing:
         value = value[:-1].rstrip()
+    return _prefer_embedded_absolute_media_url(value)
+
+
+def _decode_json_url_escapes(value: str) -> str:
+    return (
+        value.replace(r"\/", "/")
+        .replace(r"\u002F", "/")
+        .replace(r"\u002f", "/")
+    )
+
+
+def _prefer_embedded_absolute_media_url(value: str) -> str:
+    # Some feeds expose a scheme-relative media URL as an escaped JSON string,
+    # and extraction can accidentally join it to the endpoint path, e.g.
+    # https://source.example/path/\/\/media.example\/cam.m3u8. If a media URL
+    # contains an embedded scheme-relative absolute URL, prefer the embedded
+    # URL rather than writing two URLs strung together as one artifact entry.
+    default_scheme = urlsplit(value).scheme.casefold() or "https"
+    for match in re.finditer(r"(?<!:)//([A-Za-z0-9.-]+\.[A-Za-z]{2,})(/[^\s'\"<>]*)", value):
+        candidate = f"{default_scheme}://{match.group(1)}{match.group(2)}"
+        if MEDIA_EXTENSION_RE.search(candidate):
+            return candidate
     return value

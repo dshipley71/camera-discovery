@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from camera_discovery.harvest.media_filter import canonical_media_url
+
 import json
 import re
 import threading
@@ -140,6 +142,7 @@ class CandidateProcessingMixin:
         by_key: dict[str, CameraCandidate] = {}
         order: list[str] = []
         for row in rows:
+            row.stream_url = canonical_media_url(row.stream_url)
             key = row.stream_url.split("#", 1)[0]
             existing = by_key.get(key)
             if existing is None:

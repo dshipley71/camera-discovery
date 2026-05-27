@@ -51,6 +51,7 @@ from camera_discovery.harvest.media_filter import (
     URL_RE,
     MediaFilter,
     apply_image_asset_filter,
+    canonical_media_url,
     classify_media_url,
     parse_media_filter,
 )
@@ -474,7 +475,7 @@ class CameraUrlHarvestEngine:
                 media_type = classify_media_url(cleaned)
                 if not media_type:
                     continue
-                absolute = urljoin(source_url, cleaned)
+                absolute = canonical_media_url(urljoin(source_url, cleaned))
                 if absolute in seen_matches or self.source_policy.is_blocked(absolute):
                     continue
                 if media_type == "image_snapshot" and _looks_like_non_camera_asset(absolute):
@@ -483,7 +484,7 @@ class CameraUrlHarvestEngine:
                 records.append(record_from_url(absolute, media_type, source_url=source_url, row=row, method=method, metadata={"text_variant": variant_name}))
             for match in QUOTED_MEDIA_RE.finditer(variant):
                 cleaned = clean_extracted_url(match.group(1))
-                absolute = urljoin(source_url, cleaned)
+                absolute = canonical_media_url(urljoin(source_url, cleaned))
                 media_type = classify_media_url(absolute)
                 if not media_type or absolute in seen_matches or self.source_policy.is_blocked(absolute):
                     continue
@@ -505,7 +506,7 @@ class CameraUrlHarvestEngine:
                 value = tag.get(attr) if hasattr(tag, "get") else None
                 if not isinstance(value, str) or not value.strip():
                     continue
-                absolute = urljoin(source_url, value.strip())
+                absolute = canonical_media_url(urljoin(source_url, value.strip()))
                 media_type = classify_media_url(absolute, key_hint=attr)
                 if not media_type or self.source_policy.is_blocked(absolute):
                     continue
@@ -520,7 +521,7 @@ class CameraUrlHarvestEngine:
             if isinstance(srcset, str):
                 for part in srcset.split(","):
                     candidate = part.strip().split(" ", 1)[0]
-                    absolute = urljoin(source_url, candidate)
+                    absolute = canonical_media_url(urljoin(source_url, candidate))
                     media_type = classify_media_url(absolute, key_hint="srcset")
                     if media_type and not self.source_policy.is_blocked(absolute):
                         records.append(record_from_url(absolute, media_type, source_url=source_url, row=row, method=method, title=tag.get("title") or tag.get("alt") or page_title, metadata={"html_tag": getattr(tag, "name", ""), "html_attr": "srcset"}))
@@ -529,7 +530,7 @@ class CameraUrlHarvestEngine:
     def _extract_from_json_data(self, data: Any, source_url: str, row: dict[str, str], *, method: str) -> list[HarvestedUrlRecord]:
         records: list[HarvestedUrlRecord] = []
         self._walk_json(data, source_url, row, method=method, path="$", records=records, context_metadata=None)
-        return records
+        return dedupe_records(records)
 
     def _walk_json(
         self,
@@ -548,7 +549,7 @@ class CameraUrlHarvestEngine:
                 key_norm = normalize_key(key)
                 if isinstance(child, str) and child.strip():
                     for decoded in text_value_variants(child.strip()):
-                        absolute = urljoin(source_url, decoded)
+                        absolute = canonical_media_url(urljoin(source_url, decoded))
                         media_type = classify_media_url(absolute, key_hint=key_norm)
                         if not media_type or self.source_policy.is_blocked(absolute):
                             continue
