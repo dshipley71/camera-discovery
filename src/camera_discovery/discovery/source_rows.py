@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 from camera_discovery.core.models import TargetContext

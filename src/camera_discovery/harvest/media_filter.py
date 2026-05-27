@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from camera_discovery.core.models import HarvestedUrlRecord

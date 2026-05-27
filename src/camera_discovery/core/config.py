@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -22,6 +23,31 @@ def _float_env(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _split_csv_env(name: str) -> list[str]:
+    value = os.getenv(name, "")
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _deprecated_max_streams_env(default: int) -> int:
+    if "CAMERA_DISCOVERY_MAX_STREAMS" in os.environ:
+        warnings.warn(
+            "CAMERA_DISCOVERY_MAX_STREAMS is deprecated; use "
+            "CAMERA_DISCOVERY_MAX_TOTAL_CANDIDATES plus "
+            "CAMERA_DISCOVERY_MAX_HLS_CANDIDATES and "
+            "CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    return _int_env("CAMERA_DISCOVERY_MAX_STREAMS", default)
 
 
 def _stage_model(stage_var: str, llm_model: str | None, default: str = "gemma3:4b") -> str | None:
@@ -49,13 +75,13 @@ def _default_target_intent_fallback_model(provider: str) -> str | None:
 
 
 
-
 def _browser_backend_env() -> str:
     backend = os.getenv("CAMERA_DISCOVERY_BROWSER_BACKEND", "playwright").strip().lower()
     if backend not in _ALLOWED_BROWSER_BACKENDS:
         allowed = ", ".join(sorted(_ALLOWED_BROWSER_BACKENDS))
         raise ValueError(f"Invalid CAMERA_DISCOVERY_BROWSER_BACKEND={backend!r}; expected one of: {allowed}")
     return backend
+
 
 def load_run_config(
     query: str,
@@ -80,7 +106,8 @@ def load_run_config(
         or os.getenv("BEDROCK_MODEL_ID")
         or default_llm_model
     )
-    selected_discovery_mode = DiscoveryMode((discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE", "both")).strip().lower())
+    discovery_mode_value = discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE") or "both"
+    selected_discovery_mode = DiscoveryMode(discovery_mode_value.strip().lower())
     configured_browser_backend = (browser_backend or _browser_backend_env()).strip().lower()
     if configured_browser_backend not in _ALLOWED_BROWSER_BACKENDS:
         allowed = ", ".join(sorted(_ALLOWED_BROWSER_BACKENDS))
@@ -117,7 +144,7 @@ def load_run_config(
         max_hls_candidates=max_hls_candidates,
         max_image_snapshot_candidates=max_image_snapshot_candidates,
         max_total_candidates=max_total_candidates,
-        max_streams=_int_env("CAMERA_DISCOVERY_MAX_STREAMS", max_total_candidates),
+        max_streams=_deprecated_max_streams_env(max_total_candidates),
         max_directory_pages=max(1, _int_env("CAMERA_DISCOVERY_MAX_DIRECTORY_PAGES", 8)),
         max_structured_endpoints_per_page=max(1, _int_env("CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", 20)),
         enable_browser_capture=_bool_env("CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE", True),
@@ -144,19 +171,6 @@ def load_run_config(
         image_snapshot_refresh_delay_seconds=max(0.0, _float_env("CAMERA_DISCOVERY_IMAGE_SNAPSHOT_REFRESH_DELAY_SECONDS", 2.0)),
         harvest_input=Path(harvest_input).expanduser() if harvest_input else None,
     )
-
-
-def _bool_env(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().casefold() in {"1", "true", "yes", "on"}
-
-
-def _split_csv_env(name: str) -> list[str]:
-    value = os.getenv(name, "")
-    return [part.strip() for part in value.split(",") if part.strip()]
-
 
 
 def load_harvest_config(
@@ -191,7 +205,8 @@ def load_harvest_config(
     """
     load_dotenv(override=False)
     configured_sources_file = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
-    selected_discovery_mode = DiscoveryMode((discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE", "both")).strip().lower())
+    discovery_mode_value = discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE") or "both"
+    selected_discovery_mode = DiscoveryMode(discovery_mode_value.strip().lower())
     configured_browser_backend = (browser_backend or _browser_backend_env()).strip().lower()
     configured_image_asset_filter = (image_asset_filter or os.getenv("CAMERA_DISCOVERY_HARVEST_IMAGE_ASSET_FILTER") or "raw").strip().lower()
     if configured_image_asset_filter not in {"raw", "exclude-page-assets", "camera-evidence"}:

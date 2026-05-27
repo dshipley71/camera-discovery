@@ -105,6 +105,7 @@ from camera_discovery.extraction.pagination import (
     _looks_like_pagination_url,
     _pagination_rows,
 )
+from camera_discovery.extraction.search import clean_ddg_result_url, parse_ddg_result_rows
 
 
 # Compatibility imports/re-exports are intentionally preserved for existing tests

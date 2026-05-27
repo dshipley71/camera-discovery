@@ -6,6 +6,7 @@ from urllib.parse import urljoin, urlparse
 from camera_discovery.core.models import (
     CameraCandidate,
     DiscoveredEndpointRecord,
+    HarvestedCameraRecord,
     HarvestedMediaAsset,
     HarvestedUrlRecord,
 )

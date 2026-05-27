@@ -5,9 +5,10 @@ import json
 from dataclasses import asdict
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from camera_discovery.core.models import DiscoveryMode, HarvestConfig, HarvestedUrlRecord
+from camera_discovery.sources import SourcePolicy
 
 
 def build_source_rows_summary(
