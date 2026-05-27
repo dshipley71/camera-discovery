@@ -50,3 +50,46 @@ def test_harvest_handoff_manifest_loads_inventory_and_converts_candidates(tmp_pa
     assert candidate.source_metadata["validated"] is False
     assert candidate.source_metadata["trusted"] is False
     assert candidate.source_metadata["asset_role"] == "streaming_video"
+
+
+def test_media_filtered_handoff_loads_final_urls_by_default(tmp_path):
+    (tmp_path / "camera_urls.jsonl").write_text(
+        json.dumps({"url": "https://media.example/live.m3u8", "media_type": "hls", "lat": 34.0, "lon": -118.0}) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "harvest_camera_inventory.jsonl").write_text(
+        json.dumps(
+            {
+                "camera_record_id": "cam:1",
+                "lat": 34.0,
+                "lon": -118.0,
+                "media_assets": [
+                    {"url": "https://media.example/live.m3u8", "media_type": "hls"},
+                    {"url": "https://media.example/snapshot.jpg", "media_type": "image_snapshot"},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "harvest_handoff.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "harvest-handoff/v2",
+                "media_filter": [".m3u8"],
+                "handoff_default_scope": "filtered_media_records",
+                "files": {
+                    "camera_urls_jsonl": "camera_urls.jsonl",
+                    "harvest_camera_inventory": "harvest_camera_inventory.jsonl",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    records = load_harvest_handoff(manifest)
+    candidates = harvest_records_to_candidates(records)
+
+    assert [candidate.stream_url for candidate in candidates] == ["https://media.example/live.m3u8"]
+    assert candidates[0].source_metadata["media_type"] == "hls"

@@ -173,3 +173,24 @@ def test_both_mode_directory_and_blind_row_discovery_are_parallel(tmp_path, monk
 
     assert {row["source_provider"] for row in rows} == {"directory", "blind"}
     assert elapsed < 0.35
+
+
+def test_browser_preflight_disables_capture_once(tmp_path, monkeypatch):
+    from camera_discovery.extraction.browser import BrowserPreflightResult
+
+    engine = _engine(tmp_path)
+    calls = {"count": 0}
+
+    def fake_preflight(backend):
+        calls["count"] += 1
+        return BrowserPreflightResult(backend=backend, ok=False, disabled_reason="playwright_chromium_missing", install_hint="install chromium")
+
+    monkeypatch.setattr("camera_discovery.services.discovery_engine.browser_backend_preflight", fake_preflight)
+
+    engine._run_browser_preflight()
+    engine._run_browser_preflight()
+
+    assert calls["count"] == 1
+    assert engine.config.enable_browser_capture is False
+    assert engine._browser_capture_summary["preflight_ok"] is False
+    assert engine._browser_capture_summary["disabled_reason"] == "playwright_chromium_missing"

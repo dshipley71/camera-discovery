@@ -193,3 +193,13 @@ def test_image_asset_filter_modes():
     assert camera in evidence_filtered
     assert hls in evidence_filtered
     assert evidence_summary["removed_by_reason"] == {"missing_camera_image_evidence": 1}
+
+
+def test_canonical_media_url_strips_extraction_trailers_and_default_ports():
+    from camera_discovery.harvest.media_filter import canonical_media_url
+
+    assert canonical_media_url('https://host.example/live.m3u8\\\\') == 'https://host.example/live.m3u8'
+    assert canonical_media_url('https://host.example/live.m3u8\\"') == 'https://host.example/live.m3u8'
+    assert canonical_media_url('https://host.example:443/live.m3u8?a=token') == 'https://host.example/live.m3u8?a=token'
+    assert canonical_media_url('http://host.example:80/snapshot.jpg') == 'http://host.example/snapshot.jpg'
+    assert canonical_media_url('https://host.example:8443/live.m3u8') == 'https://host.example:8443/live.m3u8'

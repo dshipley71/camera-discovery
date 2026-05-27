@@ -62,6 +62,7 @@ logs/browser_capture_decisions.jsonl
 logs/browser_capture_results.jsonl
 logs/browser_capture_errors.jsonl
 logs/playwright_network_capture_errors.jsonl
+logs/browser_capture_preflight.jsonl
 logs/browser_capture_summary.json
 logs/promoted_asset_host_rows.jsonl
 logs/candidate_coordinate_enrichment.json
@@ -83,6 +84,7 @@ logs/camera_candidates_table_status.json
 logs/camera_map_status.json
 logs/output_summary.json
 logs/run_explanation.json
+logs/pipeline_candidate_summary.json
 logs/run_summary.json
 ```
 
@@ -137,7 +139,9 @@ Harvest outputs include:
 - `camera_media_assets.jsonl` — one JSON object per media asset extracted from a camera record, including `camera_record_id`, `asset_id`, `asset_role`, `asset_field`, `field_path`, `media_type`, and provenance.
 - `discovered_endpoints.jsonl` — catalog of discovered JSON/API/GeoJSON/ArcGIS/feed endpoints and source-completeness counts.
 - `harvest_camera_inventory.jsonl` — handoff-oriented camera inventory rows marked source-provided, unvalidated, untrusted, ungeocoded, and not scope-filtered.
-- `harvest_handoff.json` — manifest that points to the handoff files and records counts.
+- `harvest_handoff.json` — manifest that points to the handoff files and records counts. Media-filtered handoffs record `media_filter` and default normal-run loading to the filtered final `camera_urls.jsonl` records so HLS-only handoffs do not inject unrelated image assets by default.
+
+Normal run summary outputs now distinguish native discovery candidates, harvest-input candidates, and the combined final candidate set in `logs/candidate_discovery_summary.json` and `logs/pipeline_candidate_summary.json`.
 - `harvest_summary.json` — summary counts for URLs, structured records, media assets, endpoints, coordinates, orientation, source-reported `inService`, timestamps, update frequencies, and source-row provenance. The `source_rows` object reports whether `SOURCES.md` existed, was loaded, and contributed directory rows, plus counts by provider (`directory`, `blind`, `direct`) and source kind.
 - `logs/source_rows_summary.json` — the same source-row provenance summary written as a standalone log for quick debugging of `--discovery-mode both`, `--sources-file`, and directory-vs-blind behavior.
 

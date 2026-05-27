@@ -19,6 +19,8 @@ Options implemented by `camera_discovery.cli run`:
 | `--sources-file` | `SOURCES.md` | Source registry path. |
 | `--discovery-mode` | `both` | `blind`, `directory`, `both`, or `direct`. |
 | `--block-pattern` | none | Extra global block pattern; may be repeated. |
+| `--harvest-input` | none | Harvest handoff manifest or `harvest_camera_inventory.jsonl` to seed normal run candidates. |
+| `--browser-backend` | env/default | Override `CAMERA_DISCOVERY_BROWSER_BACKEND` for this run. Supported values are `playwright` and `cloakbrowser`. |
 | `--progress / --no-progress` | progress enabled | Enable/disable progress rendering. |
 | `--progress-style` | `auto` | `auto`, `rich`, `plain`, or `events`. |
 
@@ -120,6 +122,8 @@ Provider-specific environment variables:
 | `CAMERA_DISCOVERY_MAX_BROWSER_JSON_ENDPOINTS_PER_PAGE` | `10` | Fetch budget for browser-discovered JSON endpoints. |
 | `CAMERA_DISCOVERY_MAX_BROWSER_NETWORK_EVENTS_LOGGED_PER_PAGE` | `50` | Network event sample limit in logs. |
 
+Before a normal or harvest run attempts repeated browser captures, the selected backend is preflighted once. If Playwright is installed but Chromium is missing, or CloakBrowser cannot be imported, browser capture is disabled for that run with one diagnostic warning instead of repeated page-by-page launch failures. Diagnostics are written to `logs/browser_capture_preflight.jsonl` and summarized in `logs/browser_capture_summary.json`.
+
 ## Image snapshots
 
 | Variable | Default | Meaning |
@@ -138,7 +142,9 @@ camera-discovery run "California traffic cameras" \
   --harvest-input runs/harvest-california/harvest_handoff.json
 ```
 
-`--harvest-input` also accepts a direct `harvest_camera_inventory.jsonl` path. Handoff rows are treated as source-provided candidate data only. They are not trusted, validated, live/dead classified, geocoded, or scope-filtered merely because they came from harvest output. Normal `run` behavior still resolves the target, applies scope/review/validation/trust/output behavior according to configuration, and writes normal inventory artifacts. Source-provided coordinates are preserved when plausible so the application does not need to rediscover metadata that public endpoints already supplied.
+`--harvest-input` also accepts a direct `harvest_camera_inventory.jsonl` path. Handoff rows are treated as source-provided candidate data only. They are not trusted, validated, live/dead classified, or geocoded merely because they came from harvest output. Normal `run` behavior still resolves the target, applies deterministic scope/review/validation/trust/output behavior according to configuration, and writes normal inventory artifacts. Source-provided coordinates are preserved when plausible so the application does not need to rediscover metadata that public endpoints already supplied.
+
+Media-filtered harvest handoffs are media-filter aware. For example, a handoff generated with `--media .m3u8` defaults to loading the final filtered `camera_urls.jsonl` rows into `camera-discovery run`, rather than injecting the broader structured inventory containing image snapshots or other media assets. Unfiltered/all-media handoffs preserve the broader inventory default for compatibility. Use `--max-urls 0` when you need a true all-URL harvest rather than a capped final output.
 
 
 ## Harvest debug/intermediate outputs

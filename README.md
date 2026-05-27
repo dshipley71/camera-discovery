@@ -91,7 +91,7 @@ Supported browser backends:
 | Playwright | `CAMERA_DISCOVERY_BROWSER_BACKEND=playwright` | `python -m pip install -e .[playwright]` and `python -m playwright install chromium` |
 | CloakBrowser | `CAMERA_DISCOVERY_BROWSER_BACKEND=cloakbrowser` | `python -m pip install -e .[cloakbrowser]` |
 
-Playwright is the default backend. Capture diagnostics are written to `logs/browser_capture_decisions.jsonl`, `logs/browser_capture_results.jsonl`, `logs/browser_capture_errors.jsonl`, `logs/page_discovery_signals.jsonl`, and `logs/browser_capture_summary.json`.
+Playwright is the default backend. Normal `run` also accepts `--browser-backend playwright|cloakbrowser` to override the environment for one invocation. Capture diagnostics are written to `logs/browser_capture_preflight.jsonl`, `logs/browser_capture_decisions.jsonl`, `logs/browser_capture_results.jsonl`, `logs/browser_capture_errors.jsonl`, `logs/page_discovery_signals.jsonl`, and `logs/browser_capture_summary.json`. If the selected browser backend is unavailable, the run disables browser capture once with a clear diagnostic instead of repeatedly failing page captures.
 
 ### 5. Validation and outputs
 
@@ -315,7 +315,8 @@ A normal run can consume the handoff without bypassing normal inventory behavior
 ```bash
 camera-discovery run "California traffic cameras" \
   --output-dir runs/run-from-harvest \
-  --harvest-input runs/harvest-california/harvest_handoff.json
+  --harvest-input runs/harvest-california/harvest_handoff.json \
+  --browser-backend cloakbrowser
 ```
 
-Harvest handoff data is source-provided and unvalidated. It seeds/enriches candidates so the run workflow can avoid rediscovering metadata the source already exposed, while still applying normal target-aware processing.
+Harvest handoff data is source-provided and unvalidated. It seeds/enriches candidates so the run workflow can avoid rediscovering metadata the source already exposed, while still applying normal target-aware processing. Media-filtered handoffs are honored by default: an HLS-only harvest loads the filtered final HLS URL rows into normal run mode instead of injecting the full structured inventory of image snapshots and other media assets. Coordinate-bearing harvest-input candidates are deterministically scoped against the verified target bbox/polygon during the normal run. Use `--max-urls 0` for an uncapped all-URL harvest when completeness is more important than artifact size.
