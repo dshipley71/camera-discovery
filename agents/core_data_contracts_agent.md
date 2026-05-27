@@ -57,3 +57,7 @@ Do not let advisory fields imply verified geometry, accepted coordinates, valida
 ## Multi-location requirement
 
 Every candidate and GeoJSON feature must preserve `target_id`, `target_label`, and `target_index`. Merged outputs are allowed only when target provenance remains explicit.
+
+## Candidate merge semantics
+
+`CandidateSet.merge()` is a deterministic first-seen merge contract, not a quality-ranking strategy. It deduplicates unique candidates by `(stream_url without URL fragment, target_id)`. Keep `target_id` in the merge key so the same stream discovered under different targets remains represented once per target. When the same stream and same target collide, keep the first candidate and drop later duplicates without silently merging enrichment fields, coordinates, validation status, source metadata, reasons, or target provenance. If future behavior needs source-quality or enrichment-priority rules, implement that as an explicit merge strategy with tests rather than changing merge order accidentally.
