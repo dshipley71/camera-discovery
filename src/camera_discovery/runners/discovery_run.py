@@ -18,6 +18,7 @@ from camera_discovery.cli_commands.progress import (
     _make_progress,
 )
 from camera_discovery.core.models import CameraCandidate, CandidateSet, RunConfig, RunState, TargetContext, TrustPolicy
+from camera_discovery.discovery.candidate_priority import priority_bucket_counts, prioritize_candidate_set
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
 from camera_discovery.services.harvest_handoff import (
     describe_harvest_handoff,
@@ -200,7 +201,7 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
                 _emit_progress_stream_event("harvest_input_loaded", {"path": str(cfg.harvest_input), "candidates": total_handoff_candidates, "stage": "complete"})
 
         state.candidate_sets_by_target = per_target_sets
-        merged = CandidateSet.merge(list(per_target_sets.values()))
+        merged = prioritize_candidate_set(CandidateSet.merge(list(per_target_sets.values())))
         state.candidates = merged
         combined_summary = _candidate_set_summary(merged)
         _write_pipeline_candidate_summary(cfg, native_candidate_summary, harvest_input_summary, combined_summary)
@@ -291,6 +292,10 @@ def _candidate_set_summary(candidates: CandidateSet) -> dict[str, object]:
         "by_media_type": dict(sorted(Counter(str((c.source_metadata or {}).get("media_type") or "unknown") for c in candidates.unique).items())),
         "by_scope_status": dict(sorted(Counter(c.scope_status for c in candidates.unique).items())),
         "by_discovery_method": dict(sorted(Counter(c.discovery_method for c in candidates.unique).items())),
+        "by_priority_bucket": priority_bucket_counts(candidates.unique),
+        "located_in_scope_candidates": sum(1 for c in candidates.unique if c.has_coordinates and c.scope_status == "in_scope"),
+        "located_out_of_scope_candidates": sum(1 for c in candidates.unique if c.has_coordinates and c.scope_status == "out_of_scope"),
+        "unlocated_candidates": sum(1 for c in candidates.unique if not c.has_coordinates),
     }
 
 

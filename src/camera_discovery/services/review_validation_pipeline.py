@@ -17,6 +17,11 @@ from camera_discovery.core.models import (
     TrustPolicy,
     ValidationSummary,
 )
+from camera_discovery.discovery.candidate_priority import (
+    candidate_priority_label,
+    prioritize_candidates,
+    priority_bucket_counts,
+)
 from camera_discovery.utils.geojson_viewer import write_embedded_camera_map
 from camera_discovery.utils.io import write_json, write_jsonl
 
@@ -49,7 +54,14 @@ class ReviewAndValidationPipeline:
         return v, self._write_outputs(targets, target_map, candidates, v)
 
     def _validate(self, candidates: CandidateSet, v: ValidationSummary) -> None:
-        rows = candidates.in_scope or candidates.review
+        rows = prioritize_candidates(candidates.in_scope or candidates.review)
+        write_json(
+            self.logs_dir / "validation_priority_summary.json",
+            {
+                "selected_candidates": len(rows),
+                "selected_by_priority_bucket": priority_bucket_counts(rows),
+            },
+        )
         for c in rows:
             v.attempted += 1
             status = self._validate_candidate(c)
@@ -145,13 +157,14 @@ class ReviewAndValidationPipeline:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.candidates_dir.mkdir(parents=True, exist_ok=True)
         trusted_allowed = {t.target_id for t in targets if t.trust_policy == TrustPolicy.TRUSTED_ALLOWED and t.bbox_verified}
-        trusted = [
-            c for c in candidates.unique
+        prioritized_unique = prioritize_candidates(candidates.unique)
+        trusted = prioritize_candidates(
+            c for c in prioritized_unique
             if c.trust_level == "trusted" and c.scope_status == "in_scope" and c.has_coordinates and c.target_id in trusted_allowed
-        ]
+        )
         trusted_keys = {(c.stream_url, c.target_id) for c in trusted}
-        coordinate_bearing = [c for c in candidates.unique if c.has_coordinates]
-        review = [c for c in coordinate_bearing if (c.stream_url, c.target_id) not in trusted_keys]
+        coordinate_bearing = prioritize_candidates(c for c in prioritized_unique if c.has_coordinates)
+        review = prioritize_candidates(c for c in coordinate_bearing if (c.stream_url, c.target_id) not in trusted_keys)
         out = OutputSummary()
         out.coordinate_bearing_candidates = len(coordinate_bearing)
         if trusted:
@@ -171,10 +184,14 @@ class ReviewAndValidationPipeline:
             (self.config.output_dir / "untrusted_camera_candidates.geojson").unlink()
         out.coordinate_bearing_geojson_features_written = out.trusted_geojson_features_written + out.untrusted_geojson_features_written
         out.coordinate_bearing_without_geojson = max(0, out.coordinate_bearing_candidates - out.coordinate_bearing_geojson_features_written)
-        table_path = self._write_candidate_table(candidates.unique)
+        table_path = self._write_candidate_table(prioritized_unique)
         out.camera_candidates_table_csv = str(table_path)
-        out.camera_candidates_table_rows = len(candidates.unique)
-        write_jsonl(self.logs_dir / "validation_results.jsonl", [asdict(c) for c in candidates.unique])
+        out.camera_candidates_table_rows = len(prioritized_unique)
+        write_jsonl(self.logs_dir / "validation_results.jsonl", [asdict(c) for c in prioritized_unique])
+        write_json(
+            self.logs_dir / "candidate_priority_summary.json",
+            _candidate_priority_summary(prioritized_unique),
+        )
         write_json(self.logs_dir / "validation_summary.json", asdict(v))
         out.map_html = str(self._write_map())
         out.review_artifacts_zip = str(self.config.output_dir / "review_artifacts.zip")
@@ -212,6 +229,7 @@ class ReviewAndValidationPipeline:
                 "Fast profile is review-only; use balanced/full validation when you want stream validation and trusted output authorization.",
             ],
             "candidate_source_counts": {"native_discovery": native_candidates, "harvest_input": harvest_input_candidates, "combined": len(candidates.unique)},
+            "candidate_priority_counts": priority_bucket_counts(candidates.unique),
             "media_type_counts": media_counts,
             "source_provider_counts": provider_counts,
             "geojson_metrics": {
@@ -279,6 +297,7 @@ class ReviewAndValidationPipeline:
             "camera_refresh_rate",
             "map_refresh_rate_seconds",
             "media_type",
+            "candidate_priority_bucket",
             "trust_level",
             "validation_status",
             "scope_status",
@@ -327,6 +346,7 @@ class ReviewAndValidationPipeline:
                         "camera_refresh_rate": _camera_refresh_rate(metadata),
                         "map_refresh_rate_seconds": _camera_map_refresh_rate_seconds(metadata, self.config.image_snapshot_refresh_delay_seconds) if media_type == "image_snapshot" else None,
                         "media_type": media_type,
+                        "candidate_priority_bucket": candidate_priority_label(row),
                         "trust_level": row.trust_level,
                         "validation_status": row.validation_status,
                         "scope_status": row.scope_status,
@@ -380,6 +400,7 @@ class ReviewAndValidationPipeline:
                     "json_record_path": metadata.get("json_record_path"),
                     "json_record_schema_hint": metadata.get("json_record_schema_hint"),
                     "media_type": media_type,
+                    "candidate_priority_bucket": candidate_priority_label(c),
                     "snapshot_url": snapshot_url,
                     "thumbnail_url": snapshot_url,
                     "camera_refresh_rate": camera_refresh_rate,
@@ -449,6 +470,21 @@ class ReviewAndValidationPipeline:
                         if p.is_file():
                             z.write(p, str(p.relative_to(self.config.output_dir)))
         return zpath
+
+
+def _candidate_priority_summary(candidates: list[CameraCandidate]) -> dict[str, object]:
+    located = [candidate for candidate in candidates if candidate.has_coordinates]
+    unlocated = [candidate for candidate in candidates if not candidate.has_coordinates]
+    located_in_scope = [candidate for candidate in located if candidate.scope_status == "in_scope"]
+    located_out_of_scope = [candidate for candidate in located if candidate.scope_status == "out_of_scope"]
+    return {
+        "total_candidates": len(candidates),
+        "located_candidates": len(located),
+        "located_in_scope_candidates": len(located_in_scope),
+        "located_out_of_scope_candidates": len(located_out_of_scope),
+        "unlocated_candidates": len(unlocated),
+        "by_priority_bucket": priority_bucket_counts(candidates),
+    }
 
 
 def _camera_location_display(candidate: CameraCandidate, target: TargetContext | None) -> str | None:
