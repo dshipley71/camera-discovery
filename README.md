@@ -212,6 +212,20 @@ logs/candidate_priority_summary.json
 logs/validation_priority_summary.json
 ```
 
+
+## Google Colab notebooks
+
+End-to-end Colab notebooks live under `notebooks/`:
+
+| Notebook | Purpose |
+|---|---|
+| `camera_discovery_harvest_hls_only_test.ipynb` | HLS-only harvest workflow using routine `.m3u8` extraction settings. |
+| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | HLS harvest followed by `run --profile full --harvest-input ...`. |
+| `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | All-media harvest followed by full pipeline validation/review. |
+| `camera_discovery_pipeline_only_profiles_test.ipynb` | Pipeline-only comparison for `fast`, `balanced`, and `full` profiles. |
+
+The notebooks include Ollama Cloud / `OLLAMA_API_KEY` Colab userdata setup, CLI/import smoke tests, browser-backend visibility, completion-aware run guards, diagnostic inspection cells, and optional artifact packaging. Notebook-only helper code remains inside the notebooks and is not part of `src/`.
+
 ## Development checks
 
 ```bash

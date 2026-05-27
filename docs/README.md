@@ -13,5 +13,6 @@ Active source-aligned documentation:
 | `acceptance.md` | Verification commands and acceptance expectations. |
 | `sources_blueprint.md` | `SOURCES.md` format and source-policy rules. |
 | `../agents/*.md` | Role-specific coding-agent instructions. |
+| `../notebooks/README.md` | Colab notebook scenarios and usage notes. |
 
 Historical `docs/codex_prompt_*.md` files are implementation traceability records. They may mention older module locations; current source and the active docs above are authoritative.
