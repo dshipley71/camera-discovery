@@ -1,67 +1,65 @@
-# Acceptance Criteria
+# Acceptance and Verification
 
-The implementation is accepted when the documentation and code agree on the following behavior.
+Use the smallest test set that proves the change, then run the full suite for broad source changes.
 
-## Architecture and trust boundary
+## Standard checks
 
-1. The target-aware workflow is organized around thin CLI commands, `runners/discovery_run.py`, `TargetResolver`, `CandidateDiscoveryEngine`, and `ReviewAndValidationPipeline`.
-2. `RunState` remains the canonical run snapshot written to `logs/run_summary.json`.
-3. LLMs are advisory evidence interpreters for target intent, geocoder referee ranking, candidate location-name inference, and candidate semantic review.
-4. Deterministic code remains the authority for geometry verification, coordinate acceptance, stream/image validation, trusted-output authorization, and artifact writing.
-5. No trusted `camera.geojson` is created from LLM-only geometry, LLM-only coordinates, LLM-only stream judgments, or LLM-only semantic review.
+```bash
+python -m compileall -q src tests
+PYTHONPATH=src python -m pytest -q
+python -m ruff check src tests
+python -m mypy src/camera_discovery/core src/camera_discovery/llm
+```
 
-## Target resolution
+GitHub Actions runs compile, Ruff, pytest, and a MyPy smoke check on pushes/PRs for Python 3.11 and 3.12.
 
-1. Multi-location queries are split into independent targets.
-2. Every target has stable `target_id`, `target_index`, `target_label`, scope fields, target-specific diagnostics, and a trust policy.
-3. LLM-provided bbox/coordinate hints are stored only as unverified review hints.
-4. Geocoder candidates are deterministically rejected for invalid/missing/implausible bboxes, wrong admin hints, wrong result types for broad scopes, or invalid coordinate ranges.
-5. The LLM geocoder referee cannot revive deterministic-rejected candidates.
+## Contract checks
 
-## Discovery
+Run targeted contract tests when changing public interfaces:
 
-1. `blind`, `directory`, `both`, and `direct` modes work through the same normalized extraction path.
-2. In `both` mode, directory rows and blind-search rows are discovered in parallel before extraction.
-3. `SOURCES.md` allowed rows are used only in `directory` and `both`; blocked rows are global deny rules for all modes.
-4. Direct HLS seed/source URLs become candidates without browser capture.
-5. Static extraction handles HLS URLs, image snapshot URLs, HTML image/source tags, JSON responses, linked JSON/API/feed/map-layer endpoints, GeoJSON features, ArcGIS-style records, and JavaScript config blobs.
-6. Browser capture is optional, budgeted, logged, and available through Playwright by default or CloakBrowser when configured.
-7. JSON endpoint metadata is preserved into candidates, tables, GeoJSON, and maps when available.
-8. Candidate budgets separately account for HLS, image snapshot, and total candidates.
-9. `CandidateSet.merge()` preserves same-stream candidates across different targets by including `target_id` in its dedupe key.
-10. Duplicate candidates for the same stream and same target retain the first-seen candidate and do not silently merge later enrichment, coordinate, validation, reason, source-metadata, or target-provenance fields.
+```bash
+PYTHONPATH=src python -m pytest -q \
+  tests/test_package_contracts.py \
+  tests/test_cli_contracts.py \
+  tests/test_config_parameter_alignment.py
+```
 
-## Harvest
+Public imports that must remain valid:
 
-1. Harvest mode is extraction-only and is coordinated by `runners/harvest_run.py` and `CameraUrlHarvestEngine`.
-2. Harvest mode bypasses target resolution, geocoding, validation, trust classification, scope enforcement, LLM review, GeoJSON/maps, `cameras.md`, and review ZIP generation.
-3. `run --harvest-input` consumes source-provided harvest data only as candidate seed/enrichment data and still applies the normal target-aware trust, scope, validation, and output workflow.
-4. Harvest helper responsibilities stay under `harvest/`; shared extraction helpers stay under `extraction/`.
+```python
+from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
+from camera_discovery.services.harvest_engine import CameraUrlHarvestEngine
+from camera_discovery.services.review_validation_pipeline import ReviewAndValidationPipeline
+from camera_discovery.services.target_resolver import TargetResolver
+```
 
-## Coordinates and scope
+## Behavior-specific tests
 
-1. Candidate coordinates come from source records, URL/metadata evidence, or Nominatim geocoding.
-2. Optional LLM location inference can produce geocoder query strings only; it cannot return coordinates.
-3. Candidate geocoder results are checked against verified target bbox when available.
-4. Candidates without coordinates remain in `camera_candidates_table.csv` and JSONL diagnostics but are not written to GeoJSON.
-5. Candidates outside a verified bbox are rejected.
-6. Candidates with coordinates but without verified target geometry remain review-only.
+| Area | Tests |
+|---|---|
+| Source policy | `tests/test_source_policy.py` |
+| Blind-search parsing | `tests/test_blind_search_parsing.py` |
+| Harvest media extraction | `tests/test_harvest_media_extraction.py` |
+| Harvest structured records | `tests/test_harvest_structured_records.py` |
+| Harvest handoff | `tests/test_harvest_handoff.py`, `tests/test_run_harvest_input.py` |
+| Browser backend/preflight | `tests/test_browser_capture_expansion.py`, `tests/test_cloakbrowser_backend.py` |
+| JSON endpoint metadata | `tests/test_json_endpoint_metadata_integration.py` |
+| Candidate priority | `tests/test_candidate_priority.py` |
+| Multi-target behavior | `tests/test_multi_target_contracts.py` |
+| Output filtering/tables/maps | `tests/test_output_filtering.py`, `tests/test_coordinate_enrichment_and_tables.py`, `tests/test_geojson_viewer_contracts.py` |
+| LLM/provider config | `tests/test_llm_provider_configuration.py` |
+| Progress events | `tests/test_progress_events_contract.py`, `tests/test_cli_progress.py` |
 
-## Validation and output
+## Notebook acceptance
 
-1. `fast` profile disables validation and blocks trusted output.
-2. `balanced` profile validates HLS playlist responses and image snapshots with real HTTP checks.
-3. `full` profile additionally checks first HLS segment/variant reachability through the current `ffprobe_enabled` code path.
-4. Image snapshot validation rejects obvious static assets and non-image responses and marks unchanged image endpoints as untrusted/static-unverified rather than trusted.
-5. Trusted outputs are created only when trusted candidates exist; empty trusted files are not created.
-6. `camera_candidates_table.csv`, `map.html`, `RUN_EXPLANATION.md`, `review_artifacts.zip`, validation diagnostics, and output summaries are written when output writing runs.
-7. The map merges trusted and untrusted GeoJSON when both exist, includes a camera type/trust legend, supports thumbnail/snapshot display, and provides HLS/native playback attempts.
+Notebook updates should use real CLI commands against the package. Notebook-specific helper/display code belongs in the notebook. Do not move notebook-only helpers into `src/`.
 
-## Tests and notebook
+Colab notebooks should retrieve `OLLAMA_API_KEY` from Colab userdata when available and set Ollama Cloud variables explicitly for reproducible runs.
 
-1. `python -m compileall -q src tests` passes.
-2. `python -m ruff check src tests` passes when development dependencies are installed.
-3. `PYTHONPATH=src python -m pytest -q` passes in an environment with required optional dependencies available or skips optional integrations explicitly.
-4. The CI workflow runs compile checks, Ruff undefined-name lint, and pytest on pull requests and pushes to `main`/`dev`.
-5. The notebook remains valid JSON and keeps notebook-specific helper code inside the notebook.
-6. Tests and docs do not introduce synthetic camera inventories, fake streams, fabricated coordinates, fake validation results, or hard-coded real-world target/source behavior.
+## Trusted-output acceptance
+
+Never create empty trusted files. Trusted artifacts require verified target geometry, in-scope coordinates, validation success, and `trust_policy=trusted_allowed`. Review artifacts must clearly remain untrusted.
+
+## Artifact-size caution
+
+`--write-intermediate-records` can write very large harvest files. It is appropriate for extraction debugging, not routine notebook use.

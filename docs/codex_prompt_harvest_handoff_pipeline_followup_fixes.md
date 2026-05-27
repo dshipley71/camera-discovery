@@ -1,3 +1,5 @@
+> **Source-alignment note:** This is a historical Codex implementation prompt retained for traceability. The current runtime documentation is in the root `README.md`, `docs/runtime_configuration.md`, `docs/output_artifacts.md`, and the source-aligned agent docs. Do not treat this prompt as the authoritative description of the current code if it conflicts with `src/camera_discovery/`.
+
 # Codex Prompt — Harvest Handoff and Pipeline Follow-Up Fixes
 
 You are working in the `camera-discovery` repository after the structural refactor and blind-search repair. Implement the requested follow-up fixes for the harvest handoff into normal pipeline runs. Follow the repository's root `AGENTS.md`, nested implementation notes, and current `/docs` conventions. The source code is authoritative. If this prompt mentions a stale file, function, class, option, or artifact name, adapt to the verified current source instead of creating duplicate implementations.

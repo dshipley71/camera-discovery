@@ -1,72 +1,47 @@
 # AGENTS.md — Camera Discovery Source-Aligned Build Rules
 
-The current application is a streamlined public-camera discovery pipeline built around thin CLI commands, workflow runners, and three primary target-aware workflow services:
+This repository implements a public-camera discovery CLI with two deliberately separate workflows:
 
-1. `TargetResolver`
-2. `CandidateDiscoveryEngine`
-3. `ReviewAndValidationPipeline`
+1. `camera-discovery run` — the normal target-aware pipeline: target resolution, discovery, coordinate/scope handling, optional validation, trusted/review artifacts, and review packaging.
+2. `camera-discovery harvest-urls` — extraction-only raw camera/media URL harvesting: no target resolution, geocoding, validation, trust, scope filtering, GeoJSON/map output, `cameras.md`, or review ZIP.
 
-Harvest mode is an extraction-only workflow coordinated by `runners/harvest_run.py` and `CameraUrlHarvestEngine`. Shared helpers belong in focused modules such as `extraction/`, `discovery/`, `harvest/`, and `enrichment/`; do not collapse them back into god files.
+The current source is organized around thin CLI commands, workflow runners, focused stage modules, and public service/facade classes. Do not collapse code back into god files. The canonical public service imports remain:
 
-Use one canonical `RunState`. Avoid scattered state mutation, duplicated artifact writers, synthetic fallbacks, and source-specific hacks.
-
-## Behavioral Guidelines
-
-### 1. Think Before Coding
-
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
-
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-
-### 2. Simplicity First
-
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
-
-### 3. Surgical Changes
-
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
-
-## 4. Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
-```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
+```python
+from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
+from camera_discovery.services.harvest_engine import CameraUrlHarvestEngine
+from camera_discovery.services.review_validation_pipeline import ReviewAndValidationPipeline
+from camera_discovery.services.target_resolver import TargetResolver
 ```
 
-## LLM usage
+## Current architecture boundaries
+
+```text
+src/camera_discovery/
+  cli.py                       # Typer command declarations and config loading only
+  cli_commands/                # progress renderers and console-output helpers
+  core/                        # dataclasses, runtime config, progress-event contracts
+  runners/                     # execute_discovery_run and execute_harvest_run
+  services/                    # public workflow facades / long-lived service classes
+  discovery/                   # discovery stage helpers: source rows, extraction dispatch, priority, artifacts
+  extraction/                  # shared HTTP/HTML/media/JSON/search/browser/pagination helpers
+  harvest/                     # harvest-specific media filters, records, JSON metadata, outputs
+  enrichment/                  # coordinate/location enrichment helpers
+  sources/                     # SOURCES.md registry and global block policy
+  llm/                         # shared provider factory and provider adapters
+  utils/                       # JSONL/GeoJSON/map helpers
+```
+
+## Behavioral rules
+
+- Do not create fake camera records, fake streams, fake validation results, fake coordinates, fake GeoJSON, fake browser success, or synthetic runtime inventories.
+- Do not hard-code real-world locations, agencies, source domains, source-specific behavior, or one-off camera types. Generic media normalization, URL canonicalization, candidate-priority scoring, and diagnostics are allowed.
+- Notebook-specific helper/display code belongs in notebooks, not in `src/`.
+- Keep source and notebook logic separate. Do not create `src/camera_discovery/notebook/`.
+- Do not weaken tests to make a change pass.
+- Existing CLI names/options, public import paths, environment variables, artifact names, schemas, and source-block semantics must remain compatible unless explicitly changed.
+
+## LLM usage and deterministic authority
 
 LLMs are advisory evidence interpreters/rankers only. Current advisory stages are:
 
@@ -77,38 +52,16 @@ LLMs are advisory evidence interpreters/rankers only. Current advisory stages ar
 
 The candidate location-name inference stage may return place names/query variants only. It must never return coordinates.
 
-## Deterministic/tool authority
-
 Deterministic code/tools remain authoritative for:
 
 1. bbox and geometry verification;
 2. candidate coordinate acceptance;
-3. stream/image validation;
-4. trusted output authorization;
-5. final artifact writing.
+3. scope classification;
+4. media validation;
+5. trusted output authorization;
+6. final artifact writing.
 
-## Provider support
-
-Use the shared provider factory in `src/camera_discovery/llm/factory.py`. Supported providers are:
-
-- `ollama` and `ollama-cloud` through Ollama-compatible `/api/chat`;
-- `openai-compatible`, `openai`, or `openai_compatible` through `/v1/chat/completions`;
-- `bedrock` through AWS Bedrock Runtime Converse API.
-
-Stage-specific provider/model overrides must share the common factory path.
-
-## Guardrails
-
-- No LLM-only trusted geometry.
-- No LLM-invented coordinates.
-- No LLM-only trusted camera inventory.
-- No fabricated streams, camera records, coordinates, validation results, or runtime camera inventories.
-- No hard-coded real-world target/source/agency/domain behavior.
-- Generic camera-type normalization constants are allowed.
-- No empty trusted output files.
-- Notebook-specific helper code belongs in the notebook, not in `src/`.
-
-## Multi-location requirement
+## Target and multi-location rules
 
 Users may specify one or more places/locations in a single query. Do not collapse multi-location queries into one combined target.
 
@@ -122,12 +75,47 @@ Each target must receive stable target metadata, target-specific diagnostics, ta
 
 ## Source providers and global block policy
 
-`DirectorySourceProvider` is an input adapter used by the `CandidateDiscoveryEngine` workflow, not a separate orchestration layer. Its implementation lives with source-row helpers in `discovery/source_rows.py` and reads enabled allowed source URLs from `SOURCES.md`.
+`DirectorySourceProvider` is an input adapter used by the discovery workflow, not a separate orchestration layer. Its implementation lives with source-row helpers in `discovery/source_rows.py` and reads enabled allowed source URLs from `SOURCES.md`.
 
-Allowed source rows are used only in `directory` and `both` modes. Blocked rows are global deny rules and must be applied to blind search, directory rows, direct seed URLs, fetched pages/endpoints, extracted media URLs, and final candidates.
+Allowed source rows are used only in `directory` and `both` modes. Blocked rows are global deny rules and must apply to blind search, directory rows, direct seed URLs, fetched pages/endpoints, extracted media URLs, harvest outputs, and final candidates.
 
-`both` mode should discover blind rows and directory rows in parallel, then normalize them into the same extraction path.
+`both` mode should discover blind rows and directory rows, then normalize them into the same extraction path.
 
 ## Browser capture
 
-Browser capture is optional and budgeted. Playwright is the default backend. CloakBrowser is an optional backend selected by `CAMERA_DISCOVERY_BROWSER_BACKEND=cloakbrowser`. Keep backend selection behind the current abstraction and preserve diagnostics.
+Browser capture is optional, budgeted, and preflighted. Playwright is the default backend. CloakBrowser is optional and may be selected with either `CAMERA_DISCOVERY_BROWSER_BACKEND=cloakbrowser` or `--browser-backend cloakbrowser` on both `run` and `harvest-urls`.
+
+If the selected backend is unavailable, the application should emit a clear preflight diagnostic and avoid repeated page-level browser failures. Do not fake browser success.
+
+## Harvest mode and handoff
+
+Harvest mode is extraction-only. It bypasses target resolution, geocoding, validation, trust, scope gates, LLM review, GeoJSON/maps, `cameras.md`, and review ZIPs.
+
+`harvest_handoff.json` currently uses `schema_version: harvest-handoff/v2`. Media-filtered harvests default to filtered media records such as `camera_urls.jsonl`; all-media harvests may default to structured inventory. Normal `run --harvest-input` then treats harvested records as untrusted seed data and applies target resolution, deterministic scope gates, validation, and trust rules.
+
+## Candidate priority
+
+Coordinate-bearing, deterministically in-scope candidates should be prioritized for validation budgets, candidate tables, and review/GeoJSON ordering. Coordinates alone never make a candidate trusted; existing validation, scope, and trust gates remain authoritative. Coordinate-bearing out-of-scope candidates must not be promoted above in-scope candidates.
+
+## Provider support
+
+Use the shared provider factory in `src/camera_discovery/llm/factory.py`. Supported provider values are:
+
+- `ollama` and `ollama-cloud` through Ollama-compatible `/api/chat`;
+- `openai-compatible`, `openai`, or `openai_compatible` through `/v1/chat/completions`;
+- `bedrock` through AWS Bedrock Runtime Converse API.
+
+Stage-specific provider/model overrides must share the common factory path. Never log secrets.
+
+## Verification expectations
+
+Before returning changes, run the most relevant checks. For broad source changes, run:
+
+```bash
+python -m compileall -q src tests
+PYTHONPATH=src python -m pytest -q
+python -m ruff check src tests
+python -m mypy src/camera_discovery/core src/camera_discovery/llm
+```
+
+Browser dependencies are optional. Do not pretend browser-dependent behavior succeeded when the backend was missing.

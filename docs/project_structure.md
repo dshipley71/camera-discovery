@@ -1,108 +1,80 @@
 # Project Structure
 
-The runnable application lives under `src/camera_discovery/` and is organized around thin command entry points, reusable extraction/harvest helpers, service orchestrators, and shared contracts.
+The source tree is split by workflow layer and stage responsibility.
+
+## High-level flow
 
 ```text
-src/camera_discovery/
-  cli.py
-  cli_commands/
-    progress.py
-    output.py
-  core/
-    config.py
-    models.py
-    progress_events.py
-  discovery/
-    artifact_writer.py
-    browser_capture.py
-    candidate_extraction.py
-    candidate_processing.py
-    search_dispatch.py
-    source_rows.py
-  enrichment/
-    location.py
-  extraction/
-    browser.py
-    html.py
-    http.py
-    json_records.py
-    media.py
-    pagination.py
-  harvest/
-    json_records.py
-    media_filter.py
-    outputs.py
-    records.py
-  llm/
-    base.py
-    factory.py
-    ollama.py
-    openai_compatible.py
-    bedrock.py
-  runners/
-    discovery_run.py
-    harvest_run.py
-  services/
-    discovery_engine.py
-    harvest_engine.py
-    harvest_handoff.py
-    structured_camera_records.py
-    target_resolver.py
-    review_validation_pipeline.py
-  sources/
-    models.py
-    registry.py
-  utils/
-    geojson_viewer.py
-    io.py
-    json_utils.py
+camera_discovery.cli
+  -> core.config.load_run_config / load_harvest_config
+  -> runners.discovery_run.execute_discovery_run
+       -> TargetResolver
+       -> CandidateDiscoveryEngine
+       -> harvest_handoff loader when --harvest-input is used
+       -> ReviewAndValidationPipeline
+  -> runners.harvest_run.execute_harvest_run
+       -> CameraUrlHarvestEngine
 ```
 
-## Responsibilities
+## Runtime modules
 
-| Module | Responsibility |
+| Path | Responsibility |
 |---|---|
-| `cli.py` | Thin Typer app/command declarations. It parses CLI options, loads config, delegates workflow execution to runners, and prints user-facing summaries/errors. |
-| `cli_commands/progress.py` | CLI progress callback construction for rich/plain/event progress modes. |
-| `cli_commands/output.py` | Console summary formatting for CLI commands. |
-| `core/config.py` | Loads environment variables and CLI parameters into `RunConfig` / `HarvestConfig`. Defines defaults for provider/model stages, candidate budgets, browser capture, geocoding, and profile selection. |
-| `core/models.py` | Dataclass contracts for run config, targets, candidates, validation summaries, harvest records, output summaries, and run state. `CandidateSet.merge()` defines the canonical first-seen dedupe contract using `(stream_url without fragment, target_id)` so same-stream candidates remain separate across targets while duplicate candidates for the same target retain the earliest candidate without silently merging later enrichment. |
-| `discovery/artifact_writer.py` | Discovery candidate artifact and per-target summary writing helpers used by `CandidateDiscoveryEngine`. |
-| `discovery/browser_capture.py` | Browser preflight, routing, budget accounting, Playwright/CloakBrowser session handling, and dynamic-page extraction helpers. |
-| `discovery/candidate_extraction.py` | Static page, linked endpoint, text, HTML, and structured JSON candidate extraction helpers. |
-| `discovery/candidate_processing.py` | Candidate metadata normalization, dedupe, coordinate enrichment, deterministic scoping, and advisory LLM review helpers. |
-| `discovery/search_dispatch.py` | Blind/directory/direct source-row dispatch, DuckDuckGo parsing, row filtering, and promoted asset-host row helpers. |
-| `discovery/source_rows.py` | Directory/direct/source-row construction, target-aware site row expansion, target/category slug helpers, and row deduplication. |
-| `enrichment/location.py` | Deterministic coordinate sanity helpers shared by extraction and discovery flows. |
+| `cli.py` | Thin Typer command declarations. |
+| `cli_commands/progress.py` | Rich/plain/events progress callbacks for CLI/notebook logs. |
+| `cli_commands/output.py` | Friendly console error/output helpers. |
+| `core/config.py` | Runtime config and environment-variable loading. |
+| `core/models.py` | Dataclasses and public contracts such as `RunConfig`, `HarvestConfig`, `CameraCandidate`, `CandidateSet`. |
+| `core/progress_events.py` | Small machine-readable progress event contract. |
+| `runners/discovery_run.py` | Normal pipeline orchestration and harvest-input seeding. |
+| `runners/harvest_run.py` | Harvest CLI orchestration and user-facing harvest summary. |
+| `services/target_resolver.py` | Target intent, geocoding, deterministic target-geometry decisions. |
+| `services/discovery_engine.py` | Public `CandidateDiscoveryEngine` facade/orchestration import path. |
+| `services/harvest_engine.py` | Public `CameraUrlHarvestEngine` and harvest orchestration. |
+| `services/harvest_handoff.py` | Handoff manifest loading and conversion to untrusted seed candidates. |
+| `services/review_validation_pipeline.py` | Validation, trusted/review output writing, run explanations, review ZIP. |
+| `services/structured_camera_records.py` | Structured camera-record extraction helpers. |
+| `discovery/search_dispatch.py` | Blind/directory/direct source-row discovery and dispatch. |
+| `discovery/source_rows.py` | Source-row dataclass/adapters, including `SOURCES.md` directory rows. |
+| `discovery/candidate_extraction.py` | Normal-run extraction from pages/endpoints/records. |
+| `discovery/browser_capture.py` | Browser preflight, capture decisions, browser/network extraction diagnostics. |
+| `discovery/candidate_processing.py` | Candidate metadata, coordinate enrichment, scope review, semantic review. |
+| `discovery/candidate_priority.py` | Candidate ordering for validation/review/map/table budgets. |
+| `discovery/artifact_writer.py` | Candidate-discovery stage artifact writing. |
 | `extraction/http.py` | Shared HTTP retry helper. |
-| `extraction/html.py` | Static HTML parsing and metadata extraction helpers. |
-| `extraction/media.py` | Shared media URL classification, URL deduplication, HLS/image/non-camera-asset checks, and scalar coercion helpers. |
-| `extraction/json_records.py` | Generic JSON/GeoJSON/ArcGIS-style record walking and camera candidate extraction helpers. |
-| `extraction/pagination.py` | Pagination row expansion, structured endpoint expansion, and promoted asset-host URL generation. |
-| `extraction/browser.py` | Browser capture dataclasses and Playwright/CloakBrowser capture helpers. Playwright remains the default backend; CloakBrowser remains opt-in through existing config/environment paths. |
-| `harvest/media_filter.py` | Harvest media filter parsing, URL classification, record filtering, camera-record grouping, and summary metric helpers. |
-| `harvest/json_records.py` | Harvest JSON payload parsing, metadata extraction, and JSON record counting helpers. |
-| `harvest/records.py` | Harvest URL/media/candidate/structured-record conversion helpers. |
-| `harvest/outputs.py` | Harvest URL, CSV, JSONL, inventory, endpoint, and summary artifact writing helpers. |
-| `llm/factory.py` | Shared provider factory for target intent, geocoder referee, candidate location inference, and candidate semantic review. |
-| `runners/discovery_run.py` | Full discovery workflow runner used by the CLI. It resolves targets, runs discovery, invokes validation/output writing, and creates `logs/run_summary.json`. |
-| `runners/harvest_run.py` | Harvest workflow runner used by the CLI. |
-| `services/target_resolver.py` | Multi-target LLM intent extraction, deterministic geocoder scoring, advisory geocoder referee, verified bbox/trust-policy assignment, and target diagnostics. |
-| `services/discovery_engine.py` | Public compatibility/orchestration module for `CandidateDiscoveryEngine`. It keeps the historical import path while delegating stage implementation to `discovery/`, `extraction/`, and `enrichment/` modules. |
-| `services/harvest_engine.py` | Public compatibility module for `CameraUrlHarvestEngine`. The engine now focuses on harvest orchestration and delegates media filtering, JSON parsing, record conversion, and output writing to focused modules. |
-| `services/structured_camera_records.py` | Source-provided structured camera record extraction and inventory conversion. |
-| `services/harvest_handoff.py` | Loads harvest handoff manifests or inventory JSONL and converts source-provided rows into normal `CameraCandidate` seed/enrichment records for `run --harvest-input`. |
-| `services/review_validation_pipeline.py` | HLS/image validation, trusted vs review-only output decisions, GeoJSON/CSV/Markdown/map writing, run explanation, and review zip packaging. |
-| `sources/registry.py` | Parses `SOURCES.md` allowed and blocked tables. |
-| `utils/geojson_viewer.py` | Selects/merges GeoJSON outputs, flattens camera rows, and writes the embedded Leaflet map. |
+| `extraction/html.py` | Shared HTML parsing helpers. |
+| `extraction/media.py` | Shared media detection, URL cleaning, canonicalization, dedupe. |
+| `extraction/json_records.py` | Shared JSON/GeoJSON/ArcGIS record walking and metadata helpers. |
+| `extraction/search.py` | Shared DuckDuckGo result URL cleaning and result parsing. |
+| `extraction/browser.py` | Shared browser backend/session helpers. |
+| `extraction/pagination.py` | Pagination and structured endpoint expansion helpers. |
+| `harvest/media_filter.py` | Harvest media-type parsing/filtering and image asset evidence. |
+| `harvest/records.py` | Harvest URL record creation, dedupe, search query construction. |
+| `harvest/json_records.py` | Harvest-specific JSON metadata promotion. |
+| `harvest/outputs.py` | Harvest output summary/source-row summary helpers. |
+| `enrichment/location.py` | Coordinate and location-evidence helpers. |
+| `sources/` | Source registry and global block policy. |
+| `llm/` | Provider factory and provider-specific clients. |
+| `utils/` | File IO and GeoJSON/map rendering. |
 
-Notebook-specific display code belongs in notebooks, not in `src/`.
+## Current CLI commands
 
-## Candidate merge contract
+```bash
+camera-discovery run [OPTIONS] QUERY
+camera-discovery harvest-urls [OPTIONS] QUERY
+```
 
-`CandidateSet.merge()` is the canonical cross-target/per-target candidate-set merge helper. It deduplicates unique candidates by `(stream_url without URL fragment, target_id)`. This means:
+`run` exposes `--browser-backend playwright|cloakbrowser`. `harvest-urls` exposes `--browser-backend`, media filters, harvest budgets, browser budgets, and intermediate-record writing.
 
-- the same stream URL discovered for different `target_id` values is preserved once per target;
-- duplicate candidates for the same stream and same target retain the first-seen candidate in deterministic input order;
-- later duplicates do not silently override coordinates, validation status, source metadata, reasons, or target provenance;
-- any future quality-priority or enrichment-aware merge behavior must be implemented as an explicit strategy and covered by contract tests.
+## Harvest handoff
+
+`harvest_handoff.json` uses `schema_version: harvest-handoff/v2`. Its `handoff_default_scope` determines which artifact the pipeline loads by default:
+
+- media-filtered harvests: `camera_urls.jsonl` / filtered media records;
+- all-media harvests: structured inventory when available.
+
+The normal pipeline always treats loaded harvest candidates as unvalidated/untrusted seed data.
+
+## Candidate priority
+
+`discovery/candidate_priority.py` centralizes ordering. It promotes located, in-scope, first-class media candidates for validation/review ordering while preserving trust boundaries.
