@@ -92,6 +92,7 @@ camera-discovery run "California traffic cameras" \
 --discovery-mode blind|directory|both|direct
 --block-pattern
 --harvest-input
+--harvest-input-mode handoff-only|seed
 --browser-backend playwright|cloakbrowser
 --progress / --no-progress
 --progress-style auto|rich|plain|events
@@ -150,10 +151,18 @@ CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE=false \
   camera-discovery run "California traffic cameras" \
     --output-dir runs/run-from-harvest-hls \
     --harvest-input runs/harvest-california-hls/harvest_handoff.json \
+    --harvest-input-mode handoff-only \
     --progress-style plain
 ```
 
-`harvest_handoff.json` uses `schema_version: harvest-handoff/v2`. Media-filtered harvests default to the filtered media artifact (`camera_urls.jsonl`), so an HLS-only harvest remains HLS-only when passed to `run --harvest-input`. All-media harvests may default to structured inventory. The normal pipeline still treats harvested records as unvalidated/untrusted seed data and applies target resolution, deterministic scope gating, validation, and trust rules.
+`harvest_handoff.json` uses `schema_version: harvest-handoff/v2`. Media-filtered harvests default to the filtered media artifact (`camera_urls.jsonl`), so an HLS-only harvest remains HLS-only when passed to `run --harvest-input`.
+
+`run --harvest-input` supports two explicit modes:
+
+- `handoff-only` (default): uses only the selected harvest handoff records. Native blind/directory discovery, promoted asset-host expansion, and browser crawl expansion are disabled, so candidate counts are bounded by the selected handoff records/assets and resolved target count.
+- `seed`: loads the harvest handoff records as starting candidates, then runs the normal discovery pipeline and merges native candidates with handoff candidates. This can be much larger and slower, and should be selected only when that expansion is intentional.
+
+All loaded harvest records remain source-provided, unvalidated, and untrusted until the normal pipeline applies target resolution, deterministic scope gating, validation, and trust rules.
 
 ## Browser capture
 
@@ -220,7 +229,7 @@ End-to-end Colab notebooks live under `notebooks/`:
 | Notebook | Purpose |
 |---|---|
 | `camera_discovery_harvest_hls_only_test.ipynb` | HLS-only harvest workflow using routine `.m3u8` extraction settings. |
-| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | HLS harvest followed by `run --profile full --harvest-input ...`. |
+| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | HLS harvest followed by `run --profile full --harvest-input --harvest-input-mode handoff-only ...`. |
 | `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | All-media harvest followed by full pipeline validation/review. |
 | `camera_discovery_pipeline_only_profiles_test.ipynb` | Pipeline-only comparison for `fast`, `balanced`, and `full` profiles. |
 

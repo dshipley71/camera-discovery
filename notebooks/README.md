@@ -5,8 +5,8 @@ These notebooks exercise the current public CLI workflows without moving noteboo
 | Notebook | Purpose | Typical use |
 |---|---|---|
 | `camera_discovery_harvest_hls_only_test.ipynb` | Harvest `.m3u8` HLS URLs only. | Fastest way to test HLS extraction, source-row diagnostics, and harvest summaries. |
-| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | Harvest HLS URLs and feed `harvest_handoff.json` into `camera-discovery run --profile full`. | End-to-end HLS harvest-to-validation workflow. |
-| `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | Harvest all supported media types and feed the handoff into full pipeline validation. | Inspect how broader media types are represented and handled downstream. |
+| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | Harvest HLS URLs and feed `harvest_handoff.json` into `camera-discovery run --profile full --harvest-input-mode handoff-only`. | End-to-end HLS harvest-to-validation workflow. |
+| `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | Harvest all supported media types and feed the handoff into full pipeline validation with `--harvest-input-mode handoff-only`. | Inspect how broader media types are represented and handled downstream. |
 | `camera_discovery_pipeline_only_profiles_test.ipynb` | Run `camera-discovery run` without harvest input for `fast`, `balanced`, and `full` profiles. | Compare normal pipeline behavior across profiles. |
 
 Each notebook includes:
@@ -20,3 +20,5 @@ Each notebook includes:
 - Optional artifact packaging/download cells.
 
 Long-running validation cells are intentionally visible and configurable. Do not treat a trusted artifact as expected unless the selected profile and validation/trust gates authorize it.
+
+Handoff notebooks use `handoff-only` by default so native discovery is disabled and candidate counts remain bounded by the selected handoff records/assets. Use `--harvest-input-mode seed` only when intentionally combining harvest input with normal discovery.

@@ -54,6 +54,8 @@ from camera_discovery.services.target_resolver import TargetResolver
 
 Notebook updates should use real CLI commands against the package. Notebook-specific helper/display code belongs in the notebook. Do not move notebook-only helpers into `src/`.
 
+Harvest handoff notebook cells should pass `--harvest-input-mode handoff-only` for bounded demonstrations. Use `--harvest-input-mode seed` only when the notebook intentionally combines handoff records with normal native discovery and clearly warns that runtime and candidate counts may grow.
+
 Colab notebooks should retrieve `OLLAMA_API_KEY` from Colab userdata when available and set Ollama Cloud variables explicitly for reproducible runs.
 
 ## Trusted-output acceptance

@@ -54,10 +54,14 @@ def test_cli_plain_progress_callback_is_low_noise(tmp_path):
                 },
             )
         callback('coordinate_enrichment_started', {'target_label': 'California', 'unique': 80})
+        callback('coordinate_candidate_processed', {'target_label': 'California', 'processed': 40, 'total': 80, 'coordinate_bearing': 30, 'metadata_enriched': 5, 'geocode_enriched': 3, 'llm_location_enriched': 1})
+        callback('coordinate_enrichment_complete', {'target_label': 'California', 'total': 80, 'coordinate_bearing': 35, 'metadata_enriched': 6, 'geocode_enriched': 4, 'llm_location_enriched': 2})
         callback('scope_review_started', {'target_label': 'California'})
         callback('discovery_complete', {'target_label': 'California', 'raw': 100, 'unique': 80, 'coordinate_bearing': 25})
     text = output.read_text(encoding='utf-8')
     assert 'Progress: California — scanning 100 source rows' in text
+    assert 'Progress: California — enriching coordinates 40/80; mapped 30; metadata 5; geocoded 3; LLM 1.' in text
+    assert 'Progress: California — coordinate enrichment complete: mapped 35/80; metadata 6; geocoded 4; LLM 2.' in text
     assert 'Progress: California — discovery complete: raw 100, unique 80, mapped 25.' in text
     # The plain renderer should summarize progress in coarse milestones, not emit one line per source row.
     assert text.count('scanned') <= 12

@@ -155,4 +155,6 @@ These files can be very large and should be used mainly for debugging.
 }
 ```
 
-For media-filtered harvests, normal `run --harvest-input harvest_handoff.json` loads filtered media records from `camera_urls.jsonl` by default. For all-media harvests, it may load structured inventory. The normal pipeline treats all loaded harvest records as untrusted seed data and still applies target resolution, deterministic scope gates, validation, and trust rules.
+For media-filtered harvests, normal `run --harvest-input harvest_handoff.json` loads filtered media records from `camera_urls.jsonl` by default. For all-media harvests, it may load structured inventory.
+
+`run --harvest-input` writes candidate summaries with separate `native_discovery`, `harvest_input`, and `combined` sections. In the default `--harvest-input-mode handoff-only` path, native discovery is disabled and handoff candidate counts are bounded by the selected handoff records/assets and resolved target count. In `--harvest-input-mode seed`, the harvest input is merged with normal native discovery and may produce many additional candidates. The normal pipeline treats all loaded harvest records as untrusted data and still applies target resolution, deterministic scope gates, validation, and trust rules.

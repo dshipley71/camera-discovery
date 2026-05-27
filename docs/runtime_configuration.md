@@ -12,6 +12,7 @@
 --discovery-mode blind|directory|both|direct
 --block-pattern TEXT
 --harvest-input PATH
+--harvest-input-mode handoff-only|seed
 --browser-backend playwright|cloakbrowser
 --progress / --no-progress
 --progress-style auto|rich|plain|events
@@ -43,6 +44,18 @@
 --progress / --no-progress
 --progress-style auto|rich|plain|events
 ```
+
+
+## Harvest input modes for `run`
+
+`camera-discovery run --harvest-input PATH` supports two modes:
+
+| Mode | Behavior |
+|---|---|
+| `handoff-only` | Default when `--harvest-input` is supplied. Load only the selected harvest handoff records and skip native blind/directory discovery, promoted asset-host expansion, and browser crawl expansion. Candidate counts are bounded by the selected handoff records/assets and resolved target count. |
+| `seed` | Load the harvest handoff records as starting candidates, then run the normal discovery pipeline and merge both candidate sets. Use this only when broader discovery expansion is intentional. |
+
+All harvest-input candidates remain source-provided, unvalidated, and untrusted until normal validation and trust rules process them. The mode can also be set with `CAMERA_DISCOVERY_HARVEST_INPUT_MODE`.
 
 ## LLM provider variables
 

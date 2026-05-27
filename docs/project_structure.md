@@ -9,7 +9,7 @@ camera_discovery.cli
   -> core.config.load_run_config / load_harvest_config
   -> runners.discovery_run.execute_discovery_run
        -> TargetResolver
-       -> CandidateDiscoveryEngine
+       -> CandidateDiscoveryEngine when native discovery is enabled
        -> harvest_handoff loader when --harvest-input is used
        -> ReviewAndValidationPipeline
   -> runners.harvest_run.execute_harvest_run
@@ -26,7 +26,7 @@ camera_discovery.cli
 | `core/config.py` | Runtime config and environment-variable loading. |
 | `core/models.py` | Dataclasses and public contracts such as `RunConfig`, `HarvestConfig`, `CameraCandidate`, `CandidateSet`. |
 | `core/progress_events.py` | Small machine-readable progress event contract. |
-| `runners/discovery_run.py` | Normal pipeline orchestration and harvest-input seeding. |
+| `runners/discovery_run.py` | Normal pipeline orchestration, including `handoff-only` versus `seed` harvest-input modes. |
 | `runners/harvest_run.py` | Harvest CLI orchestration and user-facing harvest summary. |
 | `services/target_resolver.py` | Target intent, geocoding, deterministic target-geometry decisions. |
 | `services/discovery_engine.py` | Public `CandidateDiscoveryEngine` facade/orchestration import path. |
