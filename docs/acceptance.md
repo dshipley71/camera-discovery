@@ -57,7 +57,9 @@ The implementation is accepted when the documentation and code agree on the foll
 
 ## Tests and notebook
 
-1. `PYTHONPATH=src python -m compileall src` passes.
-2. `PYTHONPATH=src python -m pytest -q` passes in an environment with required optional dependencies available or skips optional integrations explicitly.
-3. The notebook remains valid JSON and keeps notebook-specific helper code inside the notebook.
-4. Tests and docs do not introduce synthetic camera inventories, fake streams, fabricated coordinates, fake validation results, or hard-coded real-world target/source behavior.
+1. `python -m compileall -q src tests` passes.
+2. `python -m ruff check src tests` passes when development dependencies are installed.
+3. `PYTHONPATH=src python -m pytest -q` passes in an environment with required optional dependencies available or skips optional integrations explicitly.
+4. The CI workflow runs compile checks, Ruff undefined-name lint, and pytest on pull requests and pushes to `main`/`dev`.
+5. The notebook remains valid JSON and keeps notebook-specific helper code inside the notebook.
+6. Tests and docs do not introduce synthetic camera inventories, fake streams, fabricated coordinates, fake validation results, or hard-coded real-world target/source behavior.

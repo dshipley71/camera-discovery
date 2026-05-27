@@ -291,10 +291,17 @@ The map supports HLS playback attempts through hls.js and native playback when b
 
 ## Development checks
 
+Install development dependencies before running the full local checks:
+
 ```bash
-PYTHONPATH=src python -m compileall src
+python -m pip install -e ".[dev]"
+python -m compileall -q src tests
+python -m ruff check src tests
 PYTHONPATH=src python -m pytest -q
+python -m mypy src/camera_discovery/core src/camera_discovery/llm || true
 ```
+
+The GitHub Actions workflow runs compile checks, Ruff undefined-name lint, and pytest on pull requests and pushes to `main` and `dev`. MyPy is currently a permissive smoke check so the repository can adopt stronger typing incrementally.
 
 No tests or docs should add fake camera inventories, synthetic streams, fabricated coordinates, simulated validation success, or hard-coded real-world target/source behavior.
 

@@ -90,9 +90,13 @@ Provider-specific environment variables:
 | `CAMERA_DISCOVERY_MAX_HLS_CANDIDATES` | `100` | HLS candidate budget. |
 | `CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES` | `50` | Image snapshot candidate budget. |
 | `CAMERA_DISCOVERY_MAX_TOTAL_CANDIDATES` | HLS + snapshot budgets | Overall candidate budget. |
-| `CAMERA_DISCOVERY_MAX_STREAMS` | total candidate budget | Backward-compatible field retained in config. |
+| `CAMERA_DISCOVERY_MAX_STREAMS` | total candidate budget | Deprecated backward-compatible alias retained in config. Explicit use emits a `DeprecationWarning`; prefer `CAMERA_DISCOVERY_MAX_TOTAL_CANDIDATES` plus media-specific caps. |
 | `CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE` | `20` | Structured endpoint/page extraction budget. |
 | `CAMERA_DISCOVERY_ASSET_HOST_PROMOTION_THRESHOLD` | `3` | Repeated media-host threshold for promoted host discovery rows. |
+
+### Deprecated settings
+
+`CAMERA_DISCOVERY_MAX_STREAMS` remains supported for compatibility with earlier notebooks/scripts, but new configurations should use `CAMERA_DISCOVERY_MAX_TOTAL_CANDIDATES` plus `CAMERA_DISCOVERY_MAX_HLS_CANDIDATES` and `CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES`. When `CAMERA_DISCOVERY_MAX_STREAMS` is explicitly set, configuration loading emits a `DeprecationWarning` while preserving the existing value.
 
 ## Candidate coordinate enrichment
 

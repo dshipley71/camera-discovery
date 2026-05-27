@@ -67,3 +67,15 @@ def test_run_config_builtin_defaults_are_aligned():
     assert cfg.max_streams == expected
     assert cfg.max_candidate_geocodes == expected
     assert cfg.max_state_scale_candidate_geocodes == expected
+
+
+def test_explicit_deprecated_max_streams_env_still_works_and_warns(tmp_path, monkeypatch):
+    _clear_parameter_env(monkeypatch)
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_STREAMS", "17")
+
+    import pytest
+
+    with pytest.warns(DeprecationWarning, match="CAMERA_DISCOVERY_MAX_STREAMS is deprecated"):
+        cfg = load_run_config("Get cameras from Example City", tmp_path)
+
+    assert cfg.max_streams == 17
