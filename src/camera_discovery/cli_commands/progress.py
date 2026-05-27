@@ -198,7 +198,37 @@ def _make_plain_discovery_progress_callback(
                         f"(HLS {payload.get('hls_count', 0)}, images {payload.get('image_snapshot_count', 0)})."
                     )
             elif event == "coordinate_enrichment_started":
-                console.print(f"Progress: {label} — enriching coordinates for {payload.get('unique', 0)} unique candidates...")
+                total = int(payload.get("unique") or 0)
+                state["coord_total"] = total
+                state["coord_completed"] = 0
+                state["coord_last_bucket"] = -1
+                console.print(f"Progress: {label} — enriching coordinates for {total} unique candidates...")
+            elif event == "coordinate_candidate_processed":
+                completed = int(payload.get("processed") or state.get("coord_completed", 0) + 1)
+                total = int(payload.get("total") or state.get("coord_total") or 0)
+                state["coord_completed"] = completed
+                current_bucket = _bucket(completed, total)
+                should_report = completed == total or current_bucket > int(state.get("coord_last_bucket", -1))
+                if should_report:
+                    state["coord_last_bucket"] = current_bucket
+                    denominator = total if total else "?"
+                    console.print(
+                        f"Progress: {label} — enriching coordinates {completed}/{denominator}; "
+                        f"mapped {payload.get('coordinate_bearing', 0)}; "
+                        f"metadata {payload.get('metadata_enriched', 0)}; "
+                        f"geocoded {payload.get('geocode_enriched', 0)}; "
+                        f"LLM {payload.get('llm_location_enriched', 0)}."
+                    )
+            elif event == "coordinate_enrichment_complete":
+                total = int(payload.get("total") or state.get("coord_total") or 0)
+                state["coord_completed"] = total
+                console.print(
+                    f"Progress: {label} — coordinate enrichment complete: "
+                    f"mapped {payload.get('coordinate_bearing', 0)}/{total}; "
+                    f"metadata {payload.get('metadata_enriched', 0)}; "
+                    f"geocoded {payload.get('geocode_enriched', 0)}; "
+                    f"LLM {payload.get('llm_location_enriched', 0)}."
+                )
             elif event == "scope_review_started":
                 console.print(f"Progress: {label} — checking target scope and review gates...")
             elif event == "discovery_complete":

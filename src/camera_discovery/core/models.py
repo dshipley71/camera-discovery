@@ -19,6 +19,11 @@ class DiscoveryMode(str, Enum):
     DIRECT = "direct"
 
 
+class HarvestInputMode(str, Enum):
+    HANDOFF_ONLY = "handoff-only"
+    SEED = "seed"
+
+
 class TrustPolicy(str, Enum):
     TRUSTED_ALLOWED = "trusted_allowed"
     REVIEW_ONLY = "review_only"
@@ -100,9 +105,12 @@ class RunConfig:
     # validation is enabled by the selected runtime profile.
     image_snapshot_refresh_delay_seconds: float = 2.0
 
-    # Optional harvest handoff/inventory file used to seed normal run discovery.
-    # This does not bypass target resolution, scope, validation, trust policy, or outputs.
+    # Optional harvest handoff/inventory file used by the normal run workflow.
+    # handoff-only processes only the loaded handoff candidates; seed also runs
+    # native discovery and merges the two candidate sets. Neither mode bypasses
+    # target resolution, scope, validation, trust policy, or outputs.
     harvest_input: Path | None = None
+    harvest_input_mode: HarvestInputMode = HarvestInputMode.HANDOFF_ONLY
 
     @property
     def validation_enabled(self) -> bool:

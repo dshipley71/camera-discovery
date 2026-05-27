@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .models import DiscoveryMode, HarvestConfig, RunConfig, RuntimeProfile
+from .models import DiscoveryMode, HarvestConfig, HarvestInputMode, RunConfig, RuntimeProfile
 
 _ALLOWED_BROWSER_BACKENDS = {"playwright", "cloakbrowser"}
 
@@ -124,6 +124,7 @@ def load_run_config(
     discovery_mode: str | None = None,
     block_patterns: list[str] | None = None,
     harvest_input: str | Path | None = None,
+    harvest_input_mode: str | HarvestInputMode | None = None,
     browser_backend: str | None = None,
 ) -> RunConfig:
     load_dotenv(override=False)
@@ -139,6 +140,8 @@ def load_run_config(
     )
     discovery_mode_value = discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE") or "both"
     selected_discovery_mode = DiscoveryMode(discovery_mode_value.strip().lower())
+    harvest_mode_value = harvest_input_mode or os.getenv("CAMERA_DISCOVERY_HARVEST_INPUT_MODE") or "handoff-only"
+    selected_harvest_input_mode = HarvestInputMode(str(harvest_mode_value).strip().lower())
     configured_browser_backend = (browser_backend or _browser_backend_env()).strip().lower()
     if configured_browser_backend not in _ALLOWED_BROWSER_BACKENDS:
         allowed = ", ".join(sorted(_ALLOWED_BROWSER_BACKENDS))
@@ -202,6 +205,7 @@ def load_run_config(
         max_candidate_geocodes=max(0, _int_env("CAMERA_DISCOVERY_MAX_CANDIDATE_GEOCODES", max_total_candidates)),
         image_snapshot_refresh_delay_seconds=max(0.0, _float_env("CAMERA_DISCOVERY_IMAGE_SNAPSHOT_REFRESH_DELAY_SECONDS", 2.0)),
         harvest_input=Path(harvest_input).expanduser() if harvest_input else None,
+        harvest_input_mode=selected_harvest_input_mode,
     )
 
 

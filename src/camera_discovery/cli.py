@@ -39,6 +39,7 @@ def run(
     discovery_mode: str = typer.Option("both", "--discovery-mode", help="blind, directory, both, or direct"),
     block_pattern: Optional[list[str]] = typer.Option(None, "--block-pattern"),
     harvest_input: Optional[Path] = typer.Option(None, "--harvest-input", help="Harvest handoff manifest or harvest_camera_inventory.jsonl to seed the normal run workflow."),
+    harvest_input_mode: str = typer.Option("handoff-only", "--harvest-input-mode", help="How --harvest-input is used: handoff-only or seed."),
     browser_backend: Optional[str] = typer.Option(None, "--browser-backend", help="playwright or cloakbrowser; overrides CAMERA_DISCOVERY_BROWSER_BACKEND for this run."),
     show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show progress while resolving, discovering, enriching coordinates, validating, and writing outputs."),
     progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, plain, or events. Use events for machine-readable progress records consumed by external UIs."),
@@ -54,6 +55,7 @@ def run(
             discovery_mode=discovery_mode,
             block_patterns=block_pattern or [],
             harvest_input=harvest_input,
+            harvest_input_mode=harvest_input_mode,
             browser_backend=browser_backend,
         )
     except ValueError as exc:

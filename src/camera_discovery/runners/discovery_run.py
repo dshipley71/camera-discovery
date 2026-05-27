@@ -17,7 +17,7 @@ from camera_discovery.cli_commands.progress import (
     _make_plain_discovery_progress_callback,
     _make_progress,
 )
-from camera_discovery.core.models import CameraCandidate, CandidateSet, RunConfig, RunState, TargetContext, TrustPolicy
+from camera_discovery.core.models import CameraCandidate, CandidateSet, HarvestInputMode, RunConfig, RunState, TargetContext, TrustPolicy
 from camera_discovery.discovery.candidate_priority import priority_bucket_counts, prioritize_candidate_set
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
 from camera_discovery.services.harvest_handoff import (
@@ -49,6 +49,7 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
     if cfg.harvest_input:
         handoff_description = describe_harvest_handoff(cfg.harvest_input)
         console.print(f"[bold]Harvest input:[/bold] {cfg.harvest_input} (exists={handoff_description.get('exists')})")
+        console.print(f"[bold]Harvest input mode:[/bold] {cfg.harvest_input_mode.value}")
         if handoff_description.get("media_filter"):
             console.print(
                 f"[bold]Harvest handoff filter:[/bold] {handoff_description.get('media_filter')} "
@@ -101,55 +102,94 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
 
         per_target_sets: dict[str, CandidateSet] = {}
         progress_lock = threading.Lock()
+        native_discovery_enabled = not (cfg.harvest_input and cfg.harvest_input_mode == HarvestInputMode.HANDOFF_ONLY)
+        if cfg.harvest_input:
+            mode_message = (
+                "enabled; harvest input will seed normal discovery"
+                if native_discovery_enabled
+                else "disabled by handoff-only harvest input mode"
+            )
+            console.print(f"[bold]Normal discovery:[/bold] {mode_message}")
+
         target_tasks: dict[str, int] = {}
         target_progress_state: dict[str, dict[str, int]] = {}
-        for target in runnable_targets:
-            label = target.target_label or target.canonical_target or target.target_id
-            if progress_mode == "rich":
-                assert progress is not None
-                target_tasks[target.target_id] = progress.add_task(f"Discovering {label}", total=None)
-            elif progress_mode == "plain":
-                console.print(f"Progress: discovering {label}...")
-            elif progress_mode == "events":
-                _emit_progress_stream_event("target_discovery_started", {"target_id": target.target_id, "target_label": label})
-            target_progress_state[target.target_id] = {"total": 0, "completed": 0}
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(runnable_targets))) as pool:
-            futures = {}
+        if native_discovery_enabled:
             for target in runnable_targets:
-                callback = None
+                label = target.target_label or target.canonical_target or target.target_id
                 if progress_mode == "rich":
                     assert progress is not None
-                    callback = _make_discovery_progress_callback(
-                        progress,
-                        target_tasks[target.target_id],
-                        target_progress_state[target.target_id],
-                        progress_lock,
-                    )
+                    target_tasks[target.target_id] = progress.add_task(f"Discovering {label}", total=None)
                 elif progress_mode == "plain":
-                    callback = _make_plain_discovery_progress_callback(
-                        console,
-                        target_progress_state[target.target_id],
-                        progress_lock,
-                    )
+                    console.print(f"Progress: discovering {label}...")
                 elif progress_mode == "events":
-                    callback = _make_event_stream_discovery_progress_callback(progress_lock)
-                engine = CandidateDiscoveryEngine(cfg, progress_callback=callback)
-                futures[pool.submit(engine.discover, target)] = target
-            for future in concurrent.futures.as_completed(futures):
-                target = futures[future]
-                try:
-                    per_target_sets[target.target_id] = future.result()
-                finally:
-                    if progress_mode == "rich":
-                        assert progress is not None
-                        task_id = target_tasks[target.target_id]
-                        state_for_target = target_progress_state[target.target_id]
-                        total = max(1, state_for_target.get("total", 0), state_for_target.get("completed", 0))
-                        progress.update(task_id, total=total, completed=total, description=f"Discovered {target.target_label or target.canonical_target or target.target_id}")
+                    _emit_progress_stream_event("target_discovery_started", {"target_id": target.target_id, "target_label": label})
+                target_progress_state[target.target_id] = {"total": 0, "completed": 0}
+
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(runnable_targets))) as pool:
+                    futures = {}
+                    for target in runnable_targets:
+                        callback = None
+                        if progress_mode == "rich":
+                            assert progress is not None
+                            callback = _make_discovery_progress_callback(
+                                progress,
+                                target_tasks[target.target_id],
+                                target_progress_state[target.target_id],
+                                progress_lock,
+                            )
+                        elif progress_mode == "plain":
+                            callback = _make_plain_discovery_progress_callback(
+                                console,
+                                target_progress_state[target.target_id],
+                                progress_lock,
+                            )
+                        elif progress_mode == "events":
+                            callback = _make_event_stream_discovery_progress_callback(progress_lock)
+                        engine = CandidateDiscoveryEngine(cfg, progress_callback=callback)
+                        futures[pool.submit(engine.discover, target)] = target
+                    try:
+                        for future in concurrent.futures.as_completed(futures):
+                            target = futures[future]
+                            try:
+                                per_target_sets[target.target_id] = future.result()
+                            finally:
+                                if progress_mode == "rich":
+                                    assert progress is not None
+                                    task_id = target_tasks[target.target_id]
+                                    state_for_target = target_progress_state[target.target_id]
+                                    total = max(1, state_for_target.get("total", 0), state_for_target.get("completed", 0))
+                                    progress.update(task_id, total=total, completed=total, description=f"Discovered {target.target_label or target.canonical_target or target.target_id}")
+                    except KeyboardInterrupt:
+                        for future in futures:
+                            future.cancel()
+                        completed = sum(1 for future in futures if future.done())
+                        message = f"Run interrupted during native discovery after {completed}/{len(futures)} target task(s)."
+                        console.print(f"[red]{message} Partial artifacts may be available under {cfg.output_dir}.[/red]")
+                        state.warnings.append(message)
+                        write_json(cfg.output_dir / "logs" / "run_summary.json", state.to_dict())
+                        raise typer.Exit(code=130)
+            except KeyboardInterrupt:
+                message = "Run interrupted during native discovery."
+                console.print(f"[red]{message} Partial artifacts may be available under {cfg.output_dir}.[/red]")
+                state.warnings.append(message)
+                write_json(cfg.output_dir / "logs" / "run_summary.json", state.to_dict())
+                raise typer.Exit(code=130)
+        elif progress_mode == "plain":
+            console.print("Progress: native discovery disabled by handoff-only harvest input mode.")
+        elif progress_mode == "events":
+            _emit_progress_stream_event(
+                "native_discovery_skipped",
+                {"reason": "handoff-only harvest input mode", "harvest_input_mode": cfg.harvest_input_mode.value},
+            )
 
         native_candidate_summary = _candidate_set_summary(CandidateSet.merge(list(per_target_sets.values())))
-        harvest_input_summary: dict[str, object] = {"loaded": False}
+        native_candidate_summary["enabled"] = native_discovery_enabled
+        harvest_input_summary: dict[str, object] = {
+            "loaded": False,
+            "mode": cfg.harvest_input_mode.value if cfg.harvest_input else None,
+            "normal_discovery_enabled": native_discovery_enabled,
+        }
         if cfg.harvest_input:
             if progress_mode == "plain":
                 console.print("Progress: loading harvest input...")
@@ -176,25 +216,44 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
                 harvest_media_counter.update(str((c.source_metadata or {}).get("media_type") or "unknown") for c in handoff_candidates)
                 harvest_scope_counter.update(c.scope_status for c in handoff_candidates)
                 per_target_sets[f"{target.target_id}:harvest_input"] = _candidate_set_from_scoped_harvest(handoff_candidates)
+            if cfg.harvest_input_mode == HarvestInputMode.HANDOFF_ONLY:
+                _assert_handoff_only_bounds(
+                    console,
+                    record_count=len(handoff.records),
+                    target_count=len(runnable_targets),
+                    candidate_count=total_handoff_candidates,
+                    loaded_artifact=handoff.loaded_artifact,
+                    native_discovery_summary=native_candidate_summary,
+                    output_dir=cfg.output_dir,
+                )
             harvest_input_summary = {
                 "loaded": True,
+                "mode": cfg.harvest_input_mode.value,
                 "source_path": str(cfg.harvest_input),
                 "loaded_artifact": handoff.loaded_artifact,
                 "source_file": str(handoff.source_file) if handoff.source_file else None,
                 "schema_version": handoff.schema_version,
                 "media_filter": handoff.media_filter,
                 "handoff_default_scope": handoff.handoff_default_scope,
+                "record_count": len(handoff.records),
                 "candidate_count": total_handoff_candidates,
                 "by_media_type": dict(sorted(harvest_media_counter.items())),
                 "by_scope_status": dict(sorted(harvest_scope_counter.items())),
                 "filtered_by_handoff_media_filter": handoff.filtered_by_handoff_media_filter,
+                "normal_discovery_enabled": native_discovery_enabled,
             }
+            processing_note = (
+                "normal discovery is disabled by handoff-only mode"
+                if cfg.harvest_input_mode == HarvestInputMode.HANDOFF_ONLY
+                else "normal discovery is enabled because seed mode was requested"
+            )
             state.warnings.append(
-                f"Loaded {total_handoff_candidates} unvalidated/untrusted candidate(s) from harvest input; normal run processing still applies."
+                f"Loaded {total_handoff_candidates} unvalidated/untrusted candidate(s) from harvest input; {processing_note}."
             )
             console.print(
                 f"[bold]Harvest input candidates:[/bold] {total_handoff_candidates} "
-                f"from {handoff.loaded_artifact}; media={dict(sorted(harvest_media_counter.items()))}; "
+                f"from {len(handoff.records)} record(s) in {handoff.loaded_artifact}; "
+                f"media={dict(sorted(harvest_media_counter.items()))}; "
                 f"scope={dict(sorted(harvest_scope_counter.items()))}"
             )
             if progress_mode == "events":
@@ -218,7 +277,14 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
             console.print("Progress: validating streams and writing outputs...")
         elif progress_mode == "events":
             _emit_progress_stream_event("validation_started", {"completed": 0, "total": 1, "description": "Validating streams and writing outputs"})
-        validation, outputs = ReviewAndValidationPipeline(cfg).run(runnable_targets, merged)
+        try:
+            validation, outputs = ReviewAndValidationPipeline(cfg).run(runnable_targets, merged)
+        except KeyboardInterrupt:
+            message = "Run interrupted during validation/output writing."
+            console.print(f"[red]{message} Partial artifacts may be available under {cfg.output_dir}.[/red]")
+            state.warnings.append(message)
+            write_json(cfg.output_dir / "logs" / "run_summary.json", state.to_dict())
+            raise typer.Exit(code=130)
         if progress_mode == "rich":
             assert progress is not None
             progress.update(validation_task, completed=1, description="Validation and outputs complete")
@@ -268,6 +334,41 @@ def _scope_harvest_input_candidates(candidates: list[CameraCandidate], target: T
         else:
             candidate.scope_status = "unknown"
             candidate.reasons.append("harvest_input_missing_candidate_coordinates")
+
+
+def _assert_handoff_only_bounds(
+    console: Console,
+    *,
+    record_count: int,
+    target_count: int,
+    candidate_count: int,
+    loaded_artifact: str | None,
+    native_discovery_summary: dict[str, object],
+    output_dir,
+) -> None:
+    native_unique = int(native_discovery_summary.get("unique_candidates") or 0)
+    if native_unique:
+        message = (
+            f"Harvest handoff-only mode loaded {record_count} source record(s) but native discovery produced "
+            f"{native_unique} candidate(s). Handoff-only mode must not run broad discovery or asset-host expansion. "
+            "Use --harvest-input-mode seed to intentionally combine harvest input with normal discovery."
+        )
+        console.print(f"[red]{message}[/red]")
+        write_json(output_dir / "logs" / "handoff_only_bounds_error.json", {"error": message})
+        raise typer.Exit(code=2)
+
+    url_level_artifacts = {"camera_urls_jsonl", "filtered_media_records"}
+    if loaded_artifact in url_level_artifacts:
+        expected_max = record_count * max(1, target_count)
+        if candidate_count > expected_max:
+            message = (
+                f"Harvest handoff-only mode loaded {record_count} source record(s) but candidate preparation produced "
+                f"{candidate_count} candidate(s). Handoff-only mode must not run broad discovery or asset-host expansion. "
+                "Use --harvest-input-mode seed to intentionally combine harvest input with normal discovery."
+            )
+            console.print(f"[red]{message}[/red]")
+            write_json(output_dir / "logs" / "handoff_only_bounds_error.json", {"error": message})
+            raise typer.Exit(code=2)
 
 
 def _candidate_set_from_scoped_harvest(candidates: list[CameraCandidate]) -> CandidateSet:
