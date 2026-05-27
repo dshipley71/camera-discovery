@@ -66,7 +66,7 @@ src/camera_discovery/
 | `cli_commands/progress.py` | CLI progress callback construction for rich/plain/event progress modes. |
 | `cli_commands/output.py` | Console summary formatting for CLI commands. |
 | `core/config.py` | Loads environment variables and CLI parameters into `RunConfig` / `HarvestConfig`. Defines defaults for provider/model stages, candidate budgets, browser capture, geocoding, and profile selection. |
-| `core/models.py` | Dataclass contracts for run config, targets, candidates, validation summaries, harvest records, output summaries, and run state. |
+| `core/models.py` | Dataclass contracts for run config, targets, candidates, validation summaries, harvest records, output summaries, and run state. `CandidateSet.merge()` defines the canonical first-seen dedupe contract using `(stream_url without fragment, target_id)` so same-stream candidates remain separate across targets while duplicate candidates for the same target retain the earliest candidate without silently merging later enrichment. |
 | `discovery/artifact_writer.py` | Discovery candidate artifact and per-target summary writing helpers used by `CandidateDiscoveryEngine`. |
 | `discovery/browser_capture.py` | Browser preflight, routing, budget accounting, Playwright/CloakBrowser session handling, and dynamic-page extraction helpers. |
 | `discovery/candidate_extraction.py` | Static page, linked endpoint, text, HTML, and structured JSON candidate extraction helpers. |
@@ -97,3 +97,12 @@ src/camera_discovery/
 | `utils/geojson_viewer.py` | Selects/merges GeoJSON outputs, flattens camera rows, and writes the embedded Leaflet map. |
 
 Notebook-specific display code belongs in notebooks, not in `src/`.
+
+## Candidate merge contract
+
+`CandidateSet.merge()` is the canonical cross-target/per-target candidate-set merge helper. It deduplicates unique candidates by `(stream_url without URL fragment, target_id)`. This means:
+
+- the same stream URL discovered for different `target_id` values is preserved once per target;
+- duplicate candidates for the same stream and same target retain the first-seen candidate in deterministic input order;
+- later duplicates do not silently override coordinates, validation status, source metadata, reasons, or target provenance;
+- any future quality-priority or enrichment-aware merge behavior must be implemented as an explicit strategy and covered by contract tests.

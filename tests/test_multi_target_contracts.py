@@ -31,6 +31,74 @@ def test_candidate_set_merge_preserves_target_identity():
     assert {c.target_id for c in merged.unique} == {"london", "new_york"}
 
 
+
+
+def test_candidate_set_merge_keeps_first_duplicate_for_same_target():
+    first_candidate = CameraCandidate(
+        stream_url="https://example.invalid/live.m3u8#first",
+        target_id="california",
+        title="first",
+        lat=35.0,
+        lon=-120.0,
+        validation_status="active",
+        source_metadata={"rank": "first"},
+    )
+    duplicate_candidate = CameraCandidate(
+        stream_url="https://example.invalid/live.m3u8#duplicate",
+        target_id="california",
+        title="duplicate",
+        lat=36.0,
+        lon=-121.0,
+        validation_status="duplicate-active",
+        source_metadata={"rank": "duplicate"},
+    )
+
+    merged = CandidateSet.merge([CandidateSet(unique=[first_candidate]), CandidateSet(unique=[duplicate_candidate])])
+
+    assert merged.unique == [first_candidate]
+    assert merged.unique[0].title == "first"
+    assert merged.unique[0].lat == 35.0
+    assert merged.unique[0].source_metadata == {"rank": "first"}
+
+
+def test_candidate_set_merge_order_is_deterministic():
+    first = CameraCandidate(stream_url="https://example.invalid/a.m3u8", target_id="target", title="a")
+    second = CameraCandidate(stream_url="https://example.invalid/b.m3u8", target_id="target", title="b")
+    duplicate_first = CameraCandidate(stream_url="https://example.invalid/a.m3u8", target_id="target", title="duplicate")
+
+    merged = CandidateSet.merge([CandidateSet(unique=[first, second]), CandidateSet(unique=[duplicate_first])])
+
+    assert [candidate.title for candidate in merged.unique] == ["a", "b"]
+
+
+def test_candidate_set_merge_does_not_merge_later_enrichment_fields():
+    base = CameraCandidate(
+        stream_url="https://example.invalid/c.m3u8",
+        target_id="target",
+        title="base",
+        location_text="Base Location",
+        reasons=["base_reason"],
+        source_metadata={"source": "base"},
+    )
+    enriched_duplicate = CameraCandidate(
+        stream_url="https://example.invalid/c.m3u8",
+        target_id="target",
+        title="enriched",
+        lat=34.0,
+        lon=-118.0,
+        location_text="Enriched Location",
+        reasons=["enriched_reason"],
+        source_metadata={"source": "enriched"},
+    )
+
+    merged = CandidateSet.merge([CandidateSet(unique=[base]), CandidateSet(unique=[enriched_duplicate])])
+
+    assert merged.unique == [base]
+    assert merged.coordinate_bearing == []
+    assert merged.unique[0].location_text == "Base Location"
+    assert merged.unique[0].reasons == ["base_reason"]
+    assert merged.unique[0].source_metadata == {"source": "base"}
+
 def test_target_context_has_stable_target_identity():
     ctx = TargetContext(
         user_query="Get cameras from Greenville, Texas",

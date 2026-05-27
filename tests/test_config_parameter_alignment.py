@@ -79,3 +79,19 @@ def test_explicit_deprecated_max_streams_env_still_works_and_warns(tmp_path, mon
         cfg = load_run_config("Get cameras from Example City", tmp_path)
 
     assert cfg.max_streams == 17
+
+
+def test_default_sources_file_resolves_from_non_repo_working_directory(tmp_path, monkeypatch):
+    from camera_discovery.core.config import load_harvest_config
+    from camera_discovery.sources import load_source_policy
+
+    monkeypatch.delenv("CAMERA_DISCOVERY_SOURCES_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    cfg = load_harvest_config("California traffic cameras", tmp_path / "harvest")
+    assert cfg.sources_file is not None
+    assert cfg.sources_file.name == "SOURCES.md"
+    assert cfg.sources_file.exists()
+
+    policy = load_source_policy(cfg.sources_file)
+    assert len(policy.enabled_allowed_sources()) > 0

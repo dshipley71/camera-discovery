@@ -28,6 +28,8 @@ The implementation is accepted when the documentation and code agree on the foll
 6. Browser capture is optional, budgeted, logged, and available through Playwright by default or CloakBrowser when configured.
 7. JSON endpoint metadata is preserved into candidates, tables, GeoJSON, and maps when available.
 8. Candidate budgets separately account for HLS, image snapshot, and total candidates.
+9. `CandidateSet.merge()` preserves same-stream candidates across different targets by including `target_id` in its dedupe key.
+10. Duplicate candidates for the same stream and same target retain the first-seen candidate and do not silently merge later enrichment, coordinate, validation, reason, source-metadata, or target-provenance fields.
 
 ## Harvest
 
