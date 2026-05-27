@@ -1,60 +1,122 @@
 # Repository Layout
 
+This file describes the implemented source tree. It is not an aspirational design document.
+
 ```text
 camera-discovery/
-  AGENTS.md                         # Coding-agent guardrails and source-aligned build rules
-  Makefile                          # Convenience test/validation commands
-  README.md                         # Main user/developer documentation
-  REPOSITORY_LAYOUT.md              # This file
-  SOURCES.md                        # Optional runtime source registry, empty by default
-  SOURCES.example.md                # Example source registry schema
-  architecture.svg / architecture.png
-  camera-discovery-overview.md      # Architecture overview copy of the main docs
+  AGENTS.md
+  README.md
+  REPOSITORY_LAYOUT.md
+  SOURCES.md
+  SOURCES.example.md
+  Makefile
+  pyproject.toml
+  .github/workflows/tests.yml
   docs/
-    README.md
-    acceptance.md
-    output_artifacts.md
-    project_structure.md
-    runtime_configuration.md
-    sources_blueprint.md
-    codex_prompt_*.md               # Historical implementation prompts, retained as references
   agents/
-    *.md                            # Coding-agent responsibility docs
-    implementation_notes/*.md       # Lower-level implementation notes
   notebooks/
-    camera_discovery_live_test.ipynb # Live test/review notebook
-  src/camera_discovery/
-    cli.py                          # Thin Typer CLI orchestration
-    core/
-      config.py                     # Environment/CLI-to-RunConfig loading
-      models.py                     # Dataclass contracts and trust enums
-      progress_events.py            # Progress event names
-    llm/
-      base.py                       # LLM protocol and chat message contract
-      factory.py                    # Shared provider/stage factory
-      ollama.py                     # Ollama and Ollama Cloud-compatible /api/chat client
-      openai_compatible.py          # OpenAI-compatible /v1/chat/completions client
-      bedrock.py                    # AWS Bedrock Converse client
-    services/
-      target_resolver.py            # Multi-target intent, geocoding, deterministic geometry trust
-      discovery_engine.py           # Source rows, extraction, browser capture, metadata, scope gates
-      review_validation_pipeline.py # Validation, trusted/review artifacts, maps, package
-    sources/
-      models.py                     # SourceEntry, BlockedSource, SourcePolicy
-      registry.py                   # SOURCES.md parser
-    utils/
-      geojson_viewer.py             # GeoJSON selection, table flattening, embedded Leaflet map
-      io.py                         # JSON/JSONL writers
-      json_utils.py                 # Robust JSON extraction helpers
   tests/
-    test_*.py                       # Contract and regression tests
+  src/camera_discovery/
 ```
 
-The CLI should remain thin. Business logic belongs in the three service modules. `RunState` is the canonical run snapshot, and output artifacts are projections of the service state.
+## Source package
 
-Generated caches such as `__pycache__/` and `.pytest_cache/` are not required source artifacts and should not be committed in normal development.
+```text
+src/camera_discovery/
+  cli.py
+  cli_commands/
+    output.py
+    progress.py
+  core/
+    config.py
+    models.py
+    progress_events.py
+  runners/
+    discovery_run.py
+    harvest_run.py
+  services/
+    discovery_engine.py
+    harvest_engine.py
+    harvest_handoff.py
+    review_validation_pipeline.py
+    structured_camera_records.py
+    target_resolver.py
+  discovery/
+    artifact_writer.py
+    browser_capture.py
+    candidate_extraction.py
+    candidate_priority.py
+    candidate_processing.py
+    search_dispatch.py
+    source_rows.py
+  extraction/
+    browser.py
+    html.py
+    http.py
+    json_records.py
+    media.py
+    pagination.py
+    search.py
+  harvest/
+    json_records.py
+    media_filter.py
+    outputs.py
+    records.py
+  enrichment/
+    location.py
+  sources/
+    __init__.py
+    models.py
+    registry.py
+  llm/
+    base.py
+    bedrock.py
+    factory.py
+    ollama.py
+    openai_compatible.py
+  utils/
+    geojson_viewer.py
+    io.py
+    json_utils.py
+```
 
-### Harvest handoff modules
+## Responsibility boundaries
 
-- `src/camera_discovery/services/structured_camera_records.py` — generic, source-agnostic extraction of structured camera records and grouped media assets from public JSON/API/GeoJSON/ArcGIS-style data.
-- `src/camera_discovery/services/harvest_handoff.py` — loads `harvest_handoff.json` or `harvest_camera_inventory.jsonl` and converts source-provided harvest rows into normal `CameraCandidate` objects for `camera-discovery run --harvest-input`.
+| Area | Responsibility |
+|---|---|
+| `cli.py` | Thin Typer command declarations, config loading, progress-mode resolution, runner delegation. |
+| `cli_commands/` | Console progress and friendly output helpers. |
+| `core/` | Runtime dataclasses, config/environment loading, progress-event contract. |
+| `runners/` | Executable workflow entry points used by CLI and notebooks. |
+| `services/` | Public long-lived service classes and compatibility/facade modules. |
+| `discovery/` | Normal pipeline stage helpers: source rows, extraction dispatch, browser capture, candidate processing, candidate priority, artifact writing. |
+| `extraction/` | Shared low-level HTTP/HTML/media/JSON/search/browser/pagination helpers used by discovery and harvest. |
+| `harvest/` | Harvest-specific media filtering, record conversion, JSON metadata promotion, output helpers. |
+| `enrichment/` | Coordinate/location evidence helpers. |
+| `sources/` | `SOURCES.md` parsing and global source block policy. |
+| `llm/` | Shared provider factory and provider clients. |
+| `utils/` | File IO and GeoJSON/map rendering helpers. |
+
+## Public compatibility imports
+
+These public imports must continue to work:
+
+```python
+from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
+from camera_discovery.services.harvest_engine import CameraUrlHarvestEngine
+from camera_discovery.services.review_validation_pipeline import ReviewAndValidationPipeline
+from camera_discovery.services.target_resolver import TargetResolver
+```
+
+## Notebooks and tests
+
+Current notebooks:
+
+```text
+notebooks/camera_discovery_live_test.ipynb
+notebooks/camera_discovery_harvest_urls_test.ipynb
+```
+
+Notebook-specific helper/display code belongs in notebooks, not `src/`.
+
+Tests live under `tests/` and cover CLI contracts, config alignment, source policy, blind search parsing, harvest media/structured records/handoff, browser backend/preflight behavior, multi-target contracts, candidate priority, output filtering, and provider configuration.

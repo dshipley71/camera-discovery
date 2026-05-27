@@ -67,3 +67,31 @@ def test_run_config_builtin_defaults_are_aligned():
     assert cfg.max_streams == expected
     assert cfg.max_candidate_geocodes == expected
     assert cfg.max_state_scale_candidate_geocodes == expected
+
+
+def test_explicit_deprecated_max_streams_env_still_works_and_warns(tmp_path, monkeypatch):
+    _clear_parameter_env(monkeypatch)
+    monkeypatch.setenv("CAMERA_DISCOVERY_MAX_STREAMS", "17")
+
+    import pytest
+
+    with pytest.warns(DeprecationWarning, match="CAMERA_DISCOVERY_MAX_STREAMS is deprecated"):
+        cfg = load_run_config("Get cameras from Example City", tmp_path)
+
+    assert cfg.max_streams == 17
+
+
+def test_default_sources_file_resolves_from_non_repo_working_directory(tmp_path, monkeypatch):
+    from camera_discovery.core.config import load_harvest_config
+    from camera_discovery.sources import load_source_policy
+
+    monkeypatch.delenv("CAMERA_DISCOVERY_SOURCES_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    cfg = load_harvest_config("California traffic cameras", tmp_path / "harvest")
+    assert cfg.sources_file is not None
+    assert cfg.sources_file.name == "SOURCES.md"
+    assert cfg.sources_file.exists()
+
+    policy = load_source_policy(cfg.sources_file)
+    assert len(policy.enabled_allowed_sources()) > 0

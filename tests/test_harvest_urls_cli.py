@@ -199,8 +199,23 @@ def test_harvest_notebook_exists_and_is_cli_harness():
     assert notebook.exists()
     text = notebook.read_text(encoding="utf-8")
     assert "harvest-urls" in text
+    assert "--harvest-input-mode" in text
+    assert "handoff-only" in text
+    assert "--profile" in text
     assert "CameraUrlHarvestEngine" not in text
     assert "TargetResolver" not in text
+
+
+def test_harvest_handoff_notebooks_use_explicit_handoff_mode_and_profile():
+    for notebook in [
+        Path("notebooks/camera_discovery_harvest_hls_handoff_full_validation_test.ipynb"),
+        Path("notebooks/camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb"),
+    ]:
+        text = notebook.read_text(encoding="utf-8")
+        assert "--harvest-input-mode" in text
+        assert "handoff-only" in text
+        assert "--profile" in text
+        assert "camera_discovery_notebook" not in text
 
 
 

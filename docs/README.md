@@ -1,12 +1,18 @@
 # Documentation Index
 
-This folder contains source-aligned project documentation for the current `camera-discovery` implementation.
+Active source-aligned documentation:
 
-- `project_structure.md` — module layout and responsibility boundaries.
-- `runtime_configuration.md` — CLI options, provider settings, budgets, and runtime environment variables.
-- `output_artifacts.md` — trusted/review outputs and diagnostic files.
-- `acceptance.md` — behavior and validation criteria aligned with the implemented source code.
-- `sources_blueprint.md` — `SOURCES.md` schema and source-policy behavior.
-- `codex_prompt_*.md` — historical implementation prompts retained for traceability. They are references, not the primary runtime documentation.
+| File | Purpose |
+|---|---|
+| `../README.md` | Main user/developer overview and common commands. |
+| `../AGENTS.md` | Repository-wide coding-agent rules. |
+| `../REPOSITORY_LAYOUT.md` | Implemented package/module layout. |
+| `project_structure.md` | More detailed architecture and module responsibilities. |
+| `runtime_configuration.md` | CLI options and environment variables. |
+| `output_artifacts.md` | Normal-run and harvest artifact contracts. |
+| `acceptance.md` | Verification commands and acceptance expectations. |
+| `sources_blueprint.md` | `SOURCES.md` format and source-policy rules. |
+| `../agents/*.md` | Role-specific coding-agent instructions. |
+| `../notebooks/README.md` | Colab notebook scenarios and usage notes. |
 
-The root `README.md` is the primary user/developer guide. The files under `agents/` are coding-agent instructions that should stay aligned with `src/camera_discovery/`.
+Historical `docs/codex_prompt_*.md` files are implementation traceability records. They may mention older module locations; current source and the active docs above are authoritative.
