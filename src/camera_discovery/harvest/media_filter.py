@@ -341,7 +341,28 @@ def image_record_text(record: HarvestedUrlRecord) -> str:
     return " ".join(str(part or "") for part in parts).casefold()
 
 def canonical_media_url(url: str) -> str:
-    split = urlsplit(url.strip())
+    cleaned = _strip_extraction_trailers(url)
+    split = urlsplit(cleaned)
     scheme = split.scheme.casefold()
-    netloc = split.netloc.casefold()
+    host = (split.hostname or "").casefold()
+    port = split.port
+    if port and not ((scheme == "https" and port == 443) or (scheme == "http" and port == 80)):
+        host = f"{host}:{port}"
+    netloc = host
+    if split.username:
+        auth = split.username
+        if split.password:
+            auth = f"{auth}:{split.password}"
+        netloc = f"{auth}@{host}"
     return urlunsplit((scheme, netloc, split.path, split.query, ""))
+
+
+def _strip_extraction_trailers(url: str) -> str:
+    value = str(url or "").strip()
+    # Text/JSON/HTML extraction often leaves escape characters or closing punctuation
+    # immediately after the URL. Keep query tokens intact, but trim unambiguous
+    # delimiters that cannot be part of a usable media URL.
+    trailing = "\\'\"),;]}"
+    while value and value[-1] in trailing:
+        value = value[:-1].rstrip()
+    return value

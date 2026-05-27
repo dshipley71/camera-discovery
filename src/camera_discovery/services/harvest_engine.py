@@ -29,6 +29,7 @@ from camera_discovery.extraction.http import _get_with_retry
 from camera_discovery.extraction.media import _dedupe_strings, _looks_like_non_camera_asset
 from camera_discovery.extraction.pagination import _expand_structured_endpoint_urls, _pagination_rows
 from camera_discovery.extraction.search import parse_ddg_result_rows
+from camera_discovery.extraction.browser import browser_backend_preflight
 from camera_discovery.harvest.json_records import (
     count_json_records,
     extract_json_blobs,
@@ -121,11 +122,15 @@ class CameraUrlHarvestEngine:
             "errors": 0,
             "timeouts": 0,
             "network_events_sample": [],
+            "preflight_ok": None,
+            "disabled_reason": "",
+            "install_hint": "",
         }
 
     def harvest(self) -> HarvestResult:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self._run_browser_preflight()
         self._emit("harvest_started", query=self.config.query, discovery_mode=self.config.discovery_mode.value)
         rows = self._source_rows()
         write_jsonl(self.output_dir / "source_rows.jsonl", rows)
@@ -207,6 +212,32 @@ class CameraUrlHarvestEngine:
         )
         self._emit("harvest_complete", raw_records=result.raw_count, unique_urls=result.unique_count, written_urls=result.written_count)
         return result
+
+
+    def _run_browser_preflight(self) -> None:
+        if self._browser_summary.get("preflight_ok") is not None:
+            return
+        if not self.config.enable_browser_capture:
+            self._browser_summary["preflight_ok"] = None
+            return
+        result = browser_backend_preflight(self.config.browser_backend)
+        self._browser_summary.update(result.to_dict())
+        self._browser_summary["preflight_ok"] = result.ok
+        if not result.ok:
+            self.config.enable_browser_capture = False
+            self._browser_summary["enabled"] = False
+            self._browser_summary["disabled_reason"] = result.disabled_reason
+            self._warnings.append(f"Browser capture disabled: {result.disabled_reason}. {result.install_hint}")
+            write_jsonl(self.logs_dir / "browser_capture_preflight.jsonl", [result.to_dict()], append=True)
+            self._emit(
+                "harvest_browser_capture_disabled",
+                browser_backend=self.config.browser_backend,
+                disabled_reason=result.disabled_reason,
+                install_hint=result.install_hint,
+            )
+        else:
+            self._browser_summary["enabled"] = True
+            write_jsonl(self.logs_dir / "browser_capture_preflight.jsonl", [result.to_dict()], append=True)
 
     def _make_client(self) -> httpx.Client:
         return httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True)
@@ -825,7 +856,7 @@ class CameraUrlHarvestEngine:
         outputs["harvest_camera_inventory_jsonl"] = str(self.output_dir / "harvest_camera_inventory.jsonl")
 
         handoff = {
-            "schema_version": "harvest-handoff/v1",
+            "schema_version": "harvest-handoff/v2",
             "query": self.config.query,
             "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "mode": "harvest",
@@ -835,7 +866,10 @@ class CameraUrlHarvestEngine:
             "scope_filtered": False,
             "trusted": False,
             "llm_reviewed": False,
+            "media_filter": list(self.media_filter.requested),
+            "handoff_default_scope": "filtered_media_records" if not self.media_filter.all_media else "structured_inventory_records",
             "files": {
+                "filtered_media_records": "camera_urls.jsonl",
                 "harvest_camera_inventory": "harvest_camera_inventory.jsonl",
                 "camera_records": "camera_records.jsonl",
                 "camera_media_assets": "camera_media_assets.jsonl",
@@ -846,8 +880,10 @@ class CameraUrlHarvestEngine:
                 "camera_records": len(camera_records),
                 "media_assets": len(media_assets),
                 "url_records": len(records),
+                "filtered_media_records": len(records),
                 "endpoints": len(endpoints),
                 "records_with_coordinates": sum(1 for record in camera_records if record.lat is not None and record.lon is not None),
+                "filtered_records_with_coordinates": sum(1 for record in records if record.lat is not None and record.lon is not None),
                 "records_with_in_service": sum(1 for record in camera_records if record.in_service is not None),
                 "records_with_timestamps": sum(1 for record in camera_records if record.timestamp or record.date or record.time or record.last_updated or record.last_refresh),
                 "records_with_update_frequency": sum(1 for record in camera_records if record.current_image_update_frequency is not None or record.reference_image_update_frequency is not None),

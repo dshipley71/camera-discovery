@@ -93,3 +93,69 @@ class BrowserCaptureResult:
             "error": self.error,
             "network_events_sample": self.network_events_sample or [],
         }
+
+@dataclass
+class BrowserPreflightResult:
+    backend: str
+    ok: bool
+    disabled_reason: str = ""
+    install_hint: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def browser_backend_preflight(backend: str) -> BrowserPreflightResult:
+    """Check browser backend availability without faking capture success."""
+    normalized = (backend or "playwright").strip().casefold()
+    if normalized == "cloakbrowser":
+        try:
+            import cloakbrowser  # type: ignore[import-not-found]
+        except Exception as exc:
+            return BrowserPreflightResult(
+                backend=normalized,
+                ok=False,
+                disabled_reason=f"cloakbrowser_unavailable: {exc!r}",
+                install_hint="Install with: pip install -e .[cloakbrowser]",
+            )
+        if not hasattr(cloakbrowser, "launch"):
+            return BrowserPreflightResult(
+                backend=normalized,
+                ok=False,
+                disabled_reason="cloakbrowser_launch_missing",
+                install_hint="Install with: pip install -e .[cloakbrowser]",
+            )
+        return BrowserPreflightResult(backend=normalized, ok=True)
+    if normalized == "playwright":
+        try:
+            from pathlib import Path
+            from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
+        except Exception as exc:
+            return BrowserPreflightResult(
+                backend=normalized,
+                ok=False,
+                disabled_reason=f"playwright_unavailable: {exc!r}",
+                install_hint="Install with: pip install -e .[playwright] and run: python -m playwright install chromium",
+            )
+        try:
+            playwright = sync_playwright().start()
+            try:
+                executable = getattr(playwright.chromium, "executable_path", "")
+                if executable and not Path(executable).exists():
+                    return BrowserPreflightResult(
+                        backend=normalized,
+                        ok=False,
+                        disabled_reason=f"playwright_chromium_missing: {executable}",
+                        install_hint="Run: python -m playwright install chromium",
+                    )
+            finally:
+                playwright.stop()
+        except Exception as exc:
+            return BrowserPreflightResult(
+                backend=normalized,
+                ok=False,
+                disabled_reason=f"playwright_preflight_failed: {exc!r}",
+                install_hint="Install with: pip install -e .[playwright] and run: python -m playwright install chromium",
+            )
+        return BrowserPreflightResult(backend=normalized, ok=True)
+    return BrowserPreflightResult(backend=normalized, ok=False, disabled_reason=f"unsupported_browser_backend:{normalized}")

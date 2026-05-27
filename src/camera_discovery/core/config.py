@@ -67,6 +67,7 @@ def load_run_config(
     discovery_mode: str | None = None,
     block_patterns: list[str] | None = None,
     harvest_input: str | Path | None = None,
+    browser_backend: str | None = None,
 ) -> RunConfig:
     load_dotenv(override=False)
     selected_profile = RuntimeProfile(profile or os.getenv("CAMERA_DISCOVERY_PROFILE", "fast").strip().lower())
@@ -80,6 +81,10 @@ def load_run_config(
         or default_llm_model
     )
     selected_discovery_mode = DiscoveryMode((discovery_mode or os.getenv("CAMERA_DISCOVERY_DISCOVERY_MODE", "both")).strip().lower())
+    configured_browser_backend = (browser_backend or _browser_backend_env()).strip().lower()
+    if configured_browser_backend not in _ALLOWED_BROWSER_BACKENDS:
+        allowed = ", ".join(sorted(_ALLOWED_BROWSER_BACKENDS))
+        raise ValueError(f"Invalid browser backend {configured_browser_backend!r}; expected one of: {allowed}")
     configured_sources_file = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
     max_hls_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_HLS_CANDIDATES", 100))
     max_image_snapshot_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES", 50))
@@ -116,7 +121,7 @@ def load_run_config(
         max_directory_pages=max(1, _int_env("CAMERA_DISCOVERY_MAX_DIRECTORY_PAGES", 8)),
         max_structured_endpoints_per_page=max(1, _int_env("CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", 20)),
         enable_browser_capture=_bool_env("CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE", True),
-        browser_backend=_browser_backend_env(),
+        browser_backend=configured_browser_backend,
         browser_capture_timeout_ms=max(1000, _int_env("CAMERA_DISCOVERY_BROWSER_CAPTURE_TIMEOUT_MS", 15000)),
         browser_capture_min_score=max(0, _int_env("CAMERA_DISCOVERY_BROWSER_CAPTURE_MIN_SCORE", 3)),
         max_browser_capture_pages=max(0, _int_env("CAMERA_DISCOVERY_MAX_BROWSER_CAPTURE_PAGES", 20)),

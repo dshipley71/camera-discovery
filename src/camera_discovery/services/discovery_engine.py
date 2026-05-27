@@ -47,7 +47,7 @@ from camera_discovery.enrichment.location import (
     _specific_candidate_location_text,
     _valid_lat_lon,
 )
-from camera_discovery.extraction.browser import BrowserCaptureDecision, BrowserCaptureResult, PageDiscoverySignals
+from camera_discovery.extraction.browser import BrowserCaptureDecision, BrowserCaptureResult, PageDiscoverySignals, browser_backend_preflight
 from camera_discovery.extraction.html import (
     _first_nonempty,
     _html_soup,
@@ -152,6 +152,9 @@ class CandidateDiscoveryEngine:
             "errors": 0,
             "timeouts": 0,
             "by_source_provider": {},
+            "preflight_ok": None,
+            "disabled_reason": "",
+            "install_hint": "",
         }
 
     def _emit_progress(self, event: str, **payload: Any) -> None:
@@ -169,6 +172,7 @@ class CandidateDiscoveryEngine:
             return
 
     def discover(self, target: TargetContext) -> CandidateSet:
+        self._run_browser_preflight()
         queries = self._search_queries(target) if self.config.discovery_mode in {DiscoveryMode.BLIND, DiscoveryMode.BOTH} else []
         self._emit_progress("search_queries_ready", target=target, queries=len(queries))
         client = self._make_client()
@@ -229,6 +233,31 @@ class CandidateDiscoveryEngine:
             in_scope=len(cs.in_scope),
         )
         return cs
+
+
+    def _run_browser_preflight(self) -> None:
+        if self._browser_capture_summary.get("preflight_ok") is not None:
+            return
+        if not self.config.enable_browser_capture:
+            self._browser_capture_summary["preflight_ok"] = None
+            return
+        result = browser_backend_preflight(self.config.browser_backend)
+        self._browser_capture_summary.update(result.to_dict())
+        self._browser_capture_summary["preflight_ok"] = result.ok
+        if not result.ok:
+            self.config.enable_browser_capture = False
+            self._browser_capture_summary["enabled"] = False
+            self._browser_capture_summary["disabled_reason"] = result.disabled_reason
+            write_jsonl(self.logs_dir / "browser_capture_preflight.jsonl", [result.to_dict()], append=True)
+            self._emit_progress(
+                "browser_capture_disabled",
+                browser_backend=self.config.browser_backend,
+                disabled_reason=result.disabled_reason,
+                install_hint=result.install_hint,
+            )
+        else:
+            self._browser_capture_summary["enabled"] = True
+            write_jsonl(self.logs_dir / "browser_capture_preflight.jsonl", [result.to_dict()], append=True)
 
     def _make_client(self) -> httpx.Client:
         return httpx.Client(

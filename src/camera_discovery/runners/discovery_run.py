@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import threading
+from collections import Counter
 from contextlib import nullcontext
 
 import typer
@@ -16,9 +17,13 @@ from camera_discovery.cli_commands.progress import (
     _make_plain_discovery_progress_callback,
     _make_progress,
 )
-from camera_discovery.core.models import CandidateSet, RunConfig, RunState, TrustPolicy
+from camera_discovery.core.models import CameraCandidate, CandidateSet, RunConfig, RunState, TargetContext, TrustPolicy
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
-from camera_discovery.services.harvest_handoff import harvest_records_to_candidates, load_harvest_handoff
+from camera_discovery.services.harvest_handoff import (
+    describe_harvest_handoff,
+    harvest_records_to_candidates,
+    load_harvest_handoff_bundle,
+)
 from camera_discovery.services.review_validation_pipeline import ReviewAndValidationPipeline
 from camera_discovery.services.target_resolver import TargetResolver
 from camera_discovery.sources import load_source_policy
@@ -29,14 +34,26 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
     """Run the full discovery workflow for a prepared RunConfig."""
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     state = RunState(config=cfg)
+    sources_exists = bool(cfg.sources_file and cfg.sources_file.exists())
+    console.print("[bold]Pipeline mode:[/bold] normal discovery pipeline")
+    console.print(f"[bold]Query:[/bold] {cfg.query}")
+    console.print(f"[bold]Output dir:[/bold] {cfg.output_dir}")
     console.print(f"[bold]Profile:[/bold] {cfg.profile.value}")
-    console.print(f"[bold]Validation enabled:[/bold] {cfg.validation_enabled}")
+    console.print(f"[bold]Validation enabled:[/bold] {cfg.validation_enabled} (trusted outputs require validation)")
     console.print(f"[bold]LLM provider:[/bold] {cfg.llm_provider}")
     console.print(f"[bold]Target-intent model:[/bold] {cfg.target_intent_model}")
     console.print(f"[bold]Discovery mode:[/bold] {cfg.discovery_mode.value}")
-    console.print(f"[bold]Sources file:[/bold] {cfg.sources_file}")
+    console.print(f"[bold]Sources file:[/bold] {cfg.sources_file} (exists={sources_exists})")
+    console.print(f"[bold]Browser capture:[/bold] enabled={cfg.enable_browser_capture} backend={cfg.browser_backend}")
     if cfg.harvest_input:
-        console.print(f"[bold]Harvest input:[/bold] {cfg.harvest_input} (source-provided, unvalidated, untrusted seed data)")
+        handoff_description = describe_harvest_handoff(cfg.harvest_input)
+        console.print(f"[bold]Harvest input:[/bold] {cfg.harvest_input} (exists={handoff_description.get('exists')})")
+        if handoff_description.get("media_filter"):
+            console.print(
+                f"[bold]Harvest handoff filter:[/bold] {handoff_description.get('media_filter')} "
+                f"default={handoff_description.get('handoff_default_scope')} artifact={handoff_description.get('default_artifact')}"
+            )
+        console.print("[bold]Harvest input trust:[/bold] source-provided, unvalidated, untrusted seed data")
 
     progress = _make_progress(console, enabled=True) if progress_mode == "rich" else None
 
@@ -130,46 +147,66 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
                         total = max(1, state_for_target.get("total", 0), state_for_target.get("completed", 0))
                         progress.update(task_id, total=total, completed=total, description=f"Discovered {target.target_label or target.canonical_target or target.target_id}")
 
+        native_candidate_summary = _candidate_set_summary(CandidateSet.merge(list(per_target_sets.values())))
+        harvest_input_summary: dict[str, object] = {"loaded": False}
         if cfg.harvest_input:
             if progress_mode == "plain":
                 console.print("Progress: loading harvest input...")
             elif progress_mode == "events":
                 _emit_progress_stream_event("harvest_input_loaded", {"path": str(cfg.harvest_input), "stage": "started"})
             try:
-                handoff_records = load_harvest_handoff(cfg.harvest_input)
+                handoff = load_harvest_handoff_bundle(cfg.harvest_input)
             except ValueError as exc:
                 raise typer.BadParameter(str(exc)) from exc
             source_policy = load_source_policy(cfg.sources_file, cfg.block_patterns)
             total_handoff_candidates = 0
+            harvest_media_counter: Counter[str] = Counter()
+            harvest_scope_counter: Counter[str] = Counter()
             for target in runnable_targets:
                 handoff_candidates = harvest_records_to_candidates(
-                    handoff_records,
+                    handoff.records,
                     target_id=target.target_id,
                     target_index=target.target_index,
                     target_label=target.target_label or target.canonical_target,
                     source_policy=source_policy,
                 )
+                _scope_harvest_input_candidates(handoff_candidates, target)
                 total_handoff_candidates += len(handoff_candidates)
-                per_target_sets[f"{target.target_id}:harvest_input"] = CandidateSet(
-                    raw=handoff_candidates,
-                    unique=handoff_candidates,
-                    coordinate_bearing=[c for c in handoff_candidates if c.has_coordinates],
-                    in_scope=[],
-                    review=handoff_candidates,
-                    rejected=[],
-                )
+                harvest_media_counter.update(str((c.source_metadata or {}).get("media_type") or "unknown") for c in handoff_candidates)
+                harvest_scope_counter.update(c.scope_status for c in handoff_candidates)
+                per_target_sets[f"{target.target_id}:harvest_input"] = _candidate_set_from_scoped_harvest(handoff_candidates)
+            harvest_input_summary = {
+                "loaded": True,
+                "source_path": str(cfg.harvest_input),
+                "loaded_artifact": handoff.loaded_artifact,
+                "source_file": str(handoff.source_file) if handoff.source_file else None,
+                "schema_version": handoff.schema_version,
+                "media_filter": handoff.media_filter,
+                "handoff_default_scope": handoff.handoff_default_scope,
+                "candidate_count": total_handoff_candidates,
+                "by_media_type": dict(sorted(harvest_media_counter.items())),
+                "by_scope_status": dict(sorted(harvest_scope_counter.items())),
+                "filtered_by_handoff_media_filter": handoff.filtered_by_handoff_media_filter,
+            }
             state.warnings.append(
                 f"Loaded {total_handoff_candidates} unvalidated/untrusted candidate(s) from harvest input; normal run processing still applies."
             )
-            console.print(f"[bold]Harvest input candidates:[/bold] {total_handoff_candidates}")
+            console.print(
+                f"[bold]Harvest input candidates:[/bold] {total_handoff_candidates} "
+                f"from {handoff.loaded_artifact}; media={dict(sorted(harvest_media_counter.items()))}; "
+                f"scope={dict(sorted(harvest_scope_counter.items()))}"
+            )
             if progress_mode == "events":
                 _emit_progress_stream_event("harvest_input_loaded", {"path": str(cfg.harvest_input), "candidates": total_handoff_candidates, "stage": "complete"})
 
         state.candidate_sets_by_target = per_target_sets
         merged = CandidateSet.merge(list(per_target_sets.values()))
         state.candidates = merged
+        combined_summary = _candidate_set_summary(merged)
+        _write_pipeline_candidate_summary(cfg, native_candidate_summary, harvest_input_summary, combined_summary)
         console.print(
-            f"[bold]Candidates:[/bold] raw={len(merged.raw)} unique={len(merged.unique)} "
+            f"[bold]Candidates:[/bold] native_unique={native_candidate_summary['unique_candidates']} "
+            f"harvest_input={harvest_input_summary.get('candidate_count', 0)} combined_unique={len(merged.unique)} "
             f"coordinate_bearing={len(merged.coordinate_bearing)} targets={len(per_target_sets)}"
         )
 
@@ -210,3 +247,74 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
         except Exception:
             console.print(f"[bold]Run explanation:[/bold] {cfg.output_dir / 'RUN_EXPLANATION.md'}")
     return state
+
+
+def _scope_harvest_input_candidates(candidates: list[CameraCandidate], target: TargetContext) -> None:
+    bbox = target.bbox if target.bbox_verified else None
+    for candidate in candidates:
+        if candidate.has_coordinates and bbox:
+            assert candidate.lat is not None and candidate.lon is not None
+            if bbox["min_lat"] <= candidate.lat <= bbox["max_lat"] and bbox["min_lon"] <= candidate.lon <= bbox["max_lon"]:
+                candidate.scope_status = "in_scope"
+                candidate.reasons.append("harvest_input_coordinate_inside_verified_bbox")
+            else:
+                candidate.scope_status = "out_of_scope"
+                candidate.trust_level = "rejected"
+                candidate.reasons.append("harvest_input_coordinate_outside_verified_bbox")
+        elif candidate.has_coordinates:
+            candidate.scope_status = "review"
+            candidate.reasons.append("harvest_input_coordinate_available_but_target_bbox_untrusted_or_missing")
+        else:
+            candidate.scope_status = "unknown"
+            candidate.reasons.append("harvest_input_missing_candidate_coordinates")
+
+
+def _candidate_set_from_scoped_harvest(candidates: list[CameraCandidate]) -> CandidateSet:
+    return CandidateSet(
+        raw=candidates,
+        unique=candidates,
+        coordinate_bearing=[c for c in candidates if c.has_coordinates],
+        in_scope=[c for c in candidates if c.scope_status == "in_scope"],
+        review=[c for c in candidates if c.scope_status in {"in_scope", "review", "unknown"}],
+        rejected=[c for c in candidates if c.scope_status == "out_of_scope"],
+    )
+
+
+def _candidate_set_summary(candidates: CandidateSet) -> dict[str, object]:
+    return {
+        "raw_candidates": len(candidates.raw),
+        "unique_candidates": len(candidates.unique),
+        "coordinate_bearing_candidates": len(candidates.coordinate_bearing),
+        "in_scope_candidates": len(candidates.in_scope),
+        "review_candidates": len(candidates.review),
+        "rejected_candidates": len(candidates.rejected),
+        "by_media_type": dict(sorted(Counter(str((c.source_metadata or {}).get("media_type") or "unknown") for c in candidates.unique).items())),
+        "by_scope_status": dict(sorted(Counter(c.scope_status for c in candidates.unique).items())),
+        "by_discovery_method": dict(sorted(Counter(c.discovery_method for c in candidates.unique).items())),
+    }
+
+
+def _write_pipeline_candidate_summary(
+    cfg: RunConfig,
+    native_discovery: dict[str, object],
+    harvest_input: dict[str, object],
+    combined: dict[str, object],
+) -> None:
+    summary = {
+        # Backward-compatible top-level counts now describe the combined set.
+        "raw": combined["raw_candidates"],
+        "unique": combined["unique_candidates"],
+        "coordinate_bearing": combined["coordinate_bearing_candidates"],
+        "in_scope": combined["in_scope_candidates"],
+        "review": combined["review_candidates"],
+        "rejected": combined["rejected_candidates"],
+        "native_discovery": native_discovery,
+        "harvest_input": harvest_input,
+        "combined": {
+            "candidate_count_before_scope": combined["unique_candidates"],
+            "candidate_count_after_scope": combined["unique_candidates"],
+            **combined,
+        },
+    }
+    write_json(cfg.output_dir / "logs" / "candidate_discovery_summary.json", summary)
+    write_json(cfg.output_dir / "logs" / "pipeline_candidate_summary.json", summary)

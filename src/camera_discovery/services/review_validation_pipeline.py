@@ -187,24 +187,31 @@ class ReviewAndValidationPipeline:
         media_counts: dict[str, int] = {}
         provider_counts: dict[str, int] = {}
         missing_coordinates = 0
+        harvest_input_candidates = 0
+        native_candidates = 0
         for candidate in candidates.unique:
             metadata = candidate.source_metadata or {}
             media = str(metadata.get("media_type") or "unknown")
             provider = str(metadata.get("source_provider") or candidate.discovery_method or "unknown")
             media_counts[media] = media_counts.get(media, 0) + 1
             provider_counts[provider] = provider_counts.get(provider, 0) + 1
+            if candidate.discovery_method == "harvest_handoff" or metadata.get("harvest_input"):
+                harvest_input_candidates += 1
+            else:
+                native_candidates += 1
             if not candidate.has_coordinates:
                 missing_coordinates += 1
         explanation = {
             "plain_language_summary": [
                 f"Resolved {len(targets)} target(s): " + ", ".join(t.canonical_target or t.target_label or t.target_id for t in targets),
-                f"Found {len(candidates.unique)} unique candidate camera record(s).",
+                f"Found {len(candidates.unique)} unique candidate camera record(s): {native_candidates} native discovery candidate(s) and {harvest_input_candidates} harvest-input candidate(s).",
                 f"{out.coordinate_bearing_candidates} candidate(s) had real coordinates; {missing_coordinates} remain table-only because no verified coordinate was extracted or geocoded.",
                 f"Trusted camera.geojson created: {out.trusted_geojson_created} ({out.trusted_geojson_features_written} feature(s)).",
                 f"Untrusted review GeoJSON created: {out.untrusted_geojson_created} ({out.untrusted_geojson_features_written} feature(s)).",
                 f"Coordinate-bearing GeoJSON coverage: {out.coordinate_bearing_geojson_features_written}/{out.coordinate_bearing_candidates} feature(s) written; {out.coordinate_bearing_without_geojson} coordinate-bearing candidate(s) were not written to a GeoJSON artifact.",
                 "Fast profile is review-only; use balanced/full validation when you want stream validation and trusted output authorization.",
             ],
+            "candidate_source_counts": {"native_discovery": native_candidates, "harvest_input": harvest_input_candidates, "combined": len(candidates.unique)},
             "media_type_counts": media_counts,
             "source_provider_counts": provider_counts,
             "geojson_metrics": {

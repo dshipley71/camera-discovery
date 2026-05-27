@@ -39,20 +39,25 @@ def run(
     discovery_mode: str = typer.Option("both", "--discovery-mode", help="blind, directory, both, or direct"),
     block_pattern: Optional[list[str]] = typer.Option(None, "--block-pattern"),
     harvest_input: Optional[Path] = typer.Option(None, "--harvest-input", help="Harvest handoff manifest or harvest_camera_inventory.jsonl to seed the normal run workflow."),
+    browser_backend: Optional[str] = typer.Option(None, "--browser-backend", help="playwright or cloakbrowser; overrides CAMERA_DISCOVERY_BROWSER_BACKEND for this run."),
     show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show progress while resolving, discovering, enriching coordinates, validating, and writing outputs."),
     progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, plain, or events. Use events for machine-readable progress records consumed by external UIs."),
 ) -> None:
     """Run public-camera discovery for one or more locations in QUERY."""
-    cfg = load_run_config(
-        query,
-        output_dir,
-        profile=profile,
-        seed_urls=seed_url or [],
-        sources_file=sources_file,
-        discovery_mode=discovery_mode,
-        block_patterns=block_pattern or [],
-        harvest_input=harvest_input,
-    )
+    try:
+        cfg = load_run_config(
+            query,
+            output_dir,
+            profile=profile,
+            seed_urls=seed_url or [],
+            sources_file=sources_file,
+            discovery_mode=discovery_mode,
+            block_patterns=block_pattern or [],
+            harvest_input=harvest_input,
+            browser_backend=browser_backend,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     progress_mode = _resolve_progress_mode(
         console,
         enabled=show_progress,
