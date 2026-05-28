@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-import typer.rich_utils as typer_rich_utils
 from rich.console import Console
 
 from camera_discovery.cli_commands.progress import (
@@ -21,14 +20,7 @@ from camera_discovery.core.config import load_harvest_config, load_run_config
 from camera_discovery.runners.discovery_run import execute_discovery_run
 from camera_discovery.runners.harvest_run import execute_harvest_run
 
-typer_rich_utils.RICH_HELP = False
-typer_rich_utils.MAX_WIDTH = 120
-
-app = typer.Typer(
-    help="Simplified public camera discovery pipeline",
-    no_args_is_help=True,
-    context_settings={"max_content_width": 120},
-)
+app = typer.Typer(help="Simplified public camera discovery pipeline", no_args_is_help=True, rich_markup_mode=None, pretty_exceptions_enable=False)
 console = Console(width=120)
 
 
