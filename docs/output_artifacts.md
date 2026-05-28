@@ -28,6 +28,8 @@ logs/validation_priority_summary.json
 logs/validation_results.jsonl
 logs/validation_summary.json
 logs/output_summary.json
+
+`logs/validation_summary.json` includes validation concurrency/runtime fields such as `validation_workers`, `http_timeout`, and `parallel_validation`.
 logs/run_explanation.json
 logs/target_resolution_all.json
 ```
@@ -68,6 +70,19 @@ logs/blocked_source_rows.jsonl
 logs/search_queries.json
 logs/search_results.jsonl
 ```
+
+
+## Validation progress
+
+During validation, plain progress prints candidate-level milestones such as:
+
+```text
+Progress: validation selected 2287 candidates; workers=24; timeout=10.0s; full_segment_check=False.
+Progress: validating streams 229/2287; live=180; dead=30; unknown=19.
+Progress: validation complete: attempted=2287; live=...; dead=...; unknown=...; skipped=0.
+```
+
+`--progress-style events` emits machine-readable `validation_candidates_selected`, `validation_candidate_processed`, and `validation_complete` records. No validation candidate cap is applied by these progress features.
 
 ## Trusted versus review artifacts
 

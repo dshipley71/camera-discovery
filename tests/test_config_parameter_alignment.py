@@ -95,3 +95,34 @@ def test_default_sources_file_resolves_from_non_repo_working_directory(tmp_path,
 
     policy = load_source_policy(cfg.sources_file)
     assert len(policy.enabled_allowed_sources()) > 0
+
+
+def test_run_config_http_timeout_cli_override_beats_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAMERA_DISCOVERY_HTTP_TIMEOUT", "30")
+
+    cfg = load_run_config("Get cameras from Example City", tmp_path, http_timeout=10)
+
+    assert cfg.http_timeout == 10.0
+
+
+def test_run_config_http_timeout_env_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAMERA_DISCOVERY_HTTP_TIMEOUT", "6")
+
+    cfg = load_run_config("Get cameras from Example City", tmp_path)
+
+    assert cfg.http_timeout == 6.0
+
+
+def test_run_config_rejects_non_positive_http_timeout(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="http-timeout"):
+        load_run_config("Get cameras from Example City", tmp_path, http_timeout=0)
+
+
+def test_run_config_validation_workers_env_is_clamped(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAMERA_DISCOVERY_VALIDATION_WORKERS", "999")
+
+    cfg = load_run_config("Get cameras from Example City", tmp_path)
+
+    assert cfg.validation_workers == 64

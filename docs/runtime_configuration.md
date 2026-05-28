@@ -14,6 +14,7 @@
 --harvest-input PATH
 --harvest-input-mode handoff-only|seed
 --browser-backend playwright|cloakbrowser
+--http-timeout SECONDS
 --progress / --no-progress
 --progress-style auto|rich|plain|events
 ```
@@ -108,6 +109,28 @@ CAMERA_DISCOVERY_GEOCODER_REFEREE_TIMEOUT=45
 CAMERA_DISCOVERY_LOCATION_INFERENCE_TIMEOUT=45
 CAMERA_DISCOVERY_CANDIDATE_REVIEW_TIMEOUT=45
 ```
+
+
+## Validation and HTTP runtime
+
+```bash
+CAMERA_DISCOVERY_HTTP_TIMEOUT=20
+CAMERA_DISCOVERY_VALIDATION_WORKERS=24
+```
+
+`camera-discovery run --http-timeout SECONDS` overrides `CAMERA_DISCOVERY_HTTP_TIMEOUT` for that run. The value must be greater than zero. The timeout is used by network discovery, enrichment, and validation requests.
+
+Validation uses a bounded worker pool for selected validation candidates. `CAMERA_DISCOVERY_VALIDATION_WORKERS` defaults to `24` and is clamped to the safe range `1..64`. This is not a candidate cap: every selected validation candidate is still attempted. The worker count only controls concurrency.
+
+Validation reuses HTTP clients per worker thread so HLS playlist checks and full-profile segment checks do not create a brand-new `httpx.Client` for every candidate.
+
+Profile behavior remains:
+
+| Profile | Validation behavior |
+|---|---|
+| `fast` | Validation disabled; trusted output is blocked. |
+| `balanced` | HLS playlist and image snapshot validation. |
+| `full` | Balanced validation plus HLS segment/variant checks. |
 
 ## Discovery budgets
 

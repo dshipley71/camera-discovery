@@ -106,3 +106,47 @@ def test_geojson_feature_extracts_camera_snapshot(tmp_path):
     assert rows[0].lat == 34.05
     assert rows[0].lon == -118.25
     assert rows[0].stream_url == "https://public.example/harbor.jpg"
+
+
+def test_geocoder_referee_failure_preserves_deterministic_scores(tmp_path):
+    from camera_discovery.core.models import GeocoderCandidate, TargetIntent
+    from camera_discovery.services.target_resolver import TargetResolver
+
+    class FailingReferee:
+        model = "failing-referee"
+
+        def chat(self, messages, *, temperature=0.0):
+            raise RuntimeError("429 Too Many Requests")
+
+    cfg = RunConfig(
+        query="Get me all traffic cameras from California",
+        output_dir=tmp_path,
+        llm_provider="ollama",
+        llm_model="qwen3.5:4b",
+    )
+    resolver = TargetResolver(cfg, geocoder_referee_client=FailingReferee())
+    candidate = GeocoderCandidate(
+        query="California",
+        display_name="California, United States",
+        result_type="administrative",
+        bbox={"min_lat": 32.0, "max_lat": 42.0, "min_lon": -125.0, "max_lon": -114.0},
+        score=42.0,
+        deterministic_score=42.0,
+    )
+    target_logs = tmp_path / "logs" / "targets" / "california"
+    target_logs.mkdir(parents=True)
+
+    resolver._apply_llm_geocoder_referee(
+        [candidate],
+        TargetIntent(raw_query=cfg.query, canonical_target="California", place_name="California"),
+        target_logs,
+    )
+
+    assert candidate.score == 42.0
+    assert candidate.deterministic_score == 42.0
+    assert any("deterministic geocoder score preserved" in warning for warning in candidate.warnings)
+    error_path = target_logs / "geocoder_referee_llm_error.json"
+    assert error_path.exists()
+    error_text = error_path.read_text(encoding="utf-8")
+    assert "RuntimeError" in error_text
+    assert "deterministic_geocoder_scores_preserved" in error_text

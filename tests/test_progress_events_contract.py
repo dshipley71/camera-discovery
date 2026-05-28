@@ -48,3 +48,29 @@ def test_cli_help_advertises_events_progress_style() -> None:
     )
     assert "--progress-style" in result.stdout
     assert "events" in result.stdout
+
+
+def test_validation_progress_event_shape_is_machine_readable(capsys) -> None:
+    emit_progress_event("validation_candidate_processed", {"completed": 5, "total": 10, "live": 3, "dead": 1, "unknown": 1, "validation_workers": 4})
+    out = capsys.readouterr().out
+    assert out.startswith(PROGRESS_EVENT_PREFIX)
+    message = json.loads(out[len(PROGRESS_EVENT_PREFIX):])
+    assert message["event"] == "validation_candidate_processed"
+    assert message["payload"]["completed"] == 5
+    assert message["payload"]["validation_workers"] == 4
+
+
+def test_handoff_validation_notebooks_use_visible_cli_and_http_timeout() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    notebook_names = [
+        "camera_discovery_harvest_hls_handoff_full_validation_test.ipynb",
+        "camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb",
+    ]
+    for name in notebook_names:
+        text = (repo_root / "notebooks" / name).read_text(encoding="utf-8")
+        assert "!camera-discovery run" in text
+        assert "--http-timeout" in text
+        assert "--harvest-input-mode" in text
+        assert "run_cli([" not in text
+        assert "max-validation-candidates" not in text
+        assert "MAX_VALIDATION_CANDIDATES" not in text
