@@ -17,7 +17,8 @@ def execute_harvest_run(cfg: HarvestConfig, *, console: Console, progress_mode: 
     try:
         engine = CameraUrlHarvestEngine(cfg, progress_callback=callback)
     except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+        typer.echo(f"Error: {exc}")
+        raise typer.Exit(2) from exc
     console.print("[bold]Harvest mode:[/bold] extraction-only raw camera/media URL harvesting")
     console.print("[bold]Bypasses:[/bold] target resolution, geocoding, validation, trust, scope, LLM review, GeoJSON, maps, cameras.md, review ZIP")
     console.print(f"[bold]Discovery mode:[/bold] {cfg.discovery_mode.value}")
