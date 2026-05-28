@@ -17,7 +17,12 @@ def execute_harvest_run(cfg: HarvestConfig, *, console: Console, progress_mode: 
     try:
         engine = CameraUrlHarvestEngine(cfg, progress_callback=callback)
     except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+        # Keep harvest validation errors on the command's normal output stream so
+        # Typer/Click stderr-capture differences do not hide actionable messages
+        # in CI.  The exact ValueError text is preserved for tests and users,
+        # including messages such as "Unsupported --media ...".
+        typer.echo(f"Error: {exc}")
+        raise typer.Exit(2) from exc
     console.print("[bold]Harvest mode:[/bold] extraction-only raw camera/media URL harvesting")
     console.print("[bold]Bypasses:[/bold] target resolution, geocoding, validation, trust, scope, LLM review, GeoJSON, maps, cameras.md, review ZIP")
     console.print(f"[bold]Discovery mode:[/bold] {cfg.discovery_mode.value}")
