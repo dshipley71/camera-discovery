@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import concurrent.futures
 import csv
 from dataclasses import asdict
+import threading
 import time
+from typing import Any, Callable
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qsl
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -35,15 +38,27 @@ class ReviewAndValidationPipeline:
     on each candidate and checking each candidate against its target's trust policy.
     """
 
-    def __init__(self, config: RunConfig):
+    def __init__(self, config: RunConfig, progress_callback: Callable[[str, dict[str, Any]], None] | None = None):
         self.config = config
+        self.progress_callback = progress_callback
         self.logs_dir = config.output_dir / "logs"
         self.candidates_dir = config.output_dir / "candidates"
+        self._thread_local = threading.local()
+        self._validation_clients: list[httpx.Client] = []
+        self._validation_clients_lock = threading.Lock()
 
-    def run(self, target: TargetContext | list[TargetContext], candidates: CandidateSet):
+    def run(self, target: TargetContext | list[TargetContext], candidates: CandidateSet, progress_callback: Callable[[str, dict[str, Any]], None] | None = None):
         targets = target if isinstance(target, list) else [target]
         target_map = {t.target_id: t for t in targets}
-        v = ValidationSummary(validation_enabled=self.config.validation_enabled, ffprobe_enabled=self.config.ffprobe_enabled)
+        if progress_callback is not None:
+            self.progress_callback = progress_callback
+        v = ValidationSummary(
+            validation_enabled=self.config.validation_enabled,
+            ffprobe_enabled=self.config.ffprobe_enabled,
+            validation_workers=self.config.validation_workers if self.config.validation_enabled else 0,
+            http_timeout=self.config.http_timeout,
+            parallel_validation=bool(self.config.validation_enabled and self.config.validation_workers > 1),
+        )
         if self.config.validation_enabled and any(t.trust_policy == TrustPolicy.TRUSTED_ALLOWED for t in targets):
             self._validate(candidates, v)
         else:
@@ -55,26 +70,138 @@ class ReviewAndValidationPipeline:
 
     def _validate(self, candidates: CandidateSet, v: ValidationSummary) -> None:
         rows = prioritize_candidates(candidates.in_scope or candidates.review)
+        worker_count = min(max(1, self.config.validation_workers), max(1, len(rows)))
+        v.validation_workers = worker_count if rows else 0
+        v.http_timeout = self.config.http_timeout
+        v.parallel_validation = bool(rows and worker_count > 1)
         write_json(
             self.logs_dir / "validation_priority_summary.json",
             {
                 "selected_candidates": len(rows),
                 "selected_by_priority_bucket": priority_bucket_counts(rows),
+                "validation_workers": v.validation_workers,
+                "http_timeout": v.http_timeout,
+                "parallel_validation": v.parallel_validation,
             },
         )
-        for c in rows:
-            v.attempted += 1
-            status = self._validate_candidate(c)
-            c.validation_status = status
-            if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing"}:
-                v.live += 1
-                c.trust_level = "trusted" if c.scope_status == "in_scope" else "untrusted"
-            elif status in {"dead_link", "offline_http", "restricted_http", "active_playlist_dead_segments", "static_image_asset", "image_snapshot_not_image"}:
-                v.dead += 1
-                c.trust_level = "rejected"
+        self._emit_validation_progress(
+            "validation_candidates_selected",
+            {
+                "total": len(rows),
+                "selected_candidates": len(rows),
+                "validation_workers": v.validation_workers,
+                "http_timeout": v.http_timeout,
+                "ffprobe_enabled": self.config.ffprobe_enabled,
+                "parallel_validation": v.parallel_validation,
+            },
+        )
+        if not rows:
+            self._emit_validation_progress("validation_complete", self._validation_progress_payload(v, total=0, completed=0))
+            return
+
+        statuses: list[str | None] = [None] * len(rows)
+        progress_counts = {"attempted": 0, "live": 0, "dead": 0, "unknown": 0}
+        completed = 0
+        try:
+            if worker_count == 1:
+                self._get_thread_validation_client(create=True)
+                try:
+                    for index, candidate in enumerate(rows):
+                        status = self._safe_validate_candidate(candidate)
+                        statuses[index] = status
+                        completed = self._record_validation_progress(progress_counts, status, completed, len(rows), v.validation_workers)
+                finally:
+                    self._close_validation_clients()
             else:
-                v.unknown += 1
-                c.trust_level = "untrusted"
+                with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="camera-validation") as executor:
+                    future_map = {executor.submit(self._validate_indexed_candidate, index, candidate): index for index, candidate in enumerate(rows)}
+                    try:
+                        for future in concurrent.futures.as_completed(future_map):
+                            index, status = future.result()
+                            statuses[index] = status
+                            completed = self._record_validation_progress(progress_counts, status, completed, len(rows), v.validation_workers)
+                    except BaseException:
+                        for pending in future_map:
+                            pending.cancel()
+                        raise
+                self._close_validation_clients()
+        finally:
+            self._close_validation_clients()
+
+        for candidate, status in zip(rows, statuses, strict=False):
+            final_status = status or "dead_link"
+            v.attempted += 1
+            self._apply_validation_status(candidate, final_status, v)
+        self._emit_validation_progress("validation_complete", self._validation_progress_payload(v, total=len(rows), completed=len(rows)))
+
+    def _validate_indexed_candidate(self, index: int, candidate: CameraCandidate) -> tuple[int, str]:
+        self._get_thread_validation_client(create=True)
+        return index, self._safe_validate_candidate(candidate)
+
+    def _safe_validate_candidate(self, candidate: CameraCandidate) -> str:
+        try:
+            return self._validate_candidate(candidate)
+        except Exception:
+            return "dead_link"
+
+    def _record_validation_progress(
+        self,
+        progress_counts: dict[str, int],
+        status: str,
+        completed: int,
+        total: int,
+        worker_count: int,
+    ) -> int:
+        completed += 1
+        progress_counts["attempted"] += 1
+        category = _validation_status_category(status)
+        progress_counts[category] += 1
+        payload = {
+            "completed": completed,
+            "total": total,
+            "attempted": progress_counts["attempted"],
+            "live": progress_counts["live"],
+            "dead": progress_counts["dead"],
+            "unknown": progress_counts["unknown"],
+            "validation_workers": worker_count,
+            "http_timeout": self.config.http_timeout,
+            "ffprobe_enabled": self.config.ffprobe_enabled,
+            "status": status,
+        }
+        self._emit_validation_progress("validation_candidate_processed", payload)
+        return completed
+
+    def _validation_progress_payload(self, v: ValidationSummary, *, total: int, completed: int) -> dict[str, object]:
+        return {
+            "completed": completed,
+            "total": total,
+            "attempted": v.attempted,
+            "live": v.live,
+            "dead": v.dead,
+            "unknown": v.unknown,
+            "skipped": v.skipped,
+            "validation_workers": v.validation_workers,
+            "http_timeout": v.http_timeout,
+            "ffprobe_enabled": v.ffprobe_enabled,
+            "parallel_validation": v.parallel_validation,
+        }
+
+    def _emit_validation_progress(self, event: str, payload: dict[str, object]) -> None:
+        if self.progress_callback is not None:
+            self.progress_callback(event, payload)
+
+    def _apply_validation_status(self, candidate: CameraCandidate, status: str, v: ValidationSummary) -> None:
+        candidate.validation_status = status
+        category = _validation_status_category(status)
+        if category == "live":
+            v.live += 1
+            candidate.trust_level = "trusted" if candidate.scope_status == "in_scope" else "untrusted"
+        elif category == "dead":
+            v.dead += 1
+            candidate.trust_level = "rejected"
+        else:
+            v.unknown += 1
+            candidate.trust_level = "untrusted"
 
     def _validate_candidate(self, candidate: CameraCandidate) -> str:
         media_type = str((candidate.source_metadata or {}).get("media_type") or "").casefold()
@@ -84,28 +211,59 @@ class ReviewAndValidationPipeline:
             return "not_validated_media_type"
         return self._validate_hls(candidate.stream_url)
 
+    def _get_thread_validation_client(self, *, create: bool) -> httpx.Client | None:
+        client = getattr(self._thread_local, "validation_client", None)
+        if client is None and create:
+            client = httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True)
+            self._thread_local.validation_client = client
+            with self._validation_clients_lock:
+                self._validation_clients.append(client)
+        return client
+
+    def _close_validation_clients(self) -> None:
+        with self._validation_clients_lock:
+            clients = list(self._validation_clients)
+            self._validation_clients.clear()
+        current_client = getattr(self._thread_local, "validation_client", None)
+        if current_client in clients:
+            self._thread_local.validation_client = None
+        for client in clients:
+            try:
+                client.close()
+            except Exception:
+                pass
+
     def _validate_hls(self, url: str) -> str:
         try:
-            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
-                r = client.get(url)
-                if r.status_code in {401, 403}:
-                    return "restricted_http"
-                if r.status_code >= 400:
-                    return "offline_http"
-                if "#EXTM3U" not in r.text[:4096]:
-                    return "decode_failed"
-                if not self.config.ffprobe_enabled:
-                    return "active_live_unknown"
-                segment_url = self._first_playlist_segment_url(url, r.text)
-                if not segment_url:
-                    return "active_live_unknown"
-                try:
-                    segment = client.head(segment_url)
-                    if 200 <= segment.status_code < 300:
-                        return "active_live_verified"
-                    return "active_playlist_dead_segments"
-                except Exception:
-                    return "active_playlist_dead_segments"
+            client = self._get_thread_validation_client(create=False)
+            if client is not None:
+                return self._validate_hls_with_client(url, client)
+            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as fallback_client:
+                return self._validate_hls_with_client(url, fallback_client)
+        except Exception:
+            return "dead_link"
+
+    def _validate_hls_with_client(self, url: str, client: httpx.Client) -> str:
+        try:
+            r = client.get(url)
+            if r.status_code in {401, 403}:
+                return "restricted_http"
+            if r.status_code >= 400:
+                return "offline_http"
+            if "#EXTM3U" not in r.text[:4096]:
+                return "decode_failed"
+            if not self.config.ffprobe_enabled:
+                return "active_live_unknown"
+            segment_url = self._first_playlist_segment_url(url, r.text)
+            if not segment_url:
+                return "active_live_unknown"
+            try:
+                segment = client.head(segment_url)
+                if 200 <= segment.status_code < 300:
+                    return "active_live_verified"
+                return "active_playlist_dead_segments"
+            except Exception:
+                return "active_playlist_dead_segments"
         except Exception:
             return "dead_link"
 
@@ -129,26 +287,35 @@ class ReviewAndValidationPipeline:
         if _looks_like_static_snapshot_asset(url):
             return "static_image_asset"
         try:
-            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as client:
-                first = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
-                first_status = _snapshot_http_status(first)
-                if first_status:
-                    return first_status
-                if _headers_indicate_static_asset(first.headers):
-                    return "static_image_asset"
-                delay_value = _camera_refresh_rate_seconds(metadata or {})
-                delay = max(0.0, float(delay_value if delay_value is not None else getattr(self.config, "image_snapshot_refresh_delay_seconds", 2.0)))
-                if delay:
-                    time.sleep(delay)
-                second = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
-                second_status = _snapshot_http_status(second)
-                if second_status:
-                    return second_status
-                if _headers_indicate_static_asset(second.headers):
-                    return "static_image_asset"
-                if _snapshot_responses_differ(first, second):
-                    return "active_image_snapshot_refreshing"
-                return "active_image_snapshot_static_unverified"
+            client = self._get_thread_validation_client(create=False)
+            if client is not None:
+                return self._validate_image_snapshot_with_client(url, metadata or {}, client)
+            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as fallback_client:
+                return self._validate_image_snapshot_with_client(url, metadata or {}, fallback_client)
+        except Exception:
+            return "dead_link"
+
+    def _validate_image_snapshot_with_client(self, url: str, metadata: dict, client: httpx.Client) -> str:
+        try:
+            first = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+            first_status = _snapshot_http_status(first)
+            if first_status:
+                return first_status
+            if _headers_indicate_static_asset(first.headers):
+                return "static_image_asset"
+            delay_value = _camera_refresh_rate_seconds(metadata or {})
+            delay = max(0.0, float(delay_value if delay_value is not None else getattr(self.config, "image_snapshot_refresh_delay_seconds", 2.0)))
+            if delay:
+                time.sleep(delay)
+            second = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+            second_status = _snapshot_http_status(second)
+            if second_status:
+                return second_status
+            if _headers_indicate_static_asset(second.headers):
+                return "static_image_asset"
+            if _snapshot_responses_differ(first, second):
+                return "active_image_snapshot_refreshing"
+            return "active_image_snapshot_static_unverified"
         except Exception:
             return "dead_link"
 
@@ -470,6 +637,21 @@ class ReviewAndValidationPipeline:
                         if p.is_file():
                             z.write(p, str(p.relative_to(self.config.output_dir)))
         return zpath
+
+
+def _validation_status_category(status: str) -> str:
+    if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing"}:
+        return "live"
+    if status in {
+        "dead_link",
+        "offline_http",
+        "restricted_http",
+        "active_playlist_dead_segments",
+        "static_image_asset",
+        "image_snapshot_not_image",
+    }:
+        return "dead"
+    return "unknown"
 
 
 def _candidate_priority_summary(candidates: list[CameraCandidate]) -> dict[str, object]:

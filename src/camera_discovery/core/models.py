@@ -91,6 +91,7 @@ class RunConfig:
     asset_host_promotion_threshold: int = 3
     max_state_scale_candidate_geocodes: int = 150
     http_timeout: float = 20.0
+    validation_workers: int = 24
     user_agent: str = "camera-discovery/0.1 (+public-camera-research)"
     allow_untrusted_review_output: bool = True
     seed_urls: list[str] = field(default_factory=list)
@@ -473,6 +474,9 @@ class ValidationSummary:
 
     validation_enabled: bool = False
     ffprobe_enabled: bool = False
+    validation_workers: int = 0
+    http_timeout: float = 0.0
+    parallel_validation: bool = False
     attempted: int = 0
     live: int = 0
     dead: int = 0

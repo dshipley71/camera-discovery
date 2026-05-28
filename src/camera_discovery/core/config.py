@@ -25,6 +25,16 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _positive_float(value: float, *, name: str) -> float:
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0")
+    return value
+
+
+def _clamped_int(value: int, *, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, value))
+
+
 def _bool_env(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -126,6 +136,7 @@ def load_run_config(
     harvest_input: str | Path | None = None,
     harvest_input_mode: str | HarvestInputMode | None = None,
     browser_backend: str | None = None,
+    http_timeout: float | None = None,
 ) -> RunConfig:
     load_dotenv(override=False)
     selected_profile = RuntimeProfile(profile or os.getenv("CAMERA_DISCOVERY_PROFILE", "fast").strip().lower())
@@ -148,6 +159,11 @@ def load_run_config(
         raise ValueError(f"Invalid browser backend {configured_browser_backend!r}; expected one of: {allowed}")
     configured_sources_value = sources_file or os.getenv("CAMERA_DISCOVERY_SOURCES_FILE") or "SOURCES.md"
     sources_file_explicit = sources_file is not None or bool(os.getenv("CAMERA_DISCOVERY_SOURCES_FILE"))
+    configured_http_timeout = _positive_float(
+        float(http_timeout) if http_timeout is not None else _float_env("CAMERA_DISCOVERY_HTTP_TIMEOUT", 20.0),
+        name="--http-timeout/CAMERA_DISCOVERY_HTTP_TIMEOUT",
+    )
+    validation_workers = _clamped_int(_int_env("CAMERA_DISCOVERY_VALIDATION_WORKERS", 24), minimum=1, maximum=64)
     max_hls_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_HLS_CANDIDATES", 100))
     max_image_snapshot_candidates = max(0, _int_env("CAMERA_DISCOVERY_MAX_IMAGE_SNAPSHOT_CANDIDATES", 50))
     default_candidate_budget = max_hls_candidates + max_image_snapshot_candidates
@@ -196,7 +212,8 @@ def load_run_config(
         max_browser_network_events_logged_per_page=max(0, _int_env("CAMERA_DISCOVERY_MAX_BROWSER_NETWORK_EVENTS_LOGGED_PER_PAGE", 50)),
         asset_host_promotion_threshold=max(2, _int_env("CAMERA_DISCOVERY_ASSET_HOST_PROMOTION_THRESHOLD", 3)),
         max_state_scale_candidate_geocodes=max(0, _int_env("CAMERA_DISCOVERY_MAX_STATE_SCALE_CANDIDATE_GEOCODES", max_total_candidates)),
-        http_timeout=_float_env("CAMERA_DISCOVERY_HTTP_TIMEOUT", 20.0),
+        http_timeout=configured_http_timeout,
+        validation_workers=validation_workers,
         seed_urls=seed_urls or [],
         sources_file=_resolve_sources_file(configured_sources_value, explicit=sources_file_explicit),
         discovery_mode=selected_discovery_mode,
