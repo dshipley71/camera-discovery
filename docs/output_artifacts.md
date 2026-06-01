@@ -14,6 +14,7 @@ cameras.md                              # trusted markdown inventory; only when 
 untrusted_camera_candidates.geojson     # review/audit map output when review candidates exist
 camera_candidates_table.csv             # non-rejected candidate table
 map.html                                # embedded Leaflet review/trusted map
+target_geometry.geojson                 # portable resolved target boundary/search geometry
 review_artifacts.zip                    # package of review artifacts
 ```
 
@@ -71,6 +72,21 @@ logs/search_queries.json
 logs/search_results.jsonl
 ```
 
+
+
+## Target geometry artifact
+
+`target_geometry.geojson` is a portable GeoJSON FeatureCollection for plotting resolved target geography in another application. It follows the target-geometry hierarchy:
+
+1. **Primary geometry**: Nominatim polygon/multipolygon border when available. For a California query, this should be the California border geometry, not the rectangular bbox.
+2. **Fallback geometry**: rectangular Nominatim `boundingbox`, represented as a GeoJSON polygon, only when no usable Nominatim border geometry is available.
+3. **Last fallback geometry**: generic padded bbox only when no usable Nominatim polygon/multipolygon or Nominatim bbox is available and existing review-only policy permits fallback geometry.
+
+Feature properties include target identifiers and provenance fields such as `geometry_role`, `geometry_source`, `nominatim_bbox`, `effective_bbox`, `bbox_verified`, and padding diagnostics when applicable. `review_artifacts.zip` includes `target_geometry.geojson` whenever it is written.
+
+Target geometry features are emitted only from explicit primary, fallback, or last-fallback geometry. The artifact writer must not synthesize features from legacy `bbox`, `effective_bbox`, or other convenience fields when those explicit geometry fields are absent.
+
+`logs/target_resolution.json`, `logs/target_resolution_all.json`, and `logs/targets/<target_id>/target_resolution.json` retain detailed resolver diagnostics. `logs/target_geometry_geojson_status.json` summarizes whether the portable target-geometry artifact was written and how many primary/fallback/last-fallback features it contains.
 
 ## Validation progress
 

@@ -198,3 +198,108 @@ def test_xml_parsed_as_html_warning_is_suppressed():
         soup = _html_soup(xmlish)
     assert soup is not None
     assert not any(isinstance(item.message, XMLParsedAsHTMLWarning) for item in caught)
+
+
+def test_review_artifact_zip_includes_portable_primary_target_geometry(tmp_path):
+    target = _target()
+    california_polygon = {
+        "type": "Polygon",
+        "coordinates": [[
+            [-124.48, 32.52], [-114.13, 32.52], [-114.13, 42.01], [-124.48, 42.01], [-124.48, 32.52]
+        ]],
+    }
+    nominatim_bbox = {"min_lat": 32.5295236, "max_lat": 42.009499, "min_lon": -124.482003, "max_lon": -114.1307816}
+    target.target_geometry_geojson = california_polygon
+    target.primary_geometry_geojson = california_polygon
+    target.primary_geometry_source = "nominatim_polygon"
+    target.geometry_source = "nominatim_polygon"
+    target.geometry_status = "verified"
+    target.nominatim_bbox = nominatim_bbox
+    target.fallback_geometry_bbox = nominatim_bbox
+    target.fallback_geometry_source = "nominatim_bbox"
+    target.effective_bbox = nominatim_bbox
+
+    cfg = _cfg(tmp_path, enable_llm_location_inference=False)
+    candidate = CameraCandidate(
+        stream_url="https://public.example/cameras/i5.m3u8",
+        lat=37.0,
+        lon=-121.0,
+        coordinate_source="source_record",
+        target_id="california",
+        target_label="California",
+        scope_status="review",
+        source_metadata={"media_type": "hls"},
+    )
+    _validation, outputs = ReviewAndValidationPipeline(cfg).run([target], CandidateSet(unique=[candidate], review=[candidate], coordinate_bearing=[candidate]))
+
+    target_geometry_path = tmp_path / "target_geometry.geojson"
+    assert target_geometry_path.exists()
+    target_geometry = json.loads(target_geometry_path.read_text(encoding="utf-8"))
+    feature = target_geometry["features"][0]
+    assert feature["geometry"] == california_polygon
+    assert feature["properties"]["geometry_role"] == "primary"
+    assert feature["properties"]["geometry_source"] == "nominatim_polygon"
+    assert feature["properties"]["nominatim_bbox"] == nominatim_bbox
+    assert outputs.target_geometry_geojson == str(target_geometry_path)
+    assert outputs.target_geometry_features_written == 1
+    with ZipFile(outputs.review_artifacts_zip) as zf:
+        names = set(zf.namelist())
+        assert "target_geometry.geojson" in names
+        zipped = json.loads(zf.read("target_geometry.geojson").decode("utf-8"))
+    assert zipped["features"][0]["geometry"] == california_polygon
+
+
+def test_review_artifact_target_geometry_uses_nominatim_bbox_only_when_polygon_missing(tmp_path):
+    target = _target()
+    nominatim_bbox = {"min_lat": 32.0, "max_lat": 42.0, "min_lon": -124.0, "max_lon": -114.0}
+    target.target_geometry_geojson = None
+    target.primary_geometry_geojson = None
+    target.primary_geometry_source = None
+    target.geometry_source = "nominatim_bbox"
+    target.geometry_status = "verified"
+    target.nominatim_bbox = nominatim_bbox
+    target.fallback_geometry_bbox = nominatim_bbox
+    target.fallback_geometry_source = "nominatim_bbox"
+    target.effective_bbox = nominatim_bbox
+    target.bbox = nominatim_bbox
+
+    cfg = _cfg(tmp_path, enable_llm_location_inference=False)
+    ReviewAndValidationPipeline(cfg).run([target], CandidateSet(unique=[], review=[], coordinate_bearing=[]))
+
+    target_geometry = json.loads((tmp_path / "target_geometry.geojson").read_text(encoding="utf-8"))
+    feature = target_geometry["features"][0]
+    assert feature["properties"]["geometry_role"] == "fallback"
+    assert feature["properties"]["geometry_source"] == "nominatim_bbox"
+    assert feature["geometry"]["type"] == "Polygon"
+    assert feature["geometry"]["coordinates"][0][0] == [-124.0, 32.0]
+
+
+def test_target_geometry_artifact_requires_explicit_geometry_role(tmp_path):
+    target = _target()
+    legacy_bbox = {"min_lat": 32.0, "max_lat": 42.0, "min_lon": -124.0, "max_lon": -114.0}
+    target.target_geometry_geojson = None
+    target.primary_geometry_geojson = None
+    target.primary_geometry_source = None
+    target.fallback_geometry_bbox = None
+    target.fallback_geometry_source = None
+    target.last_fallback_geometry_bbox = None
+    target.last_fallback_geometry_source = None
+    target.geometry_source = "legacy_bbox"
+    target.geometry_status = "verified"
+    target.nominatim_bbox = None
+    target.effective_bbox = legacy_bbox
+    target.bbox = legacy_bbox
+
+    cfg = _cfg(tmp_path, enable_llm_location_inference=False)
+    _validation, outputs = ReviewAndValidationPipeline(cfg).run(
+        [target], CandidateSet(unique=[], review=[], coordinate_bearing=[])
+    )
+
+    assert outputs.target_geometry_geojson is None
+    assert outputs.target_geometry_features_written == 0
+    assert not (tmp_path / "target_geometry.geojson").exists()
+    status = json.loads((tmp_path / "logs" / "target_geometry_geojson_status.json").read_text(encoding="utf-8"))
+    assert status["created"] is False
+    assert status["features"] == 0
+    with ZipFile(outputs.review_artifacts_zip) as zf:
+        assert "target_geometry.geojson" not in set(zf.namelist())
