@@ -93,7 +93,7 @@ OLLAMA_API_KEY = userdata.get('OLLAMA_API_KEY')
 if OLLAMA_API_KEY:
     os.environ['OLLAMA_API_KEY'] = OLLAMA_API_KEY
     os.environ.setdefault('CAMERA_DISCOVERY_LLM_PROVIDER', 'ollama-cloud')
-    os.environ.setdefault('CAMERA_DISCOVERY_LLM_MODEL', 'gemma4:31b-cloud')
+    os.environ.setdefault('CAMERA_DISCOVERY_LLM_MODEL', 'gemma3:27b-cloud')
     print('Loaded OLLAMA_API_KEY from Colab userdata')
 else:
     print('OLLAMA_API_KEY not found in Colab userdata. LLM-backed stages may fail unless another provider is configured.')

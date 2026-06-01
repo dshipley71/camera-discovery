@@ -62,7 +62,7 @@ All harvest-input candidates remain source-provided, unvalidated, and untrusted 
 
 ```bash
 CAMERA_DISCOVERY_LLM_PROVIDER=ollama-cloud
-CAMERA_DISCOVERY_LLM_MODEL=gemma4:31b-cloud
+CAMERA_DISCOVERY_LLM_MODEL=gemma3:27b-cloud
 OLLAMA_MODEL=
 OLLAMA_API_KEY=
 OLLAMA_BASE_URL=https://ollama.com
