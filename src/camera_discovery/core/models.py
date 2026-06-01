@@ -523,6 +523,8 @@ class OutputSummary:
     map_html: str | None = None
     camera_candidates_table_csv: str | None = None
     camera_candidates_table_rows: int = 0
+    target_geometry_geojson: str | None = None
+    target_geometry_features_written: int = 0
 
 
 @dataclass

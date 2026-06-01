@@ -360,6 +360,10 @@ class ReviewAndValidationPipeline:
             _candidate_priority_summary(prioritized_unique),
         )
         write_json(self.logs_dir / "validation_summary.json", asdict(v))
+        target_geometry_path, target_geometry_features = self._write_target_geometry_geojson(targets)
+        if target_geometry_path is not None:
+            out.target_geometry_geojson = str(target_geometry_path)
+        out.target_geometry_features_written = target_geometry_features
         out.map_html = str(self._write_map())
         out.review_artifacts_zip = str(self.config.output_dir / "review_artifacts.zip")
         self._write_run_explanation(targets, candidates, v, out)
@@ -592,6 +596,83 @@ class ReviewAndValidationPipeline:
             {"created": bool(feats), "features": len(feats), "path": str(path)},
         )
 
+
+    def _write_target_geometry_geojson(self, targets: list[TargetContext]) -> tuple[Any | None, int]:
+        """Write portable target geometry for downstream GIS/map applications.
+
+        The geometry hierarchy is intentionally explicit:
+        1. Primary geometry: Nominatim polygon/multipolygon border when available.
+        2. Fallback geometry: rectangular Nominatim boundingbox when no border is available.
+        3. Last fallback geometry: generic padded bbox only when Nominatim has no usable
+           polygon or boundingbox.
+        """
+        features: list[dict[str, Any]] = []
+        for target in targets:
+            geometry_role = None
+            geometry_source = None
+            geometry = _normalized_geojson_geometry(target.target_geometry_geojson or target.primary_geometry_geojson or target.polygon)
+            if geometry is not None:
+                geometry_role = "primary"
+                geometry_source = target.primary_geometry_source or target.geometry_source or "nominatim_polygon"
+            else:
+                fallback_bbox = target.fallback_geometry_bbox or target.nominatim_bbox
+                if fallback_bbox:
+                    geometry = _bbox_polygon_geometry(fallback_bbox)
+                    geometry_role = "fallback"
+                    geometry_source = target.fallback_geometry_source or "nominatim_bbox"
+                elif target.last_fallback_geometry_bbox:
+                    geometry = _bbox_polygon_geometry(target.last_fallback_geometry_bbox)
+                    geometry_role = "last_fallback"
+                    geometry_source = target.last_fallback_geometry_source or target.geometry_source or "generic_point_bbox"
+
+            if geometry is None:
+                continue
+            properties = {
+                "target_id": target.target_id,
+                "target_index": target.target_index,
+                "target_label": target.target_label,
+                "canonical_target": target.canonical_target,
+                "scope_type": target.scope_type,
+                "geometry_role": geometry_role,
+                "geometry_source": geometry_source,
+                "primary_geometry_source": target.primary_geometry_source,
+                "fallback_geometry_source": target.fallback_geometry_source,
+                "last_fallback_geometry_source": target.last_fallback_geometry_source,
+                "bbox_verified": target.bbox_verified,
+                "geometry_status": target.geometry_status,
+                "nominatim_bbox": target.nominatim_bbox,
+                "effective_bbox": target.effective_bbox or target.bbox,
+                "fallback_geometry_bbox": target.fallback_geometry_bbox,
+                "last_fallback_geometry_bbox": target.last_fallback_geometry_bbox,
+                "bbox_padding_applied": target.bbox_padding_applied,
+                "bbox_padding_reason": target.bbox_padding_reason,
+                "bbox_min_side_miles": target.bbox_min_side_miles,
+            }
+            if target.chosen_candidate:
+                properties["geocoder_display_name"] = target.chosen_candidate.display_name
+                properties["geocoder_result_type"] = target.chosen_candidate.result_type
+                properties["geocoder_lat"] = target.chosen_candidate.lat
+                properties["geocoder_lon"] = target.chosen_candidate.lon
+            features.append({"type": "Feature", "geometry": geometry, "properties": properties})
+
+        path = self.config.output_dir / "target_geometry.geojson"
+        if features:
+            write_json(path, {"type": "FeatureCollection", "features": features})
+        elif path.exists():
+            path.unlink()
+        write_json(
+            self.logs_dir / "target_geometry_geojson_status.json",
+            {
+                "created": bool(features),
+                "features": len(features),
+                "path": str(path) if features else None,
+                "primary_features": sum(1 for f in features if f.get("properties", {}).get("geometry_role") == "primary"),
+                "fallback_features": sum(1 for f in features if f.get("properties", {}).get("geometry_role") == "fallback"),
+                "last_fallback_features": sum(1 for f in features if f.get("properties", {}).get("geometry_role") == "last_fallback"),
+            },
+        )
+        return (path if features else None), len(features)
+
     def _write_cameras_md(self, rows: list[CameraCandidate]) -> None:
         lines = [
             "# Trusted Camera Inventory\n",
@@ -626,7 +707,7 @@ class ReviewAndValidationPipeline:
     def _package_review_artifacts(self):
         zpath = self.config.output_dir / "review_artifacts.zip"
         with ZipFile(zpath, "w", ZIP_DEFLATED) as z:
-            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "camera_inventory.jsonl", "cameras.md", "map.html", "camera_candidates_table.csv", "RUN_EXPLANATION.md"]:
+            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "target_geometry.geojson", "camera_inventory.jsonl", "cameras.md", "map.html", "camera_candidates_table.csv", "RUN_EXPLANATION.md"]:
                 p = self.config.output_dir / rel
                 if p.exists():
                     z.write(p, rel)
@@ -638,6 +719,42 @@ class ReviewAndValidationPipeline:
                             z.write(p, str(p.relative_to(self.config.output_dir)))
         return zpath
 
+
+
+def _normalized_geojson_geometry(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    geometry_type = value.get("type")
+    coordinates = value.get("coordinates")
+    if geometry_type not in {"Polygon", "MultiPolygon"} or not coordinates:
+        return None
+    return {"type": geometry_type, "coordinates": coordinates}
+
+
+def _bbox_polygon_geometry(bbox: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(bbox, dict):
+        return None
+    try:
+        min_lat = float(bbox["min_lat"])
+        max_lat = float(bbox["max_lat"])
+        min_lon = float(bbox["min_lon"])
+        max_lon = float(bbox["max_lon"])
+    except Exception:
+        return None
+    if min_lat > max_lat:
+        min_lat, max_lat = max_lat, min_lat
+    if min_lon > max_lon:
+        min_lon, max_lon = max_lon, min_lon
+    return {
+        "type": "Polygon",
+        "coordinates": [[
+            [min_lon, min_lat],
+            [max_lon, min_lat],
+            [max_lon, max_lat],
+            [min_lon, max_lat],
+            [min_lon, min_lat],
+        ]],
+    }
 
 def _validation_status_category(status: str) -> str:
     if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing"}:
