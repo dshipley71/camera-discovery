@@ -62,6 +62,8 @@ class RunConfig:
 
     max_search_queries: int = 4
     max_search_results_per_query: int = 5
+    enable_google_dorking: bool = False
+    max_dork_queries: int = 8
     max_pages: int = 25
     max_hls_candidates: int = 100
     max_image_snapshot_candidates: int = 50
@@ -525,6 +527,8 @@ class OutputSummary:
     camera_candidates_table_rows: int = 0
     target_geometry_geojson: str | None = None
     target_geometry_features_written: int = 0
+    playlist_export_summary: str | None = None
+    media_validation_dashboard: str | None = None
 
 
 @dataclass

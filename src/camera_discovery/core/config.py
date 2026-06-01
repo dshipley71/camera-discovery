@@ -191,6 +191,8 @@ def load_run_config(
         max_candidate_reviews=max(0, _int_env("CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS", max_total_candidates)),
         max_search_queries=_int_env("CAMERA_DISCOVERY_MAX_SEARCH_QUERIES", 4),
         max_search_results_per_query=_int_env("CAMERA_DISCOVERY_MAX_SEARCH_RESULTS_PER_QUERY", 5),
+        enable_google_dorking=_bool_env("CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING", False),
+        max_dork_queries=max(0, _int_env("CAMERA_DISCOVERY_MAX_DORK_QUERIES", 8)),
         max_pages=_int_env("CAMERA_DISCOVERY_MAX_PAGES", 25),
         max_hls_candidates=max_hls_candidates,
         max_image_snapshot_candidates=max_image_snapshot_candidates,

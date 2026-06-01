@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import concurrent.futures
 import csv
+import json
+import shutil
+import subprocess
 from dataclasses import asdict
 import threading
 import time
@@ -27,6 +30,14 @@ from camera_discovery.discovery.candidate_priority import (
 )
 from camera_discovery.utils.geojson_viewer import write_embedded_camera_map
 from camera_discovery.utils.io import write_json, write_jsonl
+from camera_discovery.sources import load_source_policy
+from camera_discovery.utils.playlists import (
+    build_media_validation_dashboard,
+    export_candidate_playlists,
+    media_type_for_row,
+    status_bucket,
+)
+from camera_discovery.utils.url_safety import is_private_or_local_media_url, redact_url_userinfo
 
 
 class ReviewAndValidationPipeline:
@@ -46,6 +57,7 @@ class ReviewAndValidationPipeline:
         self._thread_local = threading.local()
         self._validation_clients: list[httpx.Client] = []
         self._validation_clients_lock = threading.Lock()
+        self.source_policy = load_source_policy(config.sources_file, config.block_patterns)
 
     def run(self, target: TargetContext | list[TargetContext], candidates: CandidateSet, progress_callback: Callable[[str, dict[str, Any]], None] | None = None):
         targets = target if isinstance(target, list) else [target]
@@ -204,12 +216,45 @@ class ReviewAndValidationPipeline:
             candidate.trust_level = "untrusted"
 
     def _validate_candidate(self, candidate: CameraCandidate) -> str:
-        media_type = str((candidate.source_metadata or {}).get("media_type") or "").casefold()
+        media_type = media_type_for_row(candidate)
+        if media_type == "rtsp":
+            return self._validate_rtsp(candidate.stream_url)
         if media_type == "image_snapshot":
             return self._validate_image_snapshot(candidate.stream_url, candidate.source_metadata or {})
-        if media_type and media_type not in {"hls", "hls_stream", "video", "unknown"} and ".m3u8" not in candidate.stream_url.casefold():
+        if media_type and media_type not in {"hls", "hls_stream", "video", "unknown", "unknown_media"} and ".m3u8" not in candidate.stream_url.casefold():
             return "not_validated_media_type"
         return self._validate_hls(candidate.stream_url)
+
+
+    def _validate_rtsp(self, url: str) -> str:
+        if is_private_or_local_media_url(url):
+            return "restricted_rtsp"
+        ffprobe = shutil.which("ffprobe")
+        if not ffprobe:
+            return "rtsp_validation_unavailable"
+        timeout = max(1.0, min(float(self.config.http_timeout or 5.0), 10.0))
+        cmd = [ffprobe, "-v", "error", "-show_entries", "stream=codec_type", "-of", "json", url]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        except subprocess.TimeoutExpired:
+            return "offline_rtsp"
+        except Exception:
+            return "dead_rtsp"
+        stdout = (result.stdout or "")[:4096]
+        stderr = redact_url_userinfo((result.stderr or "")[:4096])
+        if result.returncode == 0:
+            try:
+                payload = json.loads(stdout or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            if payload.get("streams") or "codec_type" in stdout:
+                return "active_rtsp_verified"
+        lowered = f"{stdout} {stderr}".casefold()
+        if any(token in lowered for token in ("401", "403", "unauthorized", "forbidden", "auth", "credential", "permission")):
+            return "auth_required_rtsp"
+        if any(token in lowered for token in ("timed out", "timeout", "connection refused", "not found", "unreachable")):
+            return "offline_rtsp"
+        return "dead_rtsp"
 
     def _get_thread_validation_client(self, *, create: bool) -> httpx.Client | None:
         client = getattr(self._thread_local, "validation_client", None)
@@ -360,18 +405,41 @@ class ReviewAndValidationPipeline:
             _candidate_priority_summary(prioritized_unique),
         )
         write_json(self.logs_dir / "validation_summary.json", asdict(v))
+        playlist_summary = export_candidate_playlists(
+            self.config.output_dir,
+            prioritized_unique,
+            trusted_candidates=trusted,
+            review_candidates=review,
+            source_policy=self.source_policy,
+        )
+        write_json(self.logs_dir / "playlist_export_summary.json", playlist_summary)
+        out.playlist_export_summary = str(self.logs_dir / "playlist_export_summary.json")
+        dashboard = build_media_validation_dashboard(
+            prioritized_unique,
+            trusted_candidates=trusted,
+            review_candidates=review,
+            validation_attempted=v.attempted,
+        )
+        dashboard["outputs"] = {
+            "trusted_geojson_features": len(trusted),
+            "untrusted_geojson_features": len(review),
+            "candidate_table_rows": len(prioritized_unique),
+        }
+        write_json(self.config.output_dir / "media_validation_dashboard.json", dashboard)
+        write_json(self.logs_dir / "media_validation_dashboard.json", dashboard)
+        out.media_validation_dashboard = str(self.config.output_dir / "media_validation_dashboard.json")
         target_geometry_path, target_geometry_features = self._write_target_geometry_geojson(targets)
         if target_geometry_path is not None:
             out.target_geometry_geojson = str(target_geometry_path)
         out.target_geometry_features_written = target_geometry_features
         out.map_html = str(self._write_map())
         out.review_artifacts_zip = str(self.config.output_dir / "review_artifacts.zip")
-        self._write_run_explanation(targets, candidates, v, out)
+        self._write_run_explanation(targets, candidates, v, out, playlist_summary=playlist_summary, media_dashboard=dashboard)
         out.review_artifacts_zip = str(self._package_review_artifacts())
         write_json(self.logs_dir / "output_summary.json", asdict(out))
         return out
 
-    def _write_run_explanation(self, targets: list[TargetContext], candidates: CandidateSet, v: ValidationSummary, out: OutputSummary) -> None:
+    def _write_run_explanation(self, targets: list[TargetContext], candidates: CandidateSet, v: ValidationSummary, out: OutputSummary, *, playlist_summary: dict[str, Any] | None = None, media_dashboard: dict[str, Any] | None = None) -> None:
         media_counts: dict[str, int] = {}
         provider_counts: dict[str, int] = {}
         missing_coordinates = 0
@@ -397,6 +465,8 @@ class ReviewAndValidationPipeline:
                 f"Trusted camera.geojson created: {out.trusted_geojson_created} ({out.trusted_geojson_features_written} feature(s)).",
                 f"Untrusted review GeoJSON created: {out.untrusted_geojson_created} ({out.untrusted_geojson_features_written} feature(s)).",
                 f"Coordinate-bearing GeoJSON coverage: {out.coordinate_bearing_geojson_features_written}/{out.coordinate_bearing_candidates} feature(s) written; {out.coordinate_bearing_without_geojson} coordinate-bearing candidate(s) were not written to a GeoJSON artifact.",
+                f"Media validation dashboard: {media_dashboard or {}}",
+                f"Playlist exports written: {bool(playlist_summary and playlist_summary.get('created'))}.",
                 "Fast profile is review-only; use balanced/full validation when you want stream validation and trusted output authorization.",
             ],
             "candidate_source_counts": {"native_discovery": native_candidates, "harvest_input": harvest_input_candidates, "combined": len(candidates.unique)},
@@ -411,12 +481,17 @@ class ReviewAndValidationPipeline:
                 "coordinate_bearing_without_geojson": out.coordinate_bearing_without_geojson,
             },
             "validation": asdict(v),
+            "media_validation_dashboard": media_dashboard or {},
+            "playlist_exports": playlist_summary or {},
+            "google_dorking": _read_optional_json(self.logs_dir / "google_dorking_summary.json"),
             "outputs": asdict(out),
             "interpretation": {
                 "camera_geojson": "Trusted, validated, in-scope coordinate-bearing camera inventory. Not written when validation is disabled or no trusted records exist.",
                 "untrusted_camera_candidates_geojson": "Every coordinate-bearing candidate not written to trusted camera.geojson. These are not trusted inventory and may include rejected, out-of-scope, unknown, or review-only records for audit/map analysis.",
                 "camera_candidates_table_csv": "All non-rejected review candidates, including rows without coordinates that cannot be mapped yet.",
-                "map_html": "Interactive map for coordinate-bearing trusted/untrusted GeoJSON only.",
+                "map_html": "Interactive map for coordinate-bearing trusted/untrusted GeoJSON only. RTSP URLs are external-player links, not browser/hls.js playback.",
+                "playlist_exports": "Convenience M3U/TXT views over existing candidates and validation state; playlists do not promote trust.",
+                "media_validation_dashboard": "Top-level summary of candidate validation, trust, review, dead, restricted, and not-validated counts.",
             },
         }
         write_json(self.logs_dir / "run_explanation.json", explanation)
@@ -429,6 +504,22 @@ class ReviewAndValidationPipeline:
         lines.append("## Source providers")
         lines.extend(f"- {key}: {value}" for key, value in sorted(provider_counts.items()))
         lines.append("")
+        lines.append("## Media validation dashboard")
+        for key, value in (media_dashboard or {}).items():
+            if not isinstance(value, dict):
+                lines.append(f"- `{key}`: {value}")
+        lines.append("")
+        lines.append("## Playlist exports")
+        for key, value in (playlist_summary or {}).get("counts", {}).items():
+            lines.append(f"- `{key}`: {value}")
+        lines.append("")
+        dorking = explanation.get("google_dorking") or {}
+        if dorking:
+            lines.append("## Google dorking")
+            lines.append(f"- enabled: {dorking.get('enabled', False)}")
+            lines.append(f"- queries_generated: {dorking.get('queries_generated', 0)}")
+            lines.append(f"- results_after_block_policy: {dorking.get('results_after_block_policy', 0)}")
+            lines.append("")
         lines.append("## Output meaning")
         for key, value in explanation["interpretation"].items():
             lines.append(f"- `{key}`: {value}")
@@ -707,11 +798,11 @@ class ReviewAndValidationPipeline:
     def _package_review_artifacts(self):
         zpath = self.config.output_dir / "review_artifacts.zip"
         with ZipFile(zpath, "w", ZIP_DEFLATED) as z:
-            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "target_geometry.geojson", "camera_inventory.jsonl", "cameras.md", "map.html", "camera_candidates_table.csv", "RUN_EXPLANATION.md"]:
+            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "target_geometry.geojson", "camera_inventory.jsonl", "cameras.md", "map.html", "camera_candidates_table.csv", "media_validation_dashboard.json", "RUN_EXPLANATION.md"]:
                 p = self.config.output_dir / rel
                 if p.exists():
                     z.write(p, rel)
-            for sub in ["logs", "candidates"]:
+            for sub in ["logs", "candidates", "playlists"]:
                 folder = self.config.output_dir / sub
                 if folder.exists():
                     for p in folder.rglob("*"):
@@ -757,7 +848,7 @@ def _bbox_polygon_geometry(bbox: dict[str, Any] | None) -> dict[str, Any] | None
     }
 
 def _validation_status_category(status: str) -> str:
-    if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing"}:
+    if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing", "active_rtsp_verified"}:
         return "live"
     if status in {
         "dead_link",
@@ -766,9 +857,20 @@ def _validation_status_category(status: str) -> str:
         "active_playlist_dead_segments",
         "static_image_asset",
         "image_snapshot_not_image",
+        "dead_rtsp",
+        "offline_rtsp",
     }:
         return "dead"
+    if status in {"restricted_rtsp", "auth_required_rtsp"}:
+        return "unknown"
     return "unknown"
+
+
+def _read_optional_json(path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        return {}
 
 
 def _candidate_priority_summary(candidates: list[CameraCandidate]) -> dict[str, object]:

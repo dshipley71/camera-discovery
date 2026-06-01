@@ -8,6 +8,7 @@ from camera_discovery.core.models import CameraCandidate
 
 
 M3U8_RE = re.compile(r"https?://[^\s'\"<>]+?\.m3u8(?:\?[^\s'\"<>]*)?|['\"]([^'\"]+?\.m3u8(?:\?[^'\"]*)?)['\"]", re.I)
+RTSP_RE = re.compile(r"rtsps?://[^\s'\"<>\)\]}]+", re.I)
 IMAGE_RE = re.compile(r"https?://[^\s'\"<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s'\"<>]*)?|['\"]([^'\"]+?\.(?:jpg|jpeg|png|webp)(?:\?[^'\"]*)?)['\"]", re.I)
 COORD_RE = re.compile(r"(?<!\d)([-+]?\d{1,2}\.\d{3,})\s*,\s*([-+]?\d{1,3}\.\d{3,})(?!\d)")
 JSON_FEED_HINT_RE = re.compile(r"(?:\.json(?:\?|$)|/api/|/feed|/feeds|/layer|/layers|camera|cameras|mapserver|featureserver)", re.I)
@@ -21,8 +22,12 @@ MAX_WORKERS = 8
 
 def _candidate_media_type(candidate: CameraCandidate) -> str:
     media_type = str((candidate.source_metadata or {}).get("media_type") or "").casefold()
+    if media_type in {"rtsp", "rtsps", "rtsp_stream"}:
+        return "rtsp"
     if media_type:
         return media_type
+    if _looks_like_rtsp(candidate.stream_url):
+        return "rtsp"
     if _looks_like_hls(candidate.stream_url):
         return "hls"
     return "image_snapshot"
@@ -128,6 +133,9 @@ def _dedupe_media_urls(values: list[tuple[str, str]]) -> list[tuple[str, str]]:
 
 def _looks_like_hls(url: str) -> bool:
     return url.lower().split("?", 1)[0].endswith(".m3u8")
+
+def _looks_like_rtsp(url: str) -> bool:
+    return str(url or "").casefold().startswith(("rtsp://", "rtsps://"))
 
 def _float_or_none(value):
     try:

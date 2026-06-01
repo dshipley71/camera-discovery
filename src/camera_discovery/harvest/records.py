@@ -112,8 +112,8 @@ def record_from_candidate(candidate: CameraCandidate, *, include_metadata: bool 
 
 def normalize_candidate_media_type(value: Any, url: str) -> str:
     text = str(value or "").strip().casefold()
-    if text in {"hls", "mjpeg", "image_snapshot", "video_file", "stream", "unknown_media"}:
-        return text
+    if text in {"hls", "rtsp", "rtsps", "mjpeg", "image_snapshot", "video_file", "stream", "unknown_media"}:
+        return "rtsp" if text == "rtsps" else text
     if text == "other":
         return "stream"
     return classify_media_url(url) or "unknown_media"
@@ -262,6 +262,6 @@ def clean_ddg_url(href: str) -> str:
 def clean_extracted_url(value: str) -> str:
     raw = str(value or "").strip()
     decoded = raw.replace(r"\/", "/").replace(r"\u002F", "/").replace(r"\u002f", "/")
-    if decoded.startswith(("http://", "https://", "//")):
+    if decoded.startswith(("http://", "https://", "rtsp://", "rtsps://", "//")):
         return canonical_media_url(decoded)
     return decoded.strip("\'\"),;}]")

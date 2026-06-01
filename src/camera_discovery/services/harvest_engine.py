@@ -79,6 +79,7 @@ from camera_discovery.services.structured_camera_records import (
 )
 from camera_discovery.sources import load_source_policy
 from camera_discovery.utils.io import write_json, write_jsonl
+from camera_discovery.utils.playlists import export_harvest_playlists
 
 
 # Compatibility imports/re-exports are intentionally preserved for existing tests
@@ -360,7 +361,7 @@ class CameraUrlHarvestEngine:
         seen: set[str] = set()
         for row in rows:
             url = (row.get("url") or "").split("#", 1)[0]
-            if not url.startswith(("http://", "https://")):
+            if not url.startswith(("http://", "https://", "rtsp://", "rtsps://")):
                 continue
             reason = self.source_policy.block_reason(url)
             if reason:
@@ -371,6 +372,8 @@ class CameraUrlHarvestEngine:
             seen.add(url)
             base_row = {**row, "url": url, "original_query": row.get("query") or self.config.query}
             selected.append(base_row)
+            if url.startswith(("rtsp://", "rtsps://")):
+                continue
             max_pages = max(1, self.config.max_pages_per_source)
             for page_row in _pagination_rows(base_row, max_pages):
                 page_url = (page_row.get("url") or "").split("#", 1)[0]
@@ -825,6 +828,12 @@ class CameraUrlHarvestEngine:
             write_plain_urls(path, typed)
             outputs[f"{media_type}_urls_txt"] = str(path)
 
+        playlist_summary = export_harvest_playlists(self.output_dir, records, source_policy=self.source_policy)
+        write_json(self.logs_dir / "playlist_export_summary.json", playlist_summary)
+        outputs["playlist_export_summary_json"] = str(self.logs_dir / "playlist_export_summary.json")
+        for key, rel_path in playlist_summary.get("files", {}).items():
+            outputs[f"playlist_{key}"] = str(self.output_dir / rel_path)
+
         intermediate_outputs = self._write_intermediate_records(
             raw_media_records=raw_media_records,
             unique_records=unique,
@@ -876,6 +885,7 @@ class CameraUrlHarvestEngine:
                 "camera_media_assets": "camera_media_assets.jsonl",
                 "camera_urls_jsonl": "camera_urls.jsonl",
                 "discovered_endpoints": "discovered_endpoints.jsonl",
+                "playlist_export_summary": "logs/playlist_export_summary.json",
             },
             "counts": {
                 "camera_records": len(camera_records),
@@ -961,6 +971,7 @@ class CameraUrlHarvestEngine:
             "outputs": outputs,
             "warnings": self._warnings,
             "browser_capture": self._browser_summary,
+            "playlist_exports": playlist_summary,
         }
         write_json(self.output_dir / "harvest_summary.json", summary)
         write_json(self.logs_dir / "harvest_summary.json", summary)

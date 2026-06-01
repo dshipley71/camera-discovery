@@ -90,7 +90,7 @@ def harvest_urls(
     max_structured_endpoints_per_page: Optional[int] = typer.Option(None, "--max-structured-endpoints-per-page"),
     max_browser_pages: Optional[int] = typer.Option(None, "--max-browser-pages"),
     max_browser_pages_per_host: Optional[int] = typer.Option(None, "--max-browser-pages-per-host"),
-    media: Optional[list[str]] = typer.Option(None, "--media", help="Comma-separated/repeatable extensions or categories: .m3u8, mp4, hls, image, stream, video_file."),
+    media: Optional[list[str]] = typer.Option(None, "--media", help="Comma-separated/repeatable extensions or categories: .m3u8, mp4, hls, rtsp, image, stream, video_file."),
     include_source_metadata: bool = typer.Option(True, "--include-source-metadata/--no-source-metadata"),
     write_intermediate_records: bool = typer.Option(False, "--write-intermediate-records/--no-write-intermediate-records", help="Write debug JSONL files for raw, unique, and media-filtered harvest records."),
     image_asset_filter: str = typer.Option("raw", "--image-asset-filter", help="Image filtering mode: raw, exclude-page-assets, or camera-evidence."),

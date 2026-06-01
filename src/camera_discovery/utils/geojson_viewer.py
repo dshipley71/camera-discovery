@@ -492,6 +492,7 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None, target_ov
     }
     function previewHtml(mediaType, stream, thumb) {
       if (mediaType === 'image_snapshot') { const imageUrl = thumb || stream; return imageUrl ? `<img class="thumb" src="${esc(cacheBust(imageUrl))}" alt="Current camera image" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'no-thumb',innerText:'Snapshot unavailable'}))">` : `<div class="no-thumb">No snapshot URL in GeoJSON</div>`; }
+      if (mediaType === 'rtsp') return `<div class="no-thumb">RTSP media requires an external player</div>`;
       if (thumb) return `<img class="thumb" src="${esc(cacheBust(thumb))}" alt="Camera thumbnail" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'no-thumb',innerText:'Thumbnail unavailable'}))">`;
       if (stream && String(stream).toLowerCase().includes('.m3u8')) return `<video class="thumb hls-thumb" data-stream="${esc(stream)}" muted autoplay playsinline></video>`;
       return `<div class="no-thumb">No thumbnail URL in GeoJSON</div>`;
@@ -548,7 +549,7 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None, target_ov
       const snapshot = firstValue(p, ['snapshot_url', 'current_image_url', 'currentImageURL']);
       const thumbnail = thumb || firstValue(p, ['thumbnail_url', 'reference_image_url', 'referenceImageURL', 'referenceImage1URL']);
       const thumbHtml = previewHtml(mediaType, stream, thumb);
-      const buttonLabel = mediaType === 'image_snapshot' ? '↻ Open refreshing snapshot' : '▶ Play media';
+      const buttonLabel = mediaType === 'rtsp' ? '↗ Open RTSP URL' : (mediaType === 'image_snapshot' ? '↻ Open refreshing snapshot' : '▶ Play media');
       const playHtml = stream ? `<button class="play" onclick='playCamera(${JSON.stringify(stream)}, ${JSON.stringify(name)}, ${JSON.stringify(mediaType)}, ${JSON.stringify(mapRefreshRate)})'>${buttonLabel}</button>` : '';
       const linkBits = [
         linkHtml(sourceEndpoint && String(sourceEndpoint).toLowerCase().includes('.json') ? 'source JSON' : 'source page', sourceEndpoint),

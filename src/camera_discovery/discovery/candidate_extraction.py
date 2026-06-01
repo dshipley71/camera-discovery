@@ -77,6 +77,7 @@ from camera_discovery.extraction.media import (
     IMAGE_RE,
     JSON_FEED_HINT_RE,
     M3U8_RE,
+    RTSP_RE,
     MAP_LAYER_API_RE,
     _candidate_media_type,
     _chunks,
@@ -85,6 +86,7 @@ from camera_discovery.extraction.media import (
     _float_or_none,
     _int_or_none,
     _looks_like_hls,
+    _looks_like_rtsp,
     _looks_like_image,
     _looks_like_non_camera_asset,
     _camera_id_from_url,
@@ -111,6 +113,11 @@ class CandidateExtractionMixin:
         if _looks_like_hls(url):
             candidate = self._candidate_from_stream(url, url, row, "direct_hls")
             candidate.source_metadata["media_type"] = "hls"
+            return [candidate]
+        if _looks_like_rtsp(url):
+            candidate = self._candidate_from_stream(url, url, row, "direct_rtsp")
+            candidate.source_metadata["media_type"] = "rtsp"
+            candidate.source_metadata["asset_role"] = "rtsp_stream"
             return [candidate]
         static_candidates, signals = self._extract_from_page_with_signals(url, row, client, phase=phase)
         decision = self._browser_capture_decision(row, static_candidates, signals, phase)
@@ -213,6 +220,7 @@ class CandidateExtractionMixin:
     def _extract_from_text(self, url: str, row: dict[str, str], text: str, *, include_image_regex: bool = True) -> list[CameraCandidate]:
         out: list[CameraCandidate] = []
         out.extend(self._extract_hls_from_text(url, row, text, "hls_regex"))
+        out.extend(self._extract_rtsp_from_text(url, row, text, "rtsp_regex"))
         if include_image_regex:
             out.extend(self._extract_images_from_text(url, row, text, "image_snapshot_regex"))
         return self._dedupe(out)
@@ -310,6 +318,25 @@ class CandidateExtractionMixin:
                     candidate.lat, candidate.lon = local_coords
                     candidate.coordinate_source = "proximity_text"
                 out.append(candidate)
+        return out
+
+
+    def _extract_rtsp_from_text(self, source_url: str, row: dict[str, str], text: str, method: str) -> list[CameraCandidate]:
+        out: list[CameraCandidate] = []
+        for match in RTSP_RE.finditer(text):
+            stream = canonical_media_url(match.group(0))
+            if not _looks_like_rtsp(stream) or self.source_policy.is_blocked(stream):
+                continue
+            candidate = self._candidate_from_stream(stream, source_url, row, method)
+            candidate.source_metadata["media_type"] = "rtsp"
+            candidate.source_metadata["asset_role"] = "rtsp_stream"
+            start = max(0, match.start() - 500)
+            end = min(len(text), match.end() + 500)
+            local_coords = self._extract_first_coord(text[start:end])
+            if local_coords:
+                candidate.lat, candidate.lon = local_coords
+                candidate.coordinate_source = "proximity_text"
+            out.append(candidate)
         return out
 
     def _extract_images_from_text(self, source_url: str, row: dict[str, str], text: str, method: str) -> list[CameraCandidate]:
@@ -472,6 +499,8 @@ class CandidateExtractionMixin:
             candidate.source_metadata["media_url"] = media_url
             if media_type == "hls":
                 candidate.source_metadata["stream_url"] = media_url
+            elif media_type == "rtsp":
+                candidate.source_metadata["asset_role"] = "rtsp_stream"
             elif media_type == "image_snapshot":
                 candidate.source_metadata["snapshot_url"] = media_url
             candidate.source_metadata["camera_id"] = _stable_camera_id(candidate.source_metadata, media_url) or candidate.source_metadata.get("camera_id")
@@ -508,6 +537,8 @@ class CandidateExtractionMixin:
             candidate.source_metadata["media_url"] = media_url
             if media_type == "hls":
                 candidate.source_metadata["stream_url"] = media_url
+            elif media_type == "rtsp":
+                candidate.source_metadata["asset_role"] = "rtsp_stream"
             elif media_type == "image_snapshot":
                 candidate.source_metadata["snapshot_url"] = media_url
             candidate.source_metadata["camera_id"] = _stable_camera_id(candidate.source_metadata, media_url) or candidate.source_metadata.get("camera_id")
