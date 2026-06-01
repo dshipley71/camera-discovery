@@ -457,6 +457,8 @@ class ReviewAndValidationPipeline:
                 native_candidates += 1
             if not candidate.has_coordinates:
                 missing_coordinates += 1
+        google_dorking_summary = _read_optional_json(self.logs_dir / "google_dorking_summary.json") or _google_dorking_default_summary(self.config)
+        write_json(self.logs_dir / "google_dorking_summary.json", google_dorking_summary)
         explanation = {
             "plain_language_summary": [
                 f"Resolved {len(targets)} target(s): " + ", ".join(t.canonical_target or t.target_label or t.target_id for t in targets),
@@ -483,7 +485,7 @@ class ReviewAndValidationPipeline:
             "validation": asdict(v),
             "media_validation_dashboard": media_dashboard or {},
             "playlist_exports": playlist_summary or {},
-            "google_dorking": _read_optional_json(self.logs_dir / "google_dorking_summary.json"),
+            "google_dorking": google_dorking_summary,
             "outputs": asdict(out),
             "interpretation": {
                 "camera_geojson": "Trusted, validated, in-scope coordinate-bearing camera inventory. Not written when validation is disabled or no trusted records exist.",
@@ -865,6 +867,17 @@ def _validation_status_category(status: str) -> str:
         return "unknown"
     return "unknown"
 
+
+
+def _google_dorking_default_summary(config: RunConfig) -> dict[str, Any]:
+    return {
+        "enabled": bool(config.enable_google_dorking),
+        "queries_generated": 0,
+        "results_seen": 0,
+        "results_after_block_policy": 0,
+        "promoted_source_leads": 0,
+        "candidates_extracted": 0,
+    }
 
 def _read_optional_json(path) -> dict[str, Any]:
     try:

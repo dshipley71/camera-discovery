@@ -30,11 +30,48 @@ from camera_discovery.services.review_validation_pipeline import ReviewAndValida
 from camera_discovery.services.target_resolver import TargetResolver
 from camera_discovery.sources import load_source_policy
 from camera_discovery.utils.io import write_json
+from camera_discovery.utils.playlists import build_media_validation_dashboard, export_candidate_playlists
+
+
+def _initialize_expected_media_outputs(cfg: RunConfig) -> None:
+    """Create empty, non-stale media artifacts at run start.
+
+    Full runs overwrite these with real counts after validation/output writing.
+    They remain useful diagnostics when target resolution or policy preflight stops
+    before the review/validation pipeline can run.
+    """
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = cfg.output_dir / "logs"
+    empty_candidates: list[CameraCandidate] = []
+    playlist_summary = export_candidate_playlists(
+        cfg.output_dir,
+        empty_candidates,
+        trusted_candidates=empty_candidates,
+        review_candidates=empty_candidates,
+    )
+    dashboard = build_media_validation_dashboard(empty_candidates, trusted_candidates=empty_candidates, review_candidates=empty_candidates, validation_attempted=0)
+    google_dorking = _google_dorking_default_summary(cfg)
+    write_json(logs_dir / "playlist_export_summary.json", playlist_summary)
+    write_json(cfg.output_dir / "media_validation_dashboard.json", dashboard)
+    write_json(logs_dir / "media_validation_dashboard.json", dashboard)
+    write_json(logs_dir / "google_dorking_summary.json", google_dorking)
+
+
+def _google_dorking_default_summary(cfg: RunConfig) -> dict[str, object]:
+    return {
+        "enabled": bool(cfg.enable_google_dorking),
+        "queries_generated": 0,
+        "results_seen": 0,
+        "results_after_block_policy": 0,
+        "promoted_source_leads": 0,
+        "candidates_extracted": 0,
+    }
 
 
 def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: str) -> RunState:
     """Run the full discovery workflow for a prepared RunConfig."""
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    _initialize_expected_media_outputs(cfg)
     state = RunState(config=cfg)
     sources_exists = bool(cfg.sources_file and cfg.sources_file.exists())
     console.print("[bold]Pipeline mode:[/bold] normal discovery pipeline")

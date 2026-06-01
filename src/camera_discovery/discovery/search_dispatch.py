@@ -215,8 +215,7 @@ class SearchDispatchMixin:
             "promoted_source_leads": 0,
             "candidates_extracted": 0,
         }
-        if dork_queries:
-            write_json(self.logs_dir / "google_dorking_summary.json", self._google_dorking_summary)
+        write_json(self.logs_dir / "google_dorking_summary.json", self._google_dorking_summary)
         return _dedupe_strings(normal_queries + dork_queries)
 
     def _google_dork_queries(self, target: TargetContext, base: str, camera_intent: str) -> list[str]:
