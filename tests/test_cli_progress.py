@@ -106,3 +106,36 @@ def test_rich_progress_callback_tracks_coordinate_enrichment():
         task = progress.tasks[task_id]
         assert task.completed == 500
         assert task.total == 500
+
+
+def test_plain_progress_reports_validation_milestones(tmp_path):
+    output = tmp_path / 'validation_plain_progress.out'
+    with output.open('w', encoding='utf-8') as fh:
+        console = Console(file=fh, force_terminal=False, width=120)
+        state = {'total': 0, 'completed': 0}
+        callback = _make_plain_discovery_progress_callback(console, state, threading.Lock())
+        callback('validation_candidates_selected', {'total': 1000, 'validation_workers': 24, 'http_timeout': 10.0, 'ffprobe_enabled': True})
+        for completed in [1, 100, 200, 500, 1000]:
+            callback('validation_candidate_processed', {'completed': completed, 'total': 1000, 'live': completed // 2, 'dead': completed // 4, 'unknown': completed // 4})
+        callback('validation_complete', {'completed': 1000, 'total': 1000, 'attempted': 1000, 'live': 500, 'dead': 250, 'unknown': 250, 'skipped': 0})
+    text = output.read_text(encoding='utf-8')
+    assert 'Progress: validation selected 1000 candidates; workers=24; timeout=10.0s; full_segment_check=True.' in text
+    assert 'Progress: validating streams 100/1000; live=50; dead=25; unknown=25.' in text
+    assert 'Progress: validating streams 1000/1000; live=500; dead=250; unknown=250.' in text
+    assert 'Progress: validation complete: attempted=1000; live=500; dead=250; unknown=250; skipped=0.' in text
+    assert text.count('validating streams') <= 6
+
+
+def test_rich_progress_reports_validation_counts():
+    console = Console(file=open('/tmp/camera_discovery_validation_progress_test.out', 'w'), force_terminal=False)
+    progress = Progress(console=console, transient=True, disable=True)
+    with progress:
+        task_id = progress.add_task('Validating streams', total=None)
+        state = {'total': 0, 'completed': 0}
+        callback = _make_discovery_progress_callback(progress, task_id, state, threading.Lock())
+        callback('validation_candidates_selected', {'total': 10, 'validation_workers': 4, 'http_timeout': 10.0, 'ffprobe_enabled': False})
+        callback('validation_candidate_processed', {'completed': 5, 'total': 10, 'live': 3, 'dead': 1, 'unknown': 1})
+        callback('validation_complete', {'completed': 10, 'total': 10, 'attempted': 10, 'live': 6, 'dead': 2, 'unknown': 2})
+        task = progress.tasks[task_id]
+        assert task.total == 10
+        assert task.completed == 10

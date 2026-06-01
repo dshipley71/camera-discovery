@@ -203,3 +203,34 @@ def test_canonical_media_url_strips_extraction_trailers_and_default_ports():
     assert canonical_media_url('https://host.example:443/live.m3u8?a=token') == 'https://host.example/live.m3u8?a=token'
     assert canonical_media_url('http://host.example:80/snapshot.jpg') == 'http://host.example/snapshot.jpg'
     assert canonical_media_url('https://host.example:8443/live.m3u8') == 'https://host.example:8443/live.m3u8'
+
+
+def test_canonical_media_url_prefers_embedded_escaped_scheme_relative_hls():
+    from camera_discovery.harvest.media_filter import canonical_media_url
+    from camera_discovery.harvest.records import clean_extracted_url
+
+    bad = r"https://source.example/data/cctv/\/\/media.example\/D3\/99_East_Ave.stream\/playlist.m3u8"
+    expected = "https://media.example/D3/99_East_Ave.stream/playlist.m3u8"
+
+    assert canonical_media_url(bad) == expected
+    assert clean_extracted_url(r"\/\/media.example\/D3\/99_East_Ave.stream\/playlist.m3u8") == expected
+
+
+def test_harvest_json_extraction_cleans_joined_escaped_hls_url(tmp_path):
+    engine = _engine(tmp_path)
+    row = {"url": "https://source.example/data/cctv/", "source_provider": "directory", "source_name": "Fixture"}
+    data = {
+        "features": [
+            {
+                "attributes": {
+                    "id": "cam-escaped",
+                    "name": "Escaped HLS",
+                    "stream_url": r"\/\/media.example\/D3\/99_East_Ave.stream\/playlist.m3u8",
+                }
+            }
+        ]
+    }
+
+    records = engine._extract_from_json_data(data, "https://source.example/data/cctv/", row, method="json_fixture")
+
+    assert [record.url for record in records] == ["https://media.example/D3/99_East_Ave.stream/playlist.m3u8"]

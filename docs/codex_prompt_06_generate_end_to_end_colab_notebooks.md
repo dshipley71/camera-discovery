@@ -16,6 +16,7 @@ The attached/current guide notebook is `camera_discovery_harvest_urls_test_hando
 6. **Make surgical changes.** Keep the refactored architecture intact: thin CLI commands, workflow orchestration in `runners/` and services, shared extraction helpers in `extraction/`, harvest-specific helpers in `harvest/`, and discovery helpers in `discovery/` / `enrichment/`. Do not collapse code back into god files.
 7. **Do not weaken tests.** Add or update tests to protect behavior. Do not relax assertions to hide regressions. Avoid brittle line-count-only tests.
 8. **Preserve public contracts unless explicitly changed.** Existing command names, existing options, public imports, environment variables, output artifact names, schema semantics, and global source block policy must continue to work.
+9. **Do not assume or add unrequested behavior.** Do not infer, synthesize, or add helper workflows, notebook bootstrap behavior, artifact branches, compatibility behavior, fallback logic, source behavior, model behavior, or output artifacts that this prompt did not explicitly require or that is not confirmed by repository evidence. When in doubt, preserve existing behavior and document the uncertainty instead of adding unrequested behavior.
 
 ---
 
@@ -93,7 +94,7 @@ OLLAMA_API_KEY = userdata.get('OLLAMA_API_KEY')
 if OLLAMA_API_KEY:
     os.environ['OLLAMA_API_KEY'] = OLLAMA_API_KEY
     os.environ.setdefault('CAMERA_DISCOVERY_LLM_PROVIDER', 'ollama-cloud')
-    os.environ.setdefault('CAMERA_DISCOVERY_LLM_MODEL', 'gemma4:31b-cloud')
+    os.environ.setdefault('CAMERA_DISCOVERY_LLM_MODEL', 'gemma3:27b-cloud')
     print('Loaded OLLAMA_API_KEY from Colab userdata')
 else:
     print('OLLAMA_API_KEY not found in Colab userdata. LLM-backed stages may fail unless another provider is configured.')

@@ -109,3 +109,69 @@ def test_target_context_has_stable_target_identity():
     )
     assert ctx.target_id == "greenville_texas"
     assert ctx.target_label == "Greenville, Texas"
+
+
+def test_resolve_all_preserves_independent_known_bboxes(monkeypatch, tmp_path):
+    from camera_discovery.core.models import GeocoderCandidate, RuntimeProfile, TargetIntent
+
+    cfg = RunConfig(
+        query="Get traffic cameras from California and New York State",
+        output_dir=tmp_path,
+        profile=RuntimeProfile.BALANCED,
+    )
+    resolver = TargetResolver(cfg)
+    california_intent = TargetIntent(
+        raw_query=cfg.query,
+        canonical_target="California",
+        place_name="California",
+        scope_type="state",
+        admin_region="California",
+        country="United States",
+        camera_type_intent="traffic",
+    )
+    new_york_intent = TargetIntent(
+        raw_query=cfg.query,
+        canonical_target="New York State",
+        place_name="New York State",
+        scope_type="state",
+        admin_region="New York",
+        country="United States",
+        camera_type_intent="traffic",
+    )
+    california_bbox = {"min_lat": 32.0, "max_lat": 42.0, "min_lon": -125.0, "max_lon": -114.0}
+    new_york_bbox = {"min_lat": 40.0, "max_lat": 45.0, "min_lon": -80.0, "max_lon": -71.0}
+
+    def fake_geocode_all(queries):
+        if any("New York" in query for query in queries):
+            return [
+                GeocoderCandidate(
+                    query="New York State",
+                    display_name="New York, United States",
+                    result_type="administrative",
+                    bbox=new_york_bbox,
+                    raw={"class": "boundary", "type": "administrative"},
+                )
+            ]
+        return [
+            GeocoderCandidate(
+                query="California",
+                display_name="California, United States",
+                result_type="administrative",
+                bbox=california_bbox,
+                raw={"class": "boundary", "type": "administrative"},
+            )
+        ]
+
+    monkeypatch.setattr(resolver, "_build_target_intents", lambda: [california_intent, new_york_intent])
+    monkeypatch.setattr(resolver, "_geocode_all", fake_geocode_all)
+    monkeypatch.setattr(resolver, "_apply_llm_geocoder_referee", lambda candidates, intent, target_logs: None)
+
+    targets = resolver.resolve_all()
+
+    assert [target.target_index for target in targets] == [0, 1]
+    assert [target.target_id for target in targets] == ["california", "new_york_state"]
+    assert targets[0].bbox == california_bbox
+    assert targets[1].bbox == new_york_bbox
+    assert targets[0].nominatim_bbox == california_bbox
+    assert targets[1].nominatim_bbox == new_york_bbox
+    assert targets[0].bbox is not targets[1].bbox

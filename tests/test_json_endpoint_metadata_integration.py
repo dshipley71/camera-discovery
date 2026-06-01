@@ -112,3 +112,24 @@ def test_map_renders_trusted_star_and_untrusted_circle_with_json_metadata(tmp_pa
     assert "Source metadata" in html
     assert "Camera color legend" in html
     assert "Traffic / HLS video fallback" in html
+
+
+def test_json_endpoint_cleans_escaped_scheme_relative_hls_url(tmp_path):
+    engine = CandidateDiscoveryEngine(_cfg(tmp_path))
+    data = {
+        "cameras": [
+            {
+                "cameraID": "CAM-ESC",
+                "name": "Escaped Stream",
+                "streamingVideoURL": r"\/\/media.example\/D3\/99_East_Ave.stream\/playlist.m3u8",
+                "lat": 38.1,
+                "lon": -121.2,
+            }
+        ]
+    }
+
+    rows = engine._extract_from_json_data(data, "https://source.example/data/cctv/", {"url": "https://source.example/data/cctv/"}, "json_endpoint")
+
+    assert len(rows) == 1
+    assert rows[0].stream_url == "https://media.example/D3/99_East_Ave.stream/playlist.m3u8"
+    assert rows[0].source_metadata["media_url"] == "https://media.example/D3/99_East_Ave.stream/playlist.m3u8"

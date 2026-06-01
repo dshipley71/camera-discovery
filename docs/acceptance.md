@@ -65,3 +65,13 @@ Never create empty trusted files. Trusted artifacts require verified target geom
 ## Artifact-size caution
 
 `--write-intermediate-records` can write very large harvest files. It is appropriate for extraction debugging, not routine notebook use.
+
+## Validation performance acceptance
+
+For validation-stage changes, verify that:
+
+- validation remains deterministic in output ordering even when network checks run concurrently;
+- `camera-discovery run --http-timeout` is documented and tested;
+- `CAMERA_DISCOVERY_VALIDATION_WORKERS` controls bounded concurrency and is not a candidate cap;
+- plain progress and event progress expose validation candidate milestones;
+- no validation candidate cap is added to source code or notebooks.

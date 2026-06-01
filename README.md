@@ -94,6 +94,7 @@ camera-discovery run "California traffic cameras" \
 --harvest-input
 --harvest-input-mode handoff-only|seed
 --browser-backend playwright|cloakbrowser
+--http-timeout SECONDS
 --progress / --no-progress
 --progress-style auto|rich|plain|events
 ```
@@ -103,10 +104,18 @@ Profiles:
 | Profile | Behavior |
 |---|---|
 | `fast` | Resolves targets and writes review artifacts, but validation is disabled and trusted output is blocked. |
-| `balanced` | Enables deterministic validation of HLS playlists and image snapshots. |
+| `balanced` | Enables deterministic validation of HLS playlists and image snapshots. Validation runs in a bounded worker pool and reuses HTTP clients. |
 | `full` | Balanced validation plus deeper HLS segment/variant checks through the current full-profile validation path. |
 
 Trusted output requires verified target geometry, in-scope coordinates, successful validation, and target `trust_policy=trusted_allowed`. Review artifacts may contain untrusted, unknown, or out-of-scope candidates for audit.
+
+Validation behavior:
+
+- `camera-discovery run --http-timeout SECONDS` overrides `CAMERA_DISCOVERY_HTTP_TIMEOUT` for run-time network calls, including stream validation.
+- Validation is parallelized with a bounded worker pool (`CAMERA_DISCOVERY_VALIDATION_WORKERS`, default 24, clamped to 1–64).
+- Validation reuses HTTP clients per worker instead of creating a new client per candidate.
+- Plain and event progress report validation candidate counts, for example `validating streams 500/2287`.
+- There is no validation candidate cap; every selected validation candidate is attempted unless existing profile/scope/trust logic excludes it.
 
 ## Harvest mode
 
@@ -187,7 +196,7 @@ Default provider is Ollama Cloud unless overridden. Relevant variables include:
 
 ```bash
 CAMERA_DISCOVERY_LLM_PROVIDER=ollama-cloud
-CAMERA_DISCOVERY_LLM_MODEL=gemma4:31b-cloud
+CAMERA_DISCOVERY_LLM_MODEL=gemma3:27b-cloud
 OLLAMA_API_KEY=...
 OLLAMA_BASE_URL=https://ollama.com
 ```
@@ -229,8 +238,8 @@ End-to-end Colab notebooks live under `notebooks/`:
 | Notebook | Purpose |
 |---|---|
 | `camera_discovery_harvest_hls_only_test.ipynb` | HLS-only harvest workflow using routine `.m3u8` extraction settings. |
-| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | HLS harvest followed by `run --profile full --harvest-input --harvest-input-mode handoff-only ...`. |
-| `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | All-media harvest followed by full pipeline validation/review. |
+| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | HLS harvest followed by visible `run --profile balanced --http-timeout 10 --harvest-input --harvest-input-mode handoff-only ...` for practical interactive validation. |
+| `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | All-media harvest followed by visible bounded handoff validation/review with `--http-timeout 10`. |
 | `camera_discovery_pipeline_only_profiles_test.ipynb` | Pipeline-only comparison for `fast`, `balanced`, and `full` profiles. |
 
 The notebooks include Ollama Cloud / `OLLAMA_API_KEY` Colab userdata setup, CLI/import smoke tests, browser-backend visibility, completion-aware run guards, diagnostic inspection cells, and optional artifact packaging. Notebook-only helper code remains inside the notebooks and is not part of `src/`.
