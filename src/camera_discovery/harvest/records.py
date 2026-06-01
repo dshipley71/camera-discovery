@@ -260,4 +260,8 @@ def clean_ddg_url(href: str) -> str:
     return clean_ddg_result_url(href)
 
 def clean_extracted_url(value: str) -> str:
-    return canonical_media_url(value) if str(value or "").strip().startswith(("http://", "https://")) else str(value or "").strip().strip("'\"),;]")
+    raw = str(value or "").strip()
+    decoded = raw.replace(r"\/", "/").replace(r"\u002F", "/").replace(r"\u002f", "/")
+    if decoded.startswith(("http://", "https://", "//")):
+        return canonical_media_url(decoded)
+    return decoded.strip("\'\"),;}]")

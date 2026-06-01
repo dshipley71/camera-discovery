@@ -232,9 +232,31 @@ def normalize_key(value: Any) -> str:
 
 
 def canonical_media_url(url: str) -> str:
-    split = urlsplit(str(url).strip())
-    return urlunsplit((split.scheme.casefold(), split.netloc.casefold(), split.path, split.query, ""))
+    value = (
+        str(url or "").strip()
+        .replace(r"\/", "/")
+        .replace(r"\u002F", "/")
+        .replace(r"\u002f", "/")
+    )
+    value = _prefer_embedded_absolute_media_url(value)
+    split = urlsplit(value)
+    scheme = split.scheme.casefold()
+    host = (split.hostname or "").casefold()
+    if not scheme and split.netloc:
+        scheme = "https"
+    netloc = host
+    if split.port and not ((scheme == "https" and split.port == 443) or (scheme == "http" and split.port == 80)):
+        netloc = f"{host}:{split.port}"
+    return urlunsplit((scheme, netloc, split.path, split.query, ""))
 
+
+def _prefer_embedded_absolute_media_url(value: str) -> str:
+    default_scheme = urlsplit(value).scheme.casefold() or "https"
+    for match in re.finditer(r"(?<!:)//([A-Za-z0-9.-]+\.[A-Za-z]{2,})(/[^\s'\"<>]*)", value):
+        candidate = f"{default_scheme}://{match.group(1)}{match.group(2)}"
+        if _MEDIA_EXT_RE.search(candidate):
+            return candidate
+    return value
 
 def _walk_objects(data: Any, path: str = "$"):
     if isinstance(data, dict):

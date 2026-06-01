@@ -6,6 +6,7 @@ from urllib.parse import unquote, urljoin, urlparse
 
 from camera_discovery.core.models import CameraCandidate
 from camera_discovery.enrichment.location import _valid_lat_lon
+from camera_discovery.harvest.media_filter import canonical_media_url
 from camera_discovery.extraction.media import (
     _candidate_media_type,
     _dedupe_media_urls,
@@ -280,7 +281,7 @@ def _record_media_urls(record: dict[str, Any], base_url: str) -> list[tuple[str,
             if not isinstance(item, str) or not item.strip():
                 continue
             raw = item.strip()
-            absolute = urljoin(base_url, raw)
+            absolute = canonical_media_url(urljoin(base_url, raw))
             lower = absolute.casefold()
             has_media_extension = bool(re.search(r"\.(?:m3u8|mjpg|mjpeg|mp4|webm|mov|jpg|jpeg|png|webp)(?:\?|$)", lower))
             is_media_key = key_norm in stream_aliases or key_norm in snapshot_aliases

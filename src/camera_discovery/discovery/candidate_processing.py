@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from camera_discovery.harvest.media_filter import canonical_media_url
+
 import json
 import re
 import threading
@@ -38,6 +40,7 @@ from camera_discovery.enrichment.location import (
     _llm_location_evidence_supported,
     _normalize_location_inference_rows,
     _point_in_bbox,
+    _point_in_geojson_geometry,
     _specific_candidate_location_text,
     _valid_lat_lon,
 )
@@ -140,6 +143,7 @@ class CandidateProcessingMixin:
         by_key: dict[str, CameraCandidate] = {}
         order: list[str] = []
         for row in rows:
+            row.stream_url = canonical_media_url(row.stream_url)
             key = row.stream_url.split("#", 1)[0]
             existing = by_key.get(key)
             if existing is None:
@@ -540,6 +544,10 @@ class CandidateProcessingMixin:
             candidate.source_metadata.update(metadata)
 
     def _geocode_result_passes_target_scope(self, lat: float, lon: float, display_name: str, target: TargetContext) -> tuple[bool, str]:
+        if target.bbox_verified and target.target_geometry_geojson:
+            if _point_in_geojson_geometry(lat, lon, target.target_geometry_geojson):
+                return True, "coordinate_inside_verified_target_polygon"
+            return False, "candidate_geocode_outside_verified_target_polygon"
         if target.bbox_verified and target.bbox:
             if _point_in_bbox(lat, lon, target.bbox):
                 return True, "coordinate_inside_verified_bbox"
@@ -616,8 +624,18 @@ class CandidateProcessingMixin:
 
     def _scope_candidates(self, candidates: list[CameraCandidate], target: TargetContext) -> None:
         bbox = target.bbox if target.bbox_verified else None
+        polygon = target.target_geometry_geojson if target.bbox_verified else None
         for candidate in candidates:
-            if candidate.has_coordinates and bbox:
+            if candidate.has_coordinates and polygon:
+                assert candidate.lat is not None and candidate.lon is not None
+                if _point_in_geojson_geometry(candidate.lat, candidate.lon, polygon):
+                    candidate.scope_status = "in_scope"
+                    candidate.reasons.append("coordinate_inside_verified_target_polygon")
+                else:
+                    candidate.scope_status = "out_of_scope"
+                    candidate.trust_level = "rejected"
+                    candidate.reasons.append("coordinate_outside_verified_target_polygon")
+            elif candidate.has_coordinates and bbox:
                 if bbox["min_lat"] <= candidate.lat <= bbox["max_lat"] and bbox["min_lon"] <= candidate.lon <= bbox["max_lon"]:
                     candidate.scope_status = "in_scope"
                     candidate.reasons.append("coordinate_inside_verified_bbox")

@@ -19,6 +19,7 @@ from camera_discovery.cli_commands.progress import (
 )
 from camera_discovery.core.models import CameraCandidate, CandidateSet, HarvestInputMode, RunConfig, RunState, TargetContext, TrustPolicy
 from camera_discovery.discovery.candidate_priority import priority_bucket_counts, prioritize_candidate_set
+from camera_discovery.enrichment.location import _point_in_geojson_geometry
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
 from camera_discovery.services.harvest_handoff import (
     describe_harvest_handoff,
@@ -270,15 +271,19 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
             f"coordinate_bearing={len(merged.coordinate_bearing)} targets={len(per_target_sets)}"
         )
 
+        validation_callback = None
         if progress_mode == "rich":
             assert progress is not None
-            validation_task = progress.add_task("Validating streams and writing outputs", total=1)
+            validation_task = progress.add_task("Validating streams and writing outputs", total=None)
+            validation_callback = _make_discovery_progress_callback(progress, validation_task, {"total": 0, "completed": 0}, progress_lock)
         elif progress_mode == "plain":
             console.print("Progress: validating streams and writing outputs...")
+            validation_callback = _make_plain_discovery_progress_callback(console, {"total": 0, "completed": 0}, progress_lock)
         elif progress_mode == "events":
+            validation_callback = _make_event_stream_discovery_progress_callback(progress_lock)
             _emit_progress_stream_event("validation_started", {"completed": 0, "total": 1, "description": "Validating streams and writing outputs"})
         try:
-            validation, outputs = ReviewAndValidationPipeline(cfg).run(runnable_targets, merged)
+            validation, outputs = ReviewAndValidationPipeline(cfg, progress_callback=validation_callback).run(runnable_targets, merged)
         except KeyboardInterrupt:
             message = "Run interrupted during validation/output writing."
             console.print(f"[red]{message} Partial artifacts may be available under {cfg.output_dir}.[/red]")
@@ -287,11 +292,26 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
             raise typer.Exit(code=130)
         if progress_mode == "rich":
             assert progress is not None
-            progress.update(validation_task, completed=1, description="Validation and outputs complete")
-        elif progress_mode == "plain":
-            console.print("Progress: validation and outputs complete.")
-        elif progress_mode == "events":
-            _emit_progress_stream_event("validation_complete", {"completed": 1, "total": 1, "description": "Validation and outputs complete"})
+            progress.update(validation_task, completed=validation.attempted, total=max(1, validation.attempted), description="Validation and outputs complete")
+        elif progress_mode == "plain" and not cfg.validation_enabled:
+            console.print("Progress: validation skipped by profile; outputs complete.")
+        elif progress_mode == "events" and validation.attempted == 0 and validation.skipped:
+            _emit_progress_stream_event(
+                "validation_complete",
+                {
+                    "completed": 0,
+                    "total": 0,
+                    "attempted": validation.attempted,
+                    "live": validation.live,
+                    "dead": validation.dead,
+                    "unknown": validation.unknown,
+                    "skipped": validation.skipped,
+                    "validation_workers": validation.validation_workers,
+                    "http_timeout": validation.http_timeout,
+                    "ffprobe_enabled": validation.ffprobe_enabled,
+                    "parallel_validation": validation.parallel_validation,
+                },
+            )
     state.validation = validation
     state.outputs = outputs
     write_json(cfg.output_dir / "logs" / "run_summary.json", state.to_dict())
@@ -318,8 +338,18 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
 
 def _scope_harvest_input_candidates(candidates: list[CameraCandidate], target: TargetContext) -> None:
     bbox = target.bbox if target.bbox_verified else None
+    polygon = target.target_geometry_geojson if target.bbox_verified else None
     for candidate in candidates:
-        if candidate.has_coordinates and bbox:
+        if candidate.has_coordinates and polygon:
+            assert candidate.lat is not None and candidate.lon is not None
+            if _point_in_geojson_geometry(candidate.lat, candidate.lon, polygon):
+                candidate.scope_status = "in_scope"
+                candidate.reasons.append("harvest_input_coordinate_inside_verified_target_polygon")
+            else:
+                candidate.scope_status = "out_of_scope"
+                candidate.trust_level = "rejected"
+                candidate.reasons.append("harvest_input_coordinate_outside_verified_target_polygon")
+        elif candidate.has_coordinates and bbox:
             assert candidate.lat is not None and candidate.lon is not None
             if bbox["min_lat"] <= candidate.lat <= bbox["max_lat"] and bbox["min_lon"] <= candidate.lon <= bbox["max_lon"]:
                 candidate.scope_status = "in_scope"

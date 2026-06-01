@@ -7,6 +7,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup, FeatureNotFound, XMLParsedAsHTMLWarning
 
 from camera_discovery.extraction.media import _dedupe_media_urls, _looks_like_hls, _looks_like_image
+from camera_discovery.harvest.media_filter import canonical_media_url
 
 
 def _html_soup(html: str) -> BeautifulSoup:
@@ -44,7 +45,7 @@ def _media_urls_from_html_tag(tag: Any, base_url: str) -> list[tuple[str, str]]:
     return _dedupe_media_urls(urls)
 
 def _media_urls_from_attribute(value: str, base_url: str) -> list[tuple[str, str]]:
-    absolute = urljoin(base_url, value.strip())
+    absolute = canonical_media_url(urljoin(base_url, value.strip()))
     if _looks_like_hls(absolute):
         return [(absolute, "hls")]
     if _looks_like_image(absolute):

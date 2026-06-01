@@ -98,6 +98,7 @@ from camera_discovery.extraction.pagination import (
     _pagination_rows,
 )
 from camera_discovery.extraction.search import clean_ddg_result_url, parse_ddg_result_rows
+from camera_discovery.harvest.media_filter import canonical_media_url
 
 
 class CandidateExtractionMixin:
@@ -516,6 +517,7 @@ class CandidateExtractionMixin:
         return out
 
     def _candidate_from_stream(self, stream_url: str, source_url: str, row: dict[str, str], method: str) -> CameraCandidate:
+        stream_url = canonical_media_url(stream_url)
         metadata = {
             "source_provider": row.get("source_provider"),
             "source_kind": row.get("source_kind"),

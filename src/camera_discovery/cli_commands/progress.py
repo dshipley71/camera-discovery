@@ -117,6 +117,51 @@ def _make_discovery_progress_callback(
                         f"| LLM {payload.get('llm_location_enriched', 0)}"
                     ),
                 )
+            elif event == "validation_candidates_selected":
+                total = int(payload.get("total") or payload.get("selected_candidates") or 0)
+                state["validation_total"] = total
+                state["validation_completed"] = 0
+                state["total"] = total
+                state["completed"] = 0
+                progress.update(
+                    task_id,
+                    total=total or None,
+                    completed=0,
+                    description=(
+                        f"Validating streams: selected {total}; "
+                        f"workers {payload.get('validation_workers', 0)}; "
+                        f"timeout {payload.get('http_timeout', 0)}s"
+                    ),
+                )
+            elif event == "validation_candidate_processed":
+                completed = int(payload.get("completed") or 0)
+                total = int(payload.get("total") or state.get("validation_total") or 0)
+                state["validation_completed"] = completed
+                state["completed"] = completed
+                progress.update(
+                    task_id,
+                    total=total or None,
+                    completed=completed,
+                    description=(
+                        f"Validating streams: {completed}/{total} "
+                        f"| live {payload.get('live', 0)} "
+                        f"| dead {payload.get('dead', 0)} "
+                        f"| unknown {payload.get('unknown', 0)}"
+                    ),
+                )
+            elif event == "validation_complete":
+                total = int(payload.get("total") or state.get("validation_total") or 0)
+                completed = int(payload.get("completed") or total)
+                progress.update(
+                    task_id,
+                    total=total or None,
+                    completed=completed,
+                    description=(
+                        f"Validation complete: attempted {payload.get('attempted', completed)}; "
+                        f"live {payload.get('live', 0)}; dead {payload.get('dead', 0)}; "
+                        f"unknown {payload.get('unknown', 0)}"
+                    ),
+                )
             elif event == "scope_review_started":
                 total = int(payload.get("unique") or state.get("coord_total") or 0)
                 state["total"] = total
@@ -228,6 +273,41 @@ def _make_plain_discovery_progress_callback(
                     f"metadata {payload.get('metadata_enriched', 0)}; "
                     f"geocoded {payload.get('geocode_enriched', 0)}; "
                     f"LLM {payload.get('llm_location_enriched', 0)}."
+                )
+            elif event == "validation_candidates_selected":
+                total = int(payload.get("total") or payload.get("selected_candidates") or 0)
+                state["validation_total"] = total
+                state["validation_completed"] = 0
+                state["validation_last_bucket"] = -1
+                console.print(
+                    f"Progress: validation selected {total} candidates; "
+                    f"workers={payload.get('validation_workers', 0)}; "
+                    f"timeout={payload.get('http_timeout', 0)}s; "
+                    f"full_segment_check={bool(payload.get('ffprobe_enabled'))}."
+                )
+            elif event == "validation_candidate_processed":
+                completed = int(payload.get("completed") or state.get("validation_completed", 0) + 1)
+                total = int(payload.get("total") or state.get("validation_total") or 0)
+                state["validation_completed"] = completed
+                current_bucket = _bucket(completed, total)
+                should_report = completed == total or current_bucket > int(state.get("validation_last_bucket", -1))
+                if should_report:
+                    state["validation_last_bucket"] = current_bucket
+                    denominator = total if total else "?"
+                    console.print(
+                        f"Progress: validating streams {completed}/{denominator}; "
+                        f"live={payload.get('live', 0)}; "
+                        f"dead={payload.get('dead', 0)}; "
+                        f"unknown={payload.get('unknown', 0)}."
+                    )
+            elif event == "validation_complete":
+                total = int(payload.get("total") or state.get("validation_total") or 0)
+                completed = int(payload.get("completed") or total)
+                state["validation_completed"] = completed
+                console.print(
+                    f"Progress: validation complete: attempted={payload.get('attempted', completed)}; "
+                    f"live={payload.get('live', 0)}; dead={payload.get('dead', 0)}; "
+                    f"unknown={payload.get('unknown', 0)}; skipped={payload.get('skipped', 0)}."
                 )
             elif event == "scope_review_started":
                 console.print(f"Progress: {label} — checking target scope and review gates...")

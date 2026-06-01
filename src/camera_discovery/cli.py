@@ -20,8 +20,8 @@ from camera_discovery.core.config import load_harvest_config, load_run_config
 from camera_discovery.runners.discovery_run import execute_discovery_run
 from camera_discovery.runners.harvest_run import execute_harvest_run
 
-app = typer.Typer(help="Simplified public camera discovery pipeline", no_args_is_help=True)
-console = Console()
+app = typer.Typer(help="Simplified public camera discovery pipeline", no_args_is_help=True, rich_markup_mode=None, pretty_exceptions_enable=False)
+console = Console(width=120)
 
 
 @app.callback()
@@ -41,6 +41,7 @@ def run(
     harvest_input: Optional[Path] = typer.Option(None, "--harvest-input", help="Harvest handoff manifest or harvest_camera_inventory.jsonl to seed the normal run workflow."),
     harvest_input_mode: str = typer.Option("handoff-only", "--harvest-input-mode", help="How --harvest-input is used: handoff-only or seed."),
     browser_backend: Optional[str] = typer.Option(None, "--browser-backend", help="playwright or cloakbrowser; overrides CAMERA_DISCOVERY_BROWSER_BACKEND for this run."),
+    http_timeout: Optional[float] = typer.Option(None, "--http-timeout", help="HTTP timeout in seconds for network discovery, enrichment, and validation requests; overrides CAMERA_DISCOVERY_HTTP_TIMEOUT."),
     show_progress: bool = typer.Option(True, "--progress/--no-progress", help="Show progress while resolving, discovering, enriching coordinates, validating, and writing outputs."),
     progress_style: str = typer.Option("auto", "--progress-style", help="Progress renderer: auto, rich, plain, or events. Use events for machine-readable progress records consumed by external UIs."),
 ) -> None:
@@ -57,6 +58,7 @@ def run(
             harvest_input=harvest_input,
             harvest_input_mode=harvest_input_mode,
             browser_backend=browser_backend,
+            http_timeout=http_timeout,
         )
     except ValueError as exc:
         typer.echo(f"Error: {exc}")
