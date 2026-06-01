@@ -16,3 +16,11 @@ Active source-aligned documentation:
 | `../notebooks/README.md` | Colab notebook scenarios and usage notes. |
 
 Historical `docs/codex_prompt_*.md` files are implementation traceability records. They may mention older module locations; current source and the active docs above are authoritative.
+
+
+## Current media-output additions
+
+- `docs/output_artifacts.md` documents playlist/TXT exports, `logs/playlist_export_summary.json`, and the top-level `media_validation_dashboard.json` schema.
+- `docs/runtime_configuration.md` documents RTSP media filters/validation, the external-player limitation for RTSP, and guarded Google dorking configuration.
+- `docs/codex_prompt_media_playlists_rtsp_validation_dashboard.md` records the implementation prompt for media playlists, RTSP support, the validation dashboard, and guarded public-source Google dorking.
+

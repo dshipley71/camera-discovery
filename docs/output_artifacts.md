@@ -189,3 +189,56 @@ These files can be very large and should be used mainly for debugging.
 For media-filtered harvests, normal `run --harvest-input harvest_handoff.json` loads filtered media records from `camera_urls.jsonl` by default. For all-media harvests, it may load structured inventory.
 
 `run --harvest-input` writes candidate summaries with separate `native_discovery`, `harvest_input`, and `combined` sections. In the default `--harvest-input-mode handoff-only` path, native discovery is disabled and handoff candidate counts are bounded by the selected handoff records/assets and resolved target count. In `--harvest-input-mode seed`, the harvest input is merged with normal native discovery and may produce many additional candidates. The normal pipeline treats all loaded harvest records as untrusted data and still applies target resolution, deterministic scope gates, validation, and trust rules.
+
+
+## Playlist exports and media validation dashboard
+
+Normal `camera-discovery run` writes playlist and text outputs under `playlists/` after deterministic validation/output classification:
+
+```text
+playlists/trusted_media.m3u
+playlists/trusted_media.txt
+playlists/untrusted_review_media.m3u
+playlists/untrusted_review_media.txt
+playlists/hls_candidates.m3u
+playlists/hls_candidates.txt
+playlists/rtsp_candidates.m3u
+playlists/rtsp_candidates.txt
+playlists/live_or_reachable_media.m3u
+playlists/live_or_reachable_media.txt
+playlists/dead_or_restricted_media.txt
+playlists/image_snapshots.txt
+logs/playlist_export_summary.json
+```
+
+TXT files contain one URL per line. M3U files use extended M3U metadata for playable stream-style media. Image snapshots are written to TXT only because they are refreshing image URLs, not video playlists. `dead_or_restricted_media.txt` is diagnostic only and intentionally has no `.m3u` companion. Playlist eligibility never changes trust: `trusted_media.*` contains only candidates already eligible for trusted output, while review playlists remain untrusted audit conveniences.
+
+Normal runs also write `media_validation_dashboard.json` at the run-output top level and `logs/media_validation_dashboard.json`. Required top-level fields are:
+
+```json
+{
+  "total_candidates": 0,
+  "validated": 0,
+  "trusted": 0,
+  "untrusted_review": 0,
+  "dead": 0,
+  "restricted": 0,
+  "not_validated": 0
+}
+```
+
+Counts are derived from real candidate rows and validation statuses, not placeholders. Optional nested fields include `by_media_type`, `by_validation_status`, and `outputs`. `RUN_EXPLANATION.md`, `logs/run_explanation.json`, and `review_artifacts.zip` include or reference the dashboard and playlist summary.
+
+Harvest mode remains extraction-only. When harvested media records exist, it writes:
+
+```text
+playlists/harvested_media.m3u
+playlists/harvested_media.txt
+playlists/harvested_hls.m3u
+playlists/harvested_hls.txt
+playlists/harvested_rtsp.m3u
+playlists/harvested_rtsp.txt
+playlists/harvested_image_snapshots.txt
+logs/playlist_export_summary.json
+```
+

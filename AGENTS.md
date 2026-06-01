@@ -119,3 +119,12 @@ python -m mypy src/camera_discovery/core src/camera_discovery/llm
 ```
 
 Browser dependencies are optional. Do not pretend browser-dependent behavior succeeded when the backend was missing.
+
+
+## Media playlist, RTSP, dashboard, and dorking guardrails
+
+- Playlist/TXT exports are derived convenience artifacts only. They must not promote candidates to trusted output or bypass source-policy, scope, validation, geometry, or private-network checks.
+- RTSP support is limited to explicit user-supplied URLs or RTSP/RSTS URLs extracted verbatim from allowed public source content. Do not synthesize RTSP URLs, probe default/common paths, enumerate ports, infer vendors, or test credentials.
+- `media_validation_dashboard.json` counts must come from actual candidate/validation state.
+- Google dorking support is bounded public-source discovery only. Do not add dorks for exposed device UIs, admin pages, default credentials, vendor fingerprints, RTSP hunting, private-network hosts, or blocked internet-asset indexes.
+

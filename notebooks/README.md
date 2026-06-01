@@ -38,3 +38,9 @@ The notebooks regenerate maps from the installed repository `camera_discovery` p
 3. Last fallback geometry: generic padded bbox only when no usable Nominatim polygon or bbox exists (`last_fallback_geometry_bbox`).
 
 Map cells should show primary target borders with border-only GeoJSON overlays and show geocoder target points alongside camera coordinate points. Rectangular overlays are fallback-only, except dashed effective search extents for padded small locations.
+
+
+## Playlist, dashboard, and dorking inspection
+
+Notebook run-inspection cells should print `media_validation_dashboard.json` when present, list `playlists/` outputs, and show high-level `logs/google_dorking_summary.json` counts when that optional feature is enabled. RTSP examples should remain optional/commented; browsers do not play RTSP with hls.js, so RTSP links are intended for external players such as VLC or another authorized RTSP-capable client.
+

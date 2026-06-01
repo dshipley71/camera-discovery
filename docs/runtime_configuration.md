@@ -210,3 +210,28 @@ CAMERA_DISCOVERY_PROGRESS_STYLE=auto|rich|plain|events
 ```
 
 `events` emits machine-readable progress records for external UIs.
+
+
+## RTSP, playlist, dashboard, and Google dorking settings
+
+RTSP is supported as a media type for explicit or verbatim extracted URLs only. Harvest filters accept:
+
+```bash
+camera-discovery harvest-urls "Example City cameras" --media rtsp
+camera-discovery harvest-urls "Example City cameras" --media rtsp,hls
+camera-discovery harvest-urls "Example City cameras" --media stream
+```
+
+The `stream` category includes generic streams and RTSP records. RTSP validation uses `ffprobe` when available. If `ffprobe` is unavailable, the candidate receives `rtsp_validation_unavailable` and remains review/unknown rather than trusted.
+
+Playlist export and `media_validation_dashboard.json` are normal output artifacts and do not require a separate CLI flag. They inherit the active source policy and block/private-network checks.
+
+Guarded Google dorking is off by default unless enabled in configuration:
+
+```bash
+CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false
+CAMERA_DISCOVERY_MAX_DORK_QUERIES=8
+```
+
+When enabled, SearchAgent adds a bounded number of operator-enhanced public-source discovery queries. Queries must include a target/location term and a public-camera or camera-type term. `site:`-scoped queries prefer allowed `SOURCES.md` domains. Results from unknown domains, where supported, are only source leads and still pass through source-policy, extraction, scope, validation, and trust gates. Dorking never targets device UIs, admin/login pages, credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset search engines.
+
