@@ -189,6 +189,32 @@ class TargetContext:
     polygon: dict[str, Any] | None = None
     bbox_verified: bool = False
     geometry_source: str | None = None
+
+    # Preferred target geometry hierarchy. Primary geometry is the actual
+    # Nominatim/OSM boundary polygon or multipolygon when available. Fallback
+    # geometry is the rectangular Nominatim boundingbox. Last fallback geometry
+    # is only a generic padded search box when no usable Nominatim shape/bbox
+    # exists. ``bbox`` remains the effective search/scope bbox for backward
+    # compatibility with older callers.
+    target_geometry_geojson: dict[str, Any] | None = None
+    primary_geometry_geojson: dict[str, Any] | None = None
+    primary_geometry_source: str | None = None
+    fallback_geometry_bbox: dict[str, float] | None = None
+    fallback_geometry_source: str | None = None
+    last_fallback_geometry_bbox: dict[str, float] | None = None
+    last_fallback_geometry_source: str | None = None
+
+    # Target geometry provenance. ``bbox`` is the effective bbox consumed by
+    # downstream scope checks and maps. ``nominatim_bbox`` preserves the accepted
+    # raw geocoder bbox when a small precise target must be padded to a practical
+    # search extent. LLM geometry hints and no-geocoder fallbacks must not set
+    # these as verified geocoder geometry.
+    nominatim_bbox: dict[str, float] | None = None
+    effective_bbox: dict[str, float] | None = None
+    bbox_padding_applied: bool = False
+    bbox_padding_reason: str | None = None
+    bbox_min_side_miles: float | None = None
+
     trust_policy: TrustPolicy = TrustPolicy.STOP
     stop_reason: str | None = None
     warnings: list[str] = field(default_factory=list)

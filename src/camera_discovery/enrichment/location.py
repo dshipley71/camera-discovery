@@ -203,3 +203,57 @@ def _valid_lat_lon(lat: float | None, lon: float | None) -> bool:
 
 def _point_in_bbox(lat: float, lon: float, bbox: dict[str, float]) -> bool:
     return bbox["min_lat"] <= lat <= bbox["max_lat"] and bbox["min_lon"] <= lon <= bbox["max_lon"]
+
+
+def _point_in_geojson_geometry(lat: float, lon: float, geometry: dict[str, object] | None) -> bool:
+    """Return True when a WGS84 point is inside a GeoJSON Polygon/MultiPolygon.
+
+    Coordinates are GeoJSON order [lon, lat]. This intentionally avoids heavy GIS
+    dependencies so Colab/notebook runs keep working with the base package.
+    """
+    if not isinstance(geometry, dict):
+        return False
+    geom_type = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if geom_type == "Polygon" and isinstance(coords, list):
+        return _point_in_polygon_rings(lat, lon, coords)
+    if geom_type == "MultiPolygon" and isinstance(coords, list):
+        return any(_point_in_polygon_rings(lat, lon, poly) for poly in coords if isinstance(poly, list))
+    return False
+
+
+def _point_in_polygon_rings(lat: float, lon: float, rings: list[object]) -> bool:
+    if not rings or not isinstance(rings[0], list):
+        return False
+    exterior = rings[0]
+    if not _point_in_ring(lat, lon, exterior):
+        return False
+    for hole in rings[1:]:
+        if isinstance(hole, list) and _point_in_ring(lat, lon, hole):
+            return False
+    return True
+
+
+def _point_in_ring(lat: float, lon: float, ring: list[object]) -> bool:
+    points: list[tuple[float, float]] = []
+    for item in ring:
+        if isinstance(item, list) and len(item) >= 2:
+            try:
+                x = float(item[0])
+                y = float(item[1])
+            except Exception:
+                continue
+            points.append((x, y))
+    if len(points) < 3:
+        return False
+    inside = False
+    x = lon
+    y = lat
+    j = len(points) - 1
+    for i, (xi, yi) in enumerate(points):
+        xj, yj = points[j]
+        intersects = ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / ((yj - yi) or 1e-12) + xi)
+        if intersects:
+            inside = not inside
+        j = i
+    return inside

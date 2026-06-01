@@ -19,6 +19,7 @@ from camera_discovery.cli_commands.progress import (
 )
 from camera_discovery.core.models import CameraCandidate, CandidateSet, HarvestInputMode, RunConfig, RunState, TargetContext, TrustPolicy
 from camera_discovery.discovery.candidate_priority import priority_bucket_counts, prioritize_candidate_set
+from camera_discovery.enrichment.location import _point_in_geojson_geometry
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
 from camera_discovery.services.harvest_handoff import (
     describe_harvest_handoff,
@@ -337,8 +338,18 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
 
 def _scope_harvest_input_candidates(candidates: list[CameraCandidate], target: TargetContext) -> None:
     bbox = target.bbox if target.bbox_verified else None
+    polygon = target.target_geometry_geojson if target.bbox_verified else None
     for candidate in candidates:
-        if candidate.has_coordinates and bbox:
+        if candidate.has_coordinates and polygon:
+            assert candidate.lat is not None and candidate.lon is not None
+            if _point_in_geojson_geometry(candidate.lat, candidate.lon, polygon):
+                candidate.scope_status = "in_scope"
+                candidate.reasons.append("harvest_input_coordinate_inside_verified_target_polygon")
+            else:
+                candidate.scope_status = "out_of_scope"
+                candidate.trust_level = "rejected"
+                candidate.reasons.append("harvest_input_coordinate_outside_verified_target_polygon")
+        elif candidate.has_coordinates and bbox:
             assert candidate.lat is not None and candidate.lon is not None
             if bbox["min_lat"] <= candidate.lat <= bbox["max_lat"] and bbox["min_lon"] <= candidate.lon <= bbox["max_lon"]:
                 candidate.scope_status = "in_scope"

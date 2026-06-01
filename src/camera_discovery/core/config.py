@@ -91,7 +91,7 @@ def _resolve_sources_file(value: str | Path | None, *, explicit: bool) -> Path |
     return path
 
 
-def _stage_model(stage_var: str, llm_model: str | None, default: str = "gemma3:4b") -> str | None:
+def _stage_model(stage_var: str, llm_model: str | None, default: str = "gemma3:27b-cloud") -> str | None:
     return os.getenv(stage_var) or llm_model or default
 
 
@@ -102,7 +102,7 @@ def _default_target_intent_model(provider: str, llm_model: str | None) -> str | 
     if provider in {"ollama", "ollama-cloud"}:
         # Target intent is a lightweight extraction task. Keep it fast by
         # default while allowing users to override it independently.
-        return "qwen3.5:4b"
+        return "gemma3:12b-cloud"
     return llm_model
 
 
@@ -111,7 +111,7 @@ def _default_target_intent_fallback_model(provider: str) -> str | None:
     if explicit:
         return explicit
     if provider in {"ollama", "ollama-cloud"}:
-        return "qwen3.5:4b"
+        return "gemma3:12b-cloud"
     return None
 
 
@@ -141,7 +141,7 @@ def load_run_config(
     load_dotenv(override=False)
     selected_profile = RuntimeProfile(profile or os.getenv("CAMERA_DISCOVERY_PROFILE", "fast").strip().lower())
     provider = os.getenv("CAMERA_DISCOVERY_LLM_PROVIDER", "ollama-cloud").strip().lower()
-    default_llm_model = "gemma4:31b-cloud" if provider == "ollama-cloud" else "gemma3:4b"
+    default_llm_model = "gemma3:27b-cloud" if provider == "ollama-cloud" else "gemma3:27b-cloud"
     llm_model = (
         os.getenv("CAMERA_DISCOVERY_LLM_MODEL")
         or os.getenv("OLLAMA_MODEL")

@@ -25,6 +25,38 @@ from camera_discovery.utils.json_utils import extract_json_object
 
 SCOPE_WORDS = ("metropolitan area", "metro area", "metropolitan", "greater area", "greater", "county", "state")
 PLACE_LIKE_SCOPES = {"place", "city", "county", "metro", "region", "state", "country"}
+REGIONAL_SCOPE_TYPES = {"city", "county", "metro", "region", "state", "country"}
+SMALL_TARGET_MIN_SIDE_MILES = 1.0
+PRECISE_RESULT_TYPES = {
+    "address",
+    "apartments",
+    "attraction",
+    "building",
+    "campus",
+    "detached",
+    "facility",
+    "house",
+    "landmark",
+    "memorial",
+    "monument",
+    "museum",
+    "place_of_worship",
+    "residential",
+    "shop",
+    "tourism",
+    "yes",
+}
+PRECISE_RESULT_CLASSES = {
+    "address",
+    "amenity",
+    "building",
+    "historic",
+    "leisure",
+    "man_made",
+    "office",
+    "shop",
+    "tourism",
+}
 LOCATION_CLAUSE_RE = re.compile(r"\b(?:in|from|near|around)\s+(.+)$", re.I)
 US_STATE_NAMES = {
     "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware",
@@ -116,16 +148,53 @@ class TargetResolver:
             chosen_candidate=chosen,
         )
         if chosen and chosen.bbox:
-            ctx.bbox = chosen.bbox
-            ctx.polygon = chosen.polygon
+            effective_bbox, padding = _effective_bbox_for_target(chosen.bbox, chosen, intent)
+            primary_geometry = _normalized_target_geojson_geometry(chosen.polygon)
+            ctx.nominatim_bbox = chosen.bbox
+            ctx.effective_bbox = effective_bbox
+            ctx.bbox = effective_bbox
+            ctx.polygon = primary_geometry
+            ctx.target_geometry_geojson = primary_geometry
+            ctx.primary_geometry_geojson = primary_geometry
+            ctx.primary_geometry_source = "nominatim_polygon" if primary_geometry else None
+            ctx.fallback_geometry_bbox = chosen.bbox
+            ctx.fallback_geometry_source = "nominatim_bbox"
             ctx.bbox_verified = True
-            ctx.geometry_source = "geocoder"
+            if primary_geometry:
+                ctx.geometry_source = "nominatim_polygon"
+            else:
+                ctx.geometry_source = "geocoder_padded" if padding["applied"] else "nominatim_bbox"
             ctx.geometry_status = "verified"
+            ctx.bbox_padding_applied = padding["applied"]
+            ctx.bbox_padding_reason = padding["reason"]
+            ctx.bbox_min_side_miles = padding["min_side_miles"]
             ctx.trust_policy = TrustPolicy.REVIEW_ONLY if not self.config.validation_enabled else TrustPolicy.TRUSTED_ALLOWED
+            if primary_geometry:
+                ctx.warnings.append("Nominatim polygon/multipolygon target boundary is the primary verified geometry; rectangular bbox retained for fallback/search bounds.")
+            if padding["applied"]:
+                ctx.warnings.append("Known small geocoder bbox padded to minimum practical target extent.")
             if not self.config.validation_enabled:
                 ctx.warnings.append("Validation disabled; trusted output blocked.")
+        elif chosen and chosen.lat is not None and chosen.lon is not None:
+            generic_bbox = _generic_bbox_from_point(chosen.lat, chosen.lon, SMALL_TARGET_MIN_SIDE_MILES)
+            ctx.bbox = generic_bbox
+            ctx.effective_bbox = generic_bbox
+            ctx.last_fallback_geometry_bbox = generic_bbox
+            ctx.last_fallback_geometry_source = "generic_point_bbox"
+            ctx.bbox_verified = False
+            ctx.geometry_source = "generic_point_bbox"
+            ctx.geometry_status = "unverified_review_only"
+            ctx.warnings.append("No usable Nominatim polygon or bbox was available; generated a last-fallback generic search box from the geocoder point.")
+            if self.config.profile == RuntimeProfile.FAST and self.config.allow_untrusted_review_output:
+                ctx.trust_policy = TrustPolicy.REVIEW_ONLY
+            else:
+                ctx.trust_policy = TrustPolicy.STOP
+                ctx.stop_reason = "Only generic last-fallback target geometry was available."
         elif intent.llm_bbox:
             ctx.bbox = intent.llm_bbox
+            ctx.effective_bbox = intent.llm_bbox
+            ctx.last_fallback_geometry_bbox = intent.llm_bbox
+            ctx.last_fallback_geometry_source = "llm_hint_bbox"
             ctx.bbox_verified = False
             ctx.geometry_source = "llm_hint"
             ctx.geometry_status = "unverified_review_only"
@@ -311,19 +380,23 @@ class TargetResolver:
             rows = client.get(url)
             rows.raise_for_status()
             data = rows.json()
-        return [
-            GeocoderCandidate(
-                query=query,
-                display_name=str(r.get("display_name") or ""),
-                result_type=str(r.get("type") or r.get("class") or ""),
-                lat=_float_or_none(r.get("lat")),
-                lon=_float_or_none(r.get("lon")),
-                bbox=_bbox_from_nominatim(r.get("boundingbox")),
-                polygon=r.get("geojson") if isinstance(r.get("geojson"), dict) else None,
-                raw=r,
+        out: list[GeocoderCandidate] = []
+        for r in data:
+            polygon = _normalized_target_geojson_geometry(r.get("geojson"))
+            bbox = _bbox_from_nominatim(r.get("boundingbox")) or _bbox_from_geojson_geometry(polygon)
+            out.append(
+                GeocoderCandidate(
+                    query=query,
+                    display_name=str(r.get("display_name") or ""),
+                    result_type=str(r.get("type") or r.get("class") or ""),
+                    lat=_float_or_none(r.get("lat")),
+                    lon=_float_or_none(r.get("lon")),
+                    bbox=bbox,
+                    polygon=polygon,
+                    raw=r,
+                )
             )
-            for r in data
-        ]
+        return out
 
     def _score_candidates(self, candidates: list[GeocoderCandidate], intent: TargetIntent, target_logs) -> list[GeocoderCandidate]:
         for c in candidates:
@@ -342,15 +415,21 @@ class TargetResolver:
         scope = (intent.scope_type or "place").casefold()
         if c.bbox:
             valid, reason = _bbox_plausible(c.bbox, scope)
-            if not valid:
+            if not valid and reason == "implausibly_small_for_scope_type" and _is_precise_small_target_candidate(c, intent):
+                c.warnings.append("bbox_below_scope_minimum_precise_target_padding_available")
+                score += 40
+            elif not valid:
                 c.rejected = True
                 c.rejection_reasons.append(reason)
             else:
                 score += 40
+        elif c.lat is not None and c.lon is not None:
+            c.warnings.append("missing_bbox_generic_point_fallback_available")
+            score += 5
         else:
             c.rejected = True
             c.rejection_reasons.append("missing_bbox")
-        if scope in PLACE_LIKE_SCOPES and (c.result_type or "").casefold() in {"house", "road", "address", "building", "postcode", "marketplace", "shop"}:
+        if scope in REGIONAL_SCOPE_TYPES and (c.result_type or "").casefold() in {"house", "road", "address", "building", "postcode", "marketplace", "shop"}:
             c.rejected = True
             c.rejection_reasons.append("result_type_too_specific_for_scope")
         if intent.admin_region and intent.admin_region.casefold() in display:
@@ -455,6 +534,18 @@ class TargetResolver:
             "scope_type": ctx.scope_type,
             "bbox": ctx.bbox,
             "bbox_verified": ctx.bbox_verified,
+            "target_geometry_geojson": ctx.target_geometry_geojson,
+            "primary_geometry_geojson": ctx.primary_geometry_geojson,
+            "primary_geometry_source": ctx.primary_geometry_source,
+            "fallback_geometry_bbox": ctx.fallback_geometry_bbox,
+            "fallback_geometry_source": ctx.fallback_geometry_source,
+            "last_fallback_geometry_bbox": ctx.last_fallback_geometry_bbox,
+            "last_fallback_geometry_source": ctx.last_fallback_geometry_source,
+            "nominatim_bbox": ctx.nominatim_bbox,
+            "effective_bbox": ctx.effective_bbox or ctx.bbox,
+            "bbox_padding_applied": ctx.bbox_padding_applied,
+            "bbox_padding_reason": ctx.bbox_padding_reason,
+            "bbox_min_side_miles": ctx.bbox_min_side_miles,
             "geometry_status": ctx.geometry_status,
             "geometry_source": ctx.geometry_source,
             "trust_policy": ctx.trust_policy.value,
@@ -537,17 +628,58 @@ def _looks_like_camera_type_only(value: str) -> bool:
     tokens = {t.casefold() for t in re.findall(r"[A-Za-z0-9]+", value.replace("_", " ")) if t}
     return bool(tokens) and tokens.issubset(CAMERA_TYPE_WORDS)
 
+
+def _normalized_target_geojson_geometry(raw: Any) -> dict[str, Any] | None:
+    """Return a usable Nominatim GeoJSON boundary geometry, if present."""
+    if not isinstance(raw, dict):
+        return None
+    geom_type = raw.get("type")
+    coords = raw.get("coordinates")
+    if geom_type in {"Polygon", "MultiPolygon"} and isinstance(coords, list) and coords:
+        bbox = _bbox_from_geojson_geometry(raw)
+        return raw if bbox else None
+    return None
+
+
+def _bbox_from_geojson_geometry(geometry: dict[str, Any] | None) -> dict[str, float] | None:
+    if not isinstance(geometry, dict):
+        return None
+    values: list[tuple[float, float]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            if len(node) >= 2 and all(isinstance(v, (int, float)) for v in node[:2]):
+                lon, lat = float(node[0]), float(node[1])
+                if math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180:
+                    values.append((lat, lon))
+            else:
+                for item in node:
+                    walk(item)
+
+    walk(geometry.get("coordinates"))
+    if not values:
+        return None
+    lats = [lat for lat, _lon in values]
+    lons = [lon for _lat, lon in values]
+    bbox = {"min_lat": min(lats), "max_lat": max(lats), "min_lon": min(lons), "max_lon": max(lons)}
+    valid, _reason = _bbox_order_and_range_valid(bbox)
+    return bbox if valid else None
+
 def _bbox_from_nominatim(raw: Any) -> dict[str, float] | None:
     if not isinstance(raw, list) or len(raw) != 4:
         return None
     try:
         south, north, west, east = [float(v) for v in raw]
-        return {"min_lat": south, "max_lat": north, "min_lon": west, "max_lon": east}
     except Exception:
         return None
+    if not all(math.isfinite(v) for v in (south, north, west, east)):
+        return None
+    bbox = {"min_lat": south, "max_lat": north, "min_lon": west, "max_lon": east}
+    valid, _reason = _bbox_order_and_range_valid(bbox)
+    return bbox if valid else None
 
 
-def _bbox_plausible(bbox: dict[str, float], scope: str) -> tuple[bool, str]:
+def _bbox_order_and_range_valid(bbox: dict[str, float]) -> tuple[bool, str]:
     try:
         min_lat, max_lat, min_lon, max_lon = bbox["min_lat"], bbox["max_lat"], bbox["min_lon"], bbox["max_lon"]
     except KeyError:
@@ -556,6 +688,83 @@ def _bbox_plausible(bbox: dict[str, float], scope: str) -> tuple[bool, str]:
         return False, "bbox_invalid_order"
     if not (-90 <= min_lat <= 90 and -90 <= max_lat <= 90 and -180 <= min_lon <= 180 and -180 <= max_lon <= 180):
         return False, "bbox_coordinate_out_of_range"
+    return True, "ok"
+
+
+def _bbox_dimensions_miles(bbox: dict[str, float]) -> tuple[float, float]:
+    min_lat, max_lat, min_lon, max_lon = bbox["min_lat"], bbox["max_lat"], bbox["min_lon"], bbox["max_lon"]
+    height = abs(max_lat - min_lat) * 69.0
+    mid_lat = math.radians((min_lat + max_lat) / 2.0)
+    width = abs(max_lon - min_lon) * 69.0 * max(math.cos(mid_lat), 0.05)
+    return width, height
+
+
+def _bbox_center(bbox: dict[str, float]) -> tuple[float, float]:
+    return (bbox["min_lat"] + bbox["max_lat"]) / 2.0, (bbox["min_lon"] + bbox["max_lon"]) / 2.0
+
+
+def _is_precise_small_target_candidate(candidate: GeocoderCandidate, intent: TargetIntent) -> bool:
+    scope = (intent.scope_type or "place").casefold()
+    if scope in REGIONAL_SCOPE_TYPES:
+        return False
+    result_type = (candidate.result_type or "").casefold()
+    result_class = str(candidate.raw.get("class") or "").casefold()
+    raw_type = str(candidate.raw.get("type") or "").casefold()
+    if result_type in PRECISE_RESULT_TYPES or raw_type in PRECISE_RESULT_TYPES:
+        return True
+    return result_class in PRECISE_RESULT_CLASSES
+
+
+def _pad_bbox_to_min_side_miles(bbox: dict[str, float], min_side_miles: float) -> dict[str, float]:
+    center_lat, center_lon = _bbox_center(bbox)
+    width_miles, height_miles = _bbox_dimensions_miles(bbox)
+    target_width = max(width_miles, min_side_miles)
+    target_height = max(height_miles, min_side_miles)
+
+    half_lat_deg = target_height / (2.0 * 69.0)
+    lon_miles_per_degree = 69.0 * max(math.cos(math.radians(center_lat)), 0.05)
+    half_lon_deg = target_width / (2.0 * lon_miles_per_degree)
+
+    return {
+        "min_lat": max(-90.0, center_lat - half_lat_deg),
+        "max_lat": min(90.0, center_lat + half_lat_deg),
+        "min_lon": max(-180.0, center_lon - half_lon_deg),
+        "max_lon": min(180.0, center_lon + half_lon_deg),
+    }
+
+
+
+def _generic_bbox_from_point(lat: float, lon: float, min_side_miles: float) -> dict[str, float]:
+    seed = {"min_lat": lat, "max_lat": lat + 1e-9, "min_lon": lon, "max_lon": lon + 1e-9}
+    return _pad_bbox_to_min_side_miles(seed, min_side_miles)
+
+
+def _effective_bbox_for_target(
+    nominatim_bbox: dict[str, float],
+    candidate: GeocoderCandidate,
+    intent: TargetIntent,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    padding = {"applied": False, "reason": None, "min_side_miles": None}
+    if not _is_precise_small_target_candidate(candidate, intent):
+        return nominatim_bbox, padding
+    width_miles, height_miles = _bbox_dimensions_miles(nominatim_bbox)
+    if width_miles >= SMALL_TARGET_MIN_SIDE_MILES and height_miles >= SMALL_TARGET_MIN_SIDE_MILES:
+        return nominatim_bbox, padding
+    return (
+        _pad_bbox_to_min_side_miles(nominatim_bbox, SMALL_TARGET_MIN_SIDE_MILES),
+        {
+            "applied": True,
+            "reason": "known_geocoder_bbox_below_minimum_precise_target_extent",
+            "min_side_miles": SMALL_TARGET_MIN_SIDE_MILES,
+        },
+    )
+
+
+def _bbox_plausible(bbox: dict[str, float], scope: str) -> tuple[bool, str]:
+    valid, reason = _bbox_order_and_range_valid(bbox)
+    if not valid:
+        return False, reason
+    min_lat, max_lat, min_lon, max_lon = bbox["min_lat"], bbox["max_lat"], bbox["min_lon"], bbox["max_lon"]
     h = abs(max_lat - min_lat) * 69
     mid = math.radians((min_lat + max_lat) / 2)
     w = abs(max_lon - min_lon) * 69 * max(math.cos(mid), 0.05)

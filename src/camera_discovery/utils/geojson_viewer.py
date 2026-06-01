@@ -98,6 +98,116 @@ def load_camera_map_geojson(output_dir: Path, geojson_path: Path | None = None) 
     return {"type": "FeatureCollection", "features": features}, " + ".join(path.name for path in selected_paths), selected_paths
 
 
+def load_target_geometry_overlays(output_dir: Path) -> list[dict[str, Any]]:
+    """Load target-resolution bboxes/points for map overlays, when present.
+
+    Camera GeoJSON remains the source of camera point markers. This helper only
+    adds target geometry context from resolver diagnostics so notebooks/maps can
+    show the verified Nominatim/effective bbox that scoped those camera points.
+    """
+    candidates = [
+        output_dir / "logs" / "target_resolution_all.json",
+        output_dir / "logs" / "target_resolution.json",
+    ]
+    for path in candidates:
+        if not path.exists() or path.stat().st_size <= 0:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        raw_targets = data.get("targets") if isinstance(data, dict) and isinstance(data.get("targets"), list) else None
+        if raw_targets is None and isinstance(data, dict):
+            raw_targets = [data]
+        overlays: list[dict[str, Any]] = []
+        for item in raw_targets or []:
+            if not isinstance(item, dict):
+                continue
+            bbox = _normalized_bbox_for_overlay(item.get("effective_bbox") or item.get("bbox"))
+            nominatim_bbox = _normalized_bbox_for_overlay(item.get("nominatim_bbox"))
+            fallback_bbox = _normalized_bbox_for_overlay(item.get("fallback_geometry_bbox") or item.get("nominatim_bbox"))
+            last_fallback_bbox = _normalized_bbox_for_overlay(item.get("last_fallback_geometry_bbox"))
+            primary_geometry = _normalized_geojson_geometry_for_overlay(
+                item.get("target_geometry_geojson")
+                or item.get("primary_geometry_geojson")
+                or item.get("polygon")
+            )
+            chosen = item.get("chosen_candidate") if isinstance(item.get("chosen_candidate"), dict) else {}
+            overlay = {
+                "target_id": item.get("target_id"),
+                "target_index": item.get("target_index"),
+                "target_label": item.get("target_label") or item.get("canonical_target") or item.get("target_id"),
+                "canonical_target": item.get("canonical_target"),
+                "scope_type": item.get("scope_type"),
+                "target_geometry_geojson": primary_geometry,
+                "primary_geometry_geojson": primary_geometry,
+                "primary_geometry_source": item.get("primary_geometry_source"),
+                "fallback_geometry_bbox": fallback_bbox,
+                "fallback_geometry_source": item.get("fallback_geometry_source"),
+                "last_fallback_geometry_bbox": last_fallback_bbox,
+                "last_fallback_geometry_source": item.get("last_fallback_geometry_source"),
+                "bbox": bbox,
+                "effective_bbox": bbox,
+                "nominatim_bbox": nominatim_bbox,
+                "bbox_verified": item.get("bbox_verified"),
+                "geometry_source": item.get("geometry_source"),
+                "geometry_status": item.get("geometry_status"),
+                "bbox_padding_applied": item.get("bbox_padding_applied"),
+                "bbox_padding_reason": item.get("bbox_padding_reason"),
+                "bbox_min_side_miles": item.get("bbox_min_side_miles"),
+                "lat": chosen.get("lat"),
+                "lon": chosen.get("lon"),
+                "display_name": chosen.get("display_name"),
+                "result_type": chosen.get("result_type"),
+            }
+            if overlay["target_geometry_geojson"] or overlay["bbox"] or overlay["fallback_geometry_bbox"] or overlay["last_fallback_geometry_bbox"] or (overlay["lat"] is not None and overlay["lon"] is not None):
+                overlays.append(overlay)
+        return overlays
+    return []
+
+
+def _normalized_bbox_for_overlay(value: Any) -> dict[str, float] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        bbox = {
+            "min_lat": float(value["min_lat"]),
+            "max_lat": float(value["max_lat"]),
+            "min_lon": float(value["min_lon"]),
+            "max_lon": float(value["max_lon"]),
+        }
+    except Exception:
+        return None
+    if bbox["max_lat"] <= bbox["min_lat"] or bbox["max_lon"] <= bbox["min_lon"]:
+        return None
+    if not (-90 <= bbox["min_lat"] <= 90 and -90 <= bbox["max_lat"] <= 90):
+        return None
+    if not (-180 <= bbox["min_lon"] <= 180 and -180 <= bbox["max_lon"] <= 180):
+        return None
+    return bbox
+
+
+
+def _normalized_geojson_geometry_for_overlay(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    geom_type = value.get("type")
+    coords = value.get("coordinates")
+    if geom_type not in {"Polygon", "MultiPolygon"} or not isinstance(coords, list) or not coords:
+        return None
+    return value if _geometry_has_coordinate_pair(coords) else None
+
+
+def _geometry_has_coordinate_pair(value: Any) -> bool:
+    if isinstance(value, list):
+        if len(value) >= 2 and all(isinstance(v, (int, float)) for v in value[:2]):
+            lat = float(value[1])
+            lon = float(value[0])
+            return -90 <= lat <= 90 and -180 <= lon <= 180
+        return any(_geometry_has_coordinate_pair(item) for item in value)
+    return False
+
+
 def geojson_features_to_rows(geojson: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten GeoJSON features into stable table rows without changing trust state."""
     rows: list[dict[str, Any]] = []
@@ -168,7 +278,13 @@ def write_embedded_camera_map(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     geojson, source_name, selected_paths = load_camera_map_geojson(output_dir, geojson_path)
-    html = _camera_map_html(geojson, source_name)
+    target_overlays = load_target_geometry_overlays(output_dir)
+    target_primary_geometry_overlay_count = sum(1 for target in target_overlays if target.get("target_geometry_geojson") or target.get("primary_geometry_geojson"))
+    target_fallback_bbox_overlay_count = sum(1 for target in target_overlays if target.get("fallback_geometry_bbox") or target.get("nominatim_bbox"))
+    target_last_fallback_bbox_overlay_count = sum(1 for target in target_overlays if target.get("last_fallback_geometry_bbox"))
+    target_bbox_overlay_count = sum(1 for target in target_overlays if target.get("effective_bbox") or target.get("bbox") or target.get("fallback_geometry_bbox") or target.get("last_fallback_geometry_bbox"))
+    target_point_overlay_count = sum(1 for target in target_overlays if target.get("lat") is not None and target.get("lon") is not None)
+    html = _camera_map_html(geojson, source_name, target_overlays)
     path = output_dir / output_name
     path.write_text(html, encoding="utf-8")
     write_json(
@@ -178,6 +294,16 @@ def write_embedded_camera_map(
             "source_geojson": str(selected_paths[0]) if len(selected_paths) == 1 else None,
             "source_geojson_files": [str(path) for path in selected_paths],
             "features": len(geojson.get("features") or []),
+            "target_geometry_overlays": len(target_overlays),
+            "target_primary_geometry_overlays": target_primary_geometry_overlay_count,
+            "target_fallback_bbox_overlays": target_fallback_bbox_overlay_count,
+            "target_last_fallback_bbox_overlays": target_last_fallback_bbox_overlay_count,
+            "target_bbox_overlays": target_bbox_overlay_count,
+            "target_point_overlays": target_point_overlay_count,
+            "has_target_primary_geometry_overlays": target_primary_geometry_overlay_count > 0,
+            "has_target_bbox_overlays": target_bbox_overlay_count > 0,
+            "has_target_point_overlays": target_point_overlay_count > 0,
+            "map_embeds_target_overlay_code": True,
             "has_video_playback_button": True,
             "has_refreshing_snapshot_viewer": True,
             "has_camera_type_legend": True,
@@ -219,8 +345,9 @@ def _first_text(mapping: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
+def _camera_map_html(geojson: dict[str, Any], source_name: str | None, target_overlays: list[dict[str, Any]] | None = None) -> str:
     data = json.dumps(geojson, ensure_ascii=False)
+    targets = json.dumps(target_overlays or [], ensure_ascii=False)
     title = escape(source_name or "No GeoJSON selected")
     thumbnail_keys_json = json.dumps(list(THUMBNAIL_KEYS))
     template = """<!doctype html>
@@ -240,6 +367,12 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
     .legend-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
     .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 999px; border: 1px solid rgba(0,0,0,.35); }
     .shape-swatch { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; font-size:14px; line-height:14px; color:#222; }
+    .target-point-swatch { display:inline-block; width:10px; height:10px; border-radius:999px; border:2px solid #1d4ed8; background:white; }
+    .target-popup { width: 300px; font-family: sans-serif; }
+    .target-popup h3 { margin: 0 0 6px 0; font-size: 15px; }
+    .target-popup table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .target-popup td { vertical-align: top; border-top: 1px solid #eee; padding: 3px 2px; }
+    .target-popup td:first-child { font-weight: 600; color: #444; width: 110px; }
     .star-marker { width:16px; height:16px; line-height:16px; text-align:center; font-size:16px; font-weight:900; text-shadow:0 0 2px #222; transform: translate(-8px, -8px); }
     .popup { width: 320px; font-family: sans-serif; }
     .popup h3 { margin: 0 0 6px 0; font-size: 15px; }
@@ -266,6 +399,9 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
     <div class='legend-title'>Marker shape</div>
     <div class='legend-row'><span class='shape-swatch'>★</span><span>Trusted</span></div>
     <div class='legend-row'><span class='shape-swatch'>●</span><span>Untrusted / review</span></div>
+    <div class='legend-title' style='margin-top:6px'>Target geometry</div>
+    <div class='legend-row'><span class='swatch' style='background:white;border:2px solid #1d4ed8;border-radius:0'></span><span>Nominatim/effective bbox</span></div>
+    <div class='legend-row'><span class='target-point-swatch'></span><span>Geocoder point</span></div>
     <div class='legend-title' style='margin-top:6px'>Camera color legend</div>
     <div class='legend-row'><span class='swatch' style='background:green'></span><span>Traffic / HLS video fallback</span></div>
     <div class='legend-row'><span class='swatch' style='background:deepskyblue'></span><span>Weather</span></div>
@@ -285,6 +421,7 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
   </div>
   <script>
     const CAMERA_GEOJSON = __DATA__;
+    const TARGET_GEOMETRIES = __TARGET_GEOMETRIES__;
     const THUMBNAIL_KEYS = __THUMBNAIL_KEYS__;
     let activeHls = null;
     const map = L.map('map').setView([39, -98], 4);
@@ -361,6 +498,36 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
     }
     function linkHtml(label, url) { return url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label)}</a>` : ''; }
     function detailRow(label, value) { if (value === undefined || value === null || value === '') return ''; return `<tr><td>${esc(label)}</td><td>${esc(value)}</td></tr>`; }
+    function bboxToBounds(bbox) {
+      if (!bbox) return null;
+      const minLat = Number(bbox.min_lat), maxLat = Number(bbox.max_lat), minLon = Number(bbox.min_lon), maxLon = Number(bbox.max_lon);
+      if (![minLat, maxLat, minLon, maxLon].every(Number.isFinite) || maxLat <= minLat || maxLon <= minLon) return null;
+      return [[minLat, minLon], [maxLat, maxLon]];
+    }
+    function formatBbox(bbox) {
+      if (!bbox) return '';
+      return `${Number(bbox.min_lat).toFixed(6)}, ${Number(bbox.min_lon).toFixed(6)} → ${Number(bbox.max_lat).toFixed(6)}, ${Number(bbox.max_lon).toFixed(6)}`;
+    }
+    function targetPopupHtml(target) {
+      const label = target.target_label || target.canonical_target || target.target_id || 'Target';
+      return `<div class="target-popup"><h3>${esc(label)}</h3><table>
+        ${detailRow('Target ID', target.target_id || '')}
+        ${detailRow('Scope', target.scope_type || '')}
+        ${detailRow('Geometry source', target.geometry_source || '')}
+        ${detailRow('Geometry status', target.geometry_status || '')}
+        ${detailRow('Primary geometry', target.primary_geometry_source || (target.target_geometry_geojson ? 'nominatim_polygon' : ''))}
+        ${detailRow('Fallback geometry', target.fallback_geometry_source || '')}
+        ${detailRow('Last fallback geometry', target.last_fallback_geometry_source || '')}
+        ${detailRow('Verified bbox', target.bbox_verified)}
+        ${detailRow('Effective bbox', formatBbox(target.effective_bbox || target.bbox))}
+        ${detailRow('Nominatim bbox', formatBbox(target.nominatim_bbox))}
+        ${detailRow('Padding applied', target.bbox_padding_applied)}
+        ${detailRow('Padding reason', target.bbox_padding_reason || '')}
+        ${detailRow('Min side miles', target.bbox_min_side_miles || '')}
+        ${detailRow('Geocoder point', target.lat !== undefined && target.lon !== undefined ? `${target.lat}, ${target.lon}` : '')}
+        ${detailRow('Display name', target.display_name || '')}
+      </table></div>`;
+    }
     function popupHtml(feature) {
       const p = feature.properties || {};
       const coords = feature.geometry && Array.isArray(feature.geometry.coordinates) ? feature.geometry.coordinates : [];
@@ -452,11 +619,57 @@ def _camera_map_html(geojson: dict[str, Any], source_name: str | None) -> str:
       onEachFeature: (feature, layer) => layer.bindPopup(popupHtml(feature), { maxWidth: 360 }),
       pointToLayer: (feature, latlng) => markerForFeature(feature, latlng)
     }).addTo(map);
+
+    const targetLayer = L.featureGroup().addTo(map);
+    for (const target of TARGET_GEOMETRIES || []) {
+      const primaryGeometry = target.target_geometry_geojson || target.primary_geometry_geojson;
+      if (primaryGeometry) {
+        L.geoJSON(primaryGeometry, { style: { color: '#1d4ed8', weight: 3, fill: false, fillOpacity: 0 } })
+          .bindPopup(targetPopupHtml(target), { maxWidth: 340 })
+          .addTo(targetLayer);
+      }
+      const fallbackBounds = bboxToBounds(target.fallback_geometry_bbox || target.nominatim_bbox);
+      const effectiveBounds = bboxToBounds(target.effective_bbox || target.bbox);
+      const lastFallbackBounds = bboxToBounds(target.last_fallback_geometry_bbox);
+      if (!primaryGeometry && fallbackBounds) {
+        L.rectangle(fallbackBounds, { color: '#1d4ed8', weight: 2, fill: false, fillOpacity: 0 })
+          .bindPopup(targetPopupHtml(target), { maxWidth: 340 })
+          .addTo(targetLayer);
+      }
+      if (primaryGeometry && target.bbox_padding_applied && effectiveBounds) {
+        L.rectangle(effectiveBounds, { color: '#1d4ed8', weight: 1, fill: false, fillOpacity: 0, dashArray: '6 4' })
+          .bindPopup(targetPopupHtml(target), { maxWidth: 340 })
+          .addTo(targetLayer);
+      }
+      if (!primaryGeometry && !fallbackBounds && lastFallbackBounds) {
+        L.rectangle(lastFallbackBounds, { color: '#9333ea', weight: 2, fill: false, fillOpacity: 0, dashArray: '4 4' })
+          .bindPopup(targetPopupHtml(target), { maxWidth: 340 })
+          .addTo(targetLayer);
+      }
+      const lat = Number(target.lat), lon = Number(target.lon);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        L.circleMarker([lat, lon], { radius: 4, color: '#1d4ed8', weight: 2, fillColor: 'white', fillOpacity: 1 })
+          .bindPopup(targetPopupHtml(target), { maxWidth: 340 })
+          .addTo(targetLayer);
+      }
+    }
+
     const count = (CAMERA_GEOJSON.features || []).length;
-    if (count && layer.getBounds().isValid()) map.fitBounds(layer.getBounds(), { padding: [24, 24] });
-    document.getElementById('status').innerText = count ? `Loaded __TITLE__: ${count} camera feature(s)` : 'No camera GeoJSON features found';
+    const targetCount = (TARGET_GEOMETRIES || []).length;
+    const fitGroup = L.featureGroup();
+    if (count) layer.eachLayer(item => fitGroup.addLayer(item));
+    targetLayer.eachLayer(item => fitGroup.addLayer(item));
+    if (fitGroup.getLayers().length && fitGroup.getBounds().isValid()) map.fitBounds(fitGroup.getBounds(), { padding: [24, 24] });
+    const cameraText = count ? `${count} camera feature(s)` : 'No camera GeoJSON features found';
+    const targetText = targetCount ? `${targetCount} target geometry/bbox/point overlay(s)` : 'no target geometry overlay';
+    document.getElementById('status').innerText = `Loaded __TITLE__: ${cameraText}; ${targetText}`;
   </script>
 </body>
 </html>
 """
-    return template.replace("__DATA__", data).replace("__TITLE__", title).replace("__THUMBNAIL_KEYS__", thumbnail_keys_json)
+    return (
+        template.replace("__DATA__", data)
+        .replace("__TARGET_GEOMETRIES__", targets)
+        .replace("__TITLE__", title)
+        .replace("__THUMBNAIL_KEYS__", thumbnail_keys_json)
+    )
