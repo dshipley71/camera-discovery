@@ -31,7 +31,7 @@ Generated notebook maps overlay target bounding boxes as border-only rectangles 
 
 ## Nominatim target geometry overlays
 
-The notebooks regenerate maps from the installed local `camera_discovery` package and inspect target-resolution logs for the Nominatim geometry hierarchy:
+The notebooks regenerate maps from the installed repository `camera_discovery` package and inspect target-resolution logs for the Nominatim geometry hierarchy:
 
 1. Primary geometry: Nominatim polygon or multipolygon (`target_geometry_geojson` / `primary_geometry_source=nominatim_polygon`).
 2. Fallback geometry: Nominatim rectangular bbox (`fallback_geometry_bbox` / `fallback_geometry_source=nominatim_bbox`).
