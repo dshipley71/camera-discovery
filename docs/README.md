@@ -24,3 +24,7 @@ Historical `docs/codex_prompt_*.md` files are implementation traceability record
 - `docs/runtime_configuration.md` documents RTSP media filters/validation, the external-player limitation for RTSP, and guarded Google dorking configuration.
 - `docs/codex_prompt_media_playlists_rtsp_validation_dashboard.md` records the implementation prompt for media playlists, RTSP support, the validation dashboard, and guarded public-source Google dorking.
 
+
+## Passive intelligence documentation
+
+See `passive_intelligence.md` for the passive source/candidate evidence scoring, safe signature matching, HTTP metadata, protocol labeling, and review-artifact behavior. The corresponding implementation prompt is `codex_prompt_passive_camera_intelligence.md`.

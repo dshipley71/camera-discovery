@@ -242,3 +242,7 @@ playlists/harvested_image_snapshots.txt
 logs/playlist_export_summary.json
 ```
 
+
+## Passive intelligence artifacts
+
+Normal discovery runs can write passive intelligence artifacts under `logs/`: `passive_intelligence_summary.json`, `source_row_evidence_summary.jsonl`, `candidate_evidence_summary.jsonl`, and `candidate_priority_explanation.jsonl`. `media_validation_dashboard.json` includes a `passive_intelligence` section with evidence bands, protocol label counts, signature family counts, and top evidence reasons. Candidate CSV and GeoJSON properties include compact evidence score, band, protocol, HTTP status/content type/final URL, and why-candidate-mattered fields.

@@ -72,3 +72,8 @@ candidates/<target_id>/agentic_candidates.jsonl
 candidates/<target_id>/agentic_candidates_unique.jsonl
 logs/targets/<target_id>/candidate_discovery_summary.json
 ```
+
+
+## Passive intelligence integration
+
+Source-row selection and candidate creation should call the passive intelligence helpers so source rows and candidates carry deterministic evidence score, band, reasons, safe signature matches, protocol labels, and allowlisted HTTP metadata when available from existing fetches. Sorting may use evidence as a secondary priority signal. Do not generate vendor-path URLs or run active probes from signatures.

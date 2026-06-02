@@ -78,3 +78,11 @@ The normal pipeline always treats loaded harvest candidates as unvalidated/untru
 ## Candidate priority
 
 `discovery/candidate_priority.py` centralizes ordering. It promotes located, in-scope, first-class media candidates for validation/review ordering while preserving trust boundaries.
+
+
+## Passive intelligence modules
+
+- `src/camera_discovery/passive_intelligence/signatures.py`: safe passive camera/media signature matching against already-discovered evidence only.
+- `src/camera_discovery/passive_intelligence/protocol_labels.py`: deterministic protocol/media-family labels.
+- `src/camera_discovery/passive_intelligence/http_metadata.py`: allowlisted HTTP metadata normalization and URL redaction.
+- `src/camera_discovery/passive_intelligence/evidence.py`: source/candidate evidence scoring and summary records.

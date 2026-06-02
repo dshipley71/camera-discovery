@@ -36,3 +36,8 @@ Review-only output may include coordinate-bearing untrusted candidates with expl
 ## Multi-location requirement
 
 Merged outputs must preserve `target_id`, `target_label`, and `target_index` for every feature and table row.
+
+
+## Passive validation intelligence
+
+Review/validation must carry passive evidence fields into validation handoff, candidate tables, GeoJSON, dashboards, and run explanations. HTTP metadata may be captured from validation requests that already occur. Evidence scores can affect priority order inside existing validation buckets, but trusted output still requires validation, coordinates, in-scope status, and target trust policy.

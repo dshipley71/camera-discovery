@@ -154,17 +154,16 @@ def test_run_start_initializes_expected_empty_media_outputs(tmp_path):
     assert (tmp_path / "logs" / "google_dorking_summary.json").exists()
     assert (tmp_path / "playlists").is_dir()
     dashboard = json.loads((tmp_path / "media_validation_dashboard.json").read_text(encoding="utf-8"))
-    assert dashboard == {
-        "total_candidates": 0,
-        "validated": 0,
-        "trusted": 0,
-        "untrusted_review": 0,
-        "dead": 0,
-        "restricted": 0,
-        "not_validated": 0,
-        "by_media_type": {},
-        "by_validation_status": {},
-    }
+    assert dashboard["total_candidates"] == 0
+    assert dashboard["validated"] == 0
+    assert dashboard["trusted"] == 0
+    assert dashboard["untrusted_review"] == 0
+    assert dashboard["dead"] == 0
+    assert dashboard["restricted"] == 0
+    assert dashboard["not_validated"] == 0
+    assert dashboard["by_media_type"] == {}
+    assert dashboard["by_validation_status"] == {}
+    assert dashboard["passive_intelligence"]["candidates_scored"] == 0
     dorking = json.loads((tmp_path / "logs" / "google_dorking_summary.json").read_text(encoding="utf-8"))
     assert dorking["enabled"] is True
     assert dorking["queries_generated"] == 0

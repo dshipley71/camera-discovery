@@ -267,3 +267,7 @@ Harvest mode can filter RTSP with `--media rtsp` or include it with `--media str
 
 Optional Google dorking is guarded public-source discovery only. Enable it with `CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=true` and cap it with `CAMERA_DISCOVERY_MAX_DORK_QUERIES`. Generated operator queries are bounded, target-aware, camera-intent-aware, prefer `site:` restrictions to allowed `SOURCES.md` domains, and are rechecked by deterministic block policy after search results return. The code forbids dorks for device admin/login pages, default credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset indexes.
 
+
+## Passive camera intelligence
+
+The discovery and validation pipeline now includes a passive intelligence layer. It deterministically scores source rows and candidates, applies safe camera/media URL signature matching to already-discovered evidence, captures allowlisted HTTP metadata from requests the pipeline already makes, adds richer protocol labels, and writes explanation artifacts showing why sources and candidates mattered. Passive evidence affects prioritization and review only; it never bypasses `SOURCES.md`, target scope, media validation, or trusted-output rules. See `docs/passive_intelligence.md`.

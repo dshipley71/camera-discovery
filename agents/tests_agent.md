@@ -27,3 +27,8 @@ python -m mypy src/camera_discovery/core src/camera_discovery/llm
 - provider configuration.
 
 Do not fake browser success, validation success, camera records, coordinates, or GeoJSON. Optional dependencies should be tested with preflight/missing-dependency behavior unless stable real-browser CI support exists.
+
+
+## Passive intelligence tests
+
+Tests must cover safe signature matching, passive protocol labeling, HTTP metadata redaction/allowlisting, deterministic evidence scoring, validation/dashboard/artifact integration, and safety regressions proving no active scanning, URL generation from signatures, RTSP brute-force probing, credential probing, packet capture, or vulnerability enrichment was added.

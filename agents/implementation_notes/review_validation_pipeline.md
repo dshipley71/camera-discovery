@@ -36,3 +36,8 @@ Review-only output may include coordinate-bearing untrusted candidates with expl
 ## Multi-location requirement
 
 Merged outputs must preserve `target_id`, `target_label`, and `target_index` for every feature and table row.
+
+
+## Passive intelligence integration
+
+Validation and output writing should preserve passive evidence fields in validation results, candidate tables, GeoJSON, dashboards, and review artifact zips. Validation HTTP metadata may be attached from HTTP requests already made for HLS or image snapshot validation. Evidence scores are prioritization/explanation signals only; final trust remains deterministic.

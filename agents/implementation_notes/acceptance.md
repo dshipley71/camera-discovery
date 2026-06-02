@@ -63,3 +63,8 @@ Never create empty trusted files. Trusted artifacts require verified target geom
 ## Artifact-size caution
 
 `--write-intermediate-records` can write very large harvest files. It is appropriate for extraction debugging, not routine notebook use.
+
+
+## Passive intelligence acceptance
+
+Regenerated implementations must include deterministic passive source/candidate evidence scoring, safe signature matching constrained to discovered evidence, allowlisted/redacted HTTP metadata capture, passive protocol labels, and summary artifacts. They must not add active scanning, RTSP brute forcing, default credential probing, packet capture, CVE/vulnerability enrichment, or security-index integrations.

@@ -128,3 +128,7 @@ Browser dependencies are optional. Do not pretend browser-dependent behavior suc
 - `media_validation_dashboard.json` counts must come from actual candidate/validation state.
 - Google dorking support is bounded public-source discovery only. Do not add dorks for exposed device UIs, admin pages, default credentials, vendor fingerprints, RTSP hunting, private-network hosts, or blocked internet-asset indexes.
 
+
+## Passive intelligence regeneration requirement
+
+Agent-generated implementations must include the passive intelligence layer under `src/camera_discovery/passive_intelligence/` or an equivalent cohesive package. The layer may score and label already-discovered evidence only. It must not add active scanning, host probing, RTSP brute-force path generation, credential probing, packet capture, vulnerability enrichment, or security-index integrations. Evidence score may prioritize extraction/validation/review order, but source policy, target scope, validation, and trust gates remain authoritative.

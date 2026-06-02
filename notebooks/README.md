@@ -44,3 +44,7 @@ Map cells should show primary target borders with border-only GeoJSON overlays a
 
 Notebook run-inspection cells should print `media_validation_dashboard.json` when present, list `playlists/` outputs, and show high-level `logs/google_dorking_summary.json` counts when that optional feature is enabled. RTSP examples should remain optional/commented; browsers do not play RTSP with hls.js, so RTSP links are intended for external players such as VLC or another authorized RTSP-capable client.
 
+
+## Passive intelligence artifact display
+
+The notebooks include a passive intelligence summary cell that reads source-code-generated artifacts after a run completes. The cell shows evidence-band counts, protocol-label counts, signature-family counts, and top evidence reasons. It does not patch source code or move notebook helpers into `src/`.

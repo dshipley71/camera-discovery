@@ -120,3 +120,8 @@ notebooks/camera_discovery_harvest_urls_test.ipynb
 Notebook-specific helper/display code belongs in notebooks, not `src/`.
 
 Tests live under `tests/` and cover CLI contracts, config alignment, source policy, blind search parsing, harvest media/structured records/handoff, browser backend/preflight behavior, multi-target contracts, candidate priority, output filtering, and provider configuration.
+
+
+## Passive intelligence package
+
+`src/camera_discovery/passive_intelligence/` contains deterministic passive evidence scoring, safe signature matching, HTTP metadata normalization/redaction, protocol labeling, and artifact summary helpers. This package is passive-only and is consumed by discovery, validation, playlists/dashboard, and review artifacts.
