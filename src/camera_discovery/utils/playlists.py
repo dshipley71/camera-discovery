@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from camera_discovery.utils.url_safety import is_private_or_local_media_url, redact_url_userinfo
+from camera_discovery.passive_intelligence import passive_intelligence_summary
 
 LIVE_STATUSES = {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing", "active_rtsp_verified"}
 RESTRICTED_STATUS_FRAGMENTS = ("restricted", "auth_required", "private_network", "not_allowed", "forbidden", "401", "403")
@@ -143,6 +144,7 @@ def build_media_validation_dashboard(
         "not_validated": buckets.get("not_validated", 0),
         "by_media_type": dict(sorted(by_media_type.items())),
         "by_validation_status": dict(sorted(by_status.items())),
+        "passive_intelligence": passive_intelligence_summary(rows),
     }
 
 

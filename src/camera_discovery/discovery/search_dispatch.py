@@ -99,6 +99,10 @@ from camera_discovery.extraction.pagination import (
     _pagination_rows,
 )
 from camera_discovery.extraction.search import clean_ddg_result_url, parse_ddg_result_rows
+from camera_discovery.passive_intelligence import (
+    enrich_source_row_with_passive_intelligence,
+    source_row_evidence_record,
+)
 
 
 class SearchDispatchMixin:
@@ -292,20 +296,23 @@ class SearchDispatchMixin:
                 continue
             reason = self.source_policy.block_reason(url)
             if reason:
-                blocked = dict(row)
+                blocked = enrich_source_row_with_passive_intelligence(dict(row), self.source_policy)
                 blocked["blocked_reason"] = reason
                 blocked_rows.append(blocked)
                 continue
             seen.add(key)
-            selected.append({**row, "url": key})
+            selected_row = enrich_source_row_with_passive_intelligence({**row, "url": key}, self.source_policy)
+            selected.append(selected_row)
             if key.startswith(("rtsp://", "rtsps://")):
                 continue
             for page_row in _pagination_rows({**row, "url": key}, self.config.max_directory_pages if row.get("source_provider") in {"directory", "direct"} else 1):
                 page_key = page_row["url"].split("#", 1)[0]
                 if page_key not in seen and not self.source_policy.block_reason(page_key):
                     seen.add(page_key)
-                    selected.append(page_row)
+                    selected.append(enrich_source_row_with_passive_intelligence(page_row, self.source_policy))
+        selected.sort(key=lambda row: (-int(row.get("source_camera_evidence_score") or 0), str(row.get("source_provider") or ""), str(row.get("url") or "")))
         write_jsonl(self.logs_dir / "blocked_source_rows.jsonl", blocked_rows)
+        write_jsonl(self.logs_dir / "source_row_evidence_summary.jsonl", [source_row_evidence_record(row) for row in selected + blocked_rows])
         summary = getattr(self, "_google_dorking_summary", None)
         if isinstance(summary, dict) and summary.get("enabled"):
             dork_selected = [row for row in selected if row.get("discovery_query_kind") == "google_dork"]

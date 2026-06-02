@@ -92,14 +92,19 @@ def candidate_priority_label(candidate: CameraCandidate) -> str:
     return PRIORITY_BUCKET_LABELS[candidate_priority_bucket(candidate)]
 
 
-def candidate_priority_sort_key(candidate: CameraCandidate) -> tuple[int]:
+def candidate_priority_sort_key(candidate: CameraCandidate) -> tuple[int, int]:
     """Stable sort key for candidate priority.
 
-    Python's sorted/list.sort are stable, so returning only the bucket preserves
-    first-seen order within each priority class while still promoting located,
-    in-scope candidates over unlocated or out-of-scope rows.
+    Lower priority buckets still dominate. Passive evidence is only a secondary
+    prioritization signal inside the existing bucket; it never modifies scope,
+    validation, or trust.
     """
-    return (candidate_priority_bucket(candidate),)
+    metadata = candidate.source_metadata or {}
+    try:
+        evidence_score = int(metadata.get("camera_evidence_score") or 0)
+    except (TypeError, ValueError):
+        evidence_score = 0
+    return (candidate_priority_bucket(candidate), -evidence_score)
 
 
 def prioritize_candidates(candidates: Iterable[CameraCandidate]) -> list[CameraCandidate]:
