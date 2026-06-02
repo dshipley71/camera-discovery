@@ -44,3 +44,8 @@ Coordinates, validation status, trust level, and final output authorization must
 ## Passive intelligence fields
 
 Candidate/source contracts should allow compact passive fields: `camera_evidence_score`, `camera_evidence_band`, `camera_evidence_reasons`, `protocol_label`, `media_family`, `protocol_confidence`, `protocol_reasons`, `signature_matches`, `http_status`, `content_type`, `final_url`, `source_evidence_score`, `source_evidence_band`, and `why_candidate_mattered`. Full metadata belongs in JSON/JSONL logs, not bloated GeoJSON properties.
+
+
+## Strict target geometry artifact rule
+
+Artifacts and map overlays that represent target geometry must be emitted only from explicit resolver geometry hierarchy fields: `primary_geometry_geojson`, `fallback_geometry_bbox`, or `last_fallback_geometry_bbox`. Do not synthesize artifact geometry from `bbox`, `effective_bbox`, `nominatim_bbox`, `polygon`, LLM hints, or geocoder point coordinates. Do not add unconfirmed fields or behavior when repository evidence is ambiguous; implement the narrow requested behavior and document limitations.

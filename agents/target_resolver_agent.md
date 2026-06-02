@@ -28,3 +28,8 @@ A failed target-intent LLM call can fall back to the deterministic target-clause
 ## Multi-location requirement
 
 Do not collapse multiple requested locations into one target. Write top-level diagnostics and per-target diagnostics under `logs/targets/<target_id>/`.
+
+
+## Strict target geometry artifact rule
+
+Artifacts and map overlays that represent target geometry must be emitted only from explicit resolver geometry hierarchy fields: `primary_geometry_geojson`, `fallback_geometry_bbox`, or `last_fallback_geometry_bbox`. Do not synthesize artifact geometry from `bbox`, `effective_bbox`, `nominatim_bbox`, `polygon`, LLM hints, or geocoder point coordinates. Do not add unconfirmed fields or behavior when repository evidence is ambiguous; implement the narrow requested behavior and document limitations.

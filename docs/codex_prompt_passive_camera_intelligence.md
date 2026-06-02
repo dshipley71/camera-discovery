@@ -65,6 +65,8 @@ Do not probe additional protocol endpoints unless the exact URL was already disc
 - If validation is disabled, do not pretend validation occurred.
 - If a candidate is untrusted, keep it untrusted.
 - If an output is not validated, label it clearly as not validated.
+- Do not make assumptions or add features, artifacts, fields, integrations, behaviors, sources, heuristics, or workflow changes that were not expected, requested, or confirmed by the user. When repository evidence is ambiguous, implement the narrowest change that satisfies the request and document any limitation instead of inventing behavior.
+- Target geometry artifacts and map overlays must be emitted only from explicit resolver geometry hierarchy fields: `primary_geometry_geojson`, `fallback_geometry_bbox`, or `last_fallback_geometry_bbox`. Do not synthesize target geometry artifacts from `bbox`, `effective_bbox`, `nominatim_bbox`, `polygon`, geocoder point coordinates, LLM hints, or other convenience/legacy fields unless those values have first been stored in one of the explicit primary/fallback/last_fallback geometry fields by the resolver.
 
 ### Implementation posture
 
@@ -438,6 +440,26 @@ Rules:
 - Do not expose secrets or sensitive query parameters.
 - Do not break existing artifact consumers.
 
+### 8A. Enforce strict target geometry artifact emission
+
+Any target geometry artifact, map target overlay, or review artifact entry representing target geometry must be emitted only from explicit resolver geometry hierarchy fields:
+
+```text
+primary_geometry_geojson
+fallback_geometry_bbox
+last_fallback_geometry_bbox
+```
+
+Rules:
+
+- `primary_geometry_geojson` is the only primary polygon/multipolygon source for target geometry artifacts.
+- `fallback_geometry_bbox` is the only fallback rectangle source for target geometry artifacts.
+- `last_fallback_geometry_bbox` is the only last-fallback rectangle source for target geometry artifacts.
+- Do not assume `target_geometry_geojson`, `polygon`, `bbox`, `effective_bbox`, or `nominatim_bbox` should produce a target geometry artifact unless the resolver also populated the corresponding explicit primary/fallback/last_fallback field.
+- Do not emit geocoder point overlays as target geometry artifacts.
+- If none of the explicit geometry fields is present, do not write `target_geometry.geojson` and log `created=false` with a clear skipped/no-explicit-geometry reason.
+- Keep diagnostic resolver fields available in diagnostic JSON where already present, but do not treat them as artifact geometry sources.
+
 ### 8. Update media validation dashboard
 
 Update the top-level media validation dashboard summary to include passive intelligence fields if the dashboard exists in this repository.
@@ -709,6 +731,8 @@ The update is complete only when all of the following are true:
 13. No active scanning, RTSP brute forcing, credential probing, packet capture, or vulnerability-oriented behavior is added.
 14. No source-specific, agency-specific, or location-specific hardcoding is added.
 15. Existing fast/balanced/full profile behavior is not silently changed.
+16. No unrequested/unconfirmed features, artifacts, fields, integrations, or assumptions are added.
+17. Target geometry artifacts and map overlays are emitted only from explicit `primary_geometry_geojson`, `fallback_geometry_bbox`, or `last_fallback_geometry_bbox` fields; no artifact geometry is synthesized from `bbox`, `effective_bbox`, `nominatim_bbox`, geocoder points, LLM hints, or other legacy/convenience fields.
 
 ## Final Response Required From Codex
 

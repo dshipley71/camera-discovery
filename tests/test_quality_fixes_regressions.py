@@ -239,7 +239,8 @@ def test_review_artifact_zip_includes_portable_primary_target_geometry(tmp_path)
     assert feature["geometry"] == california_polygon
     assert feature["properties"]["geometry_role"] == "primary"
     assert feature["properties"]["geometry_source"] == "nominatim_polygon"
-    assert feature["properties"]["nominatim_bbox"] == nominatim_bbox
+    assert "nominatim_bbox" not in feature["properties"]
+    assert "effective_bbox" not in feature["properties"]
     assert outputs.target_geometry_geojson == str(target_geometry_path)
     assert outputs.target_geometry_features_written == 1
     with ZipFile(outputs.review_artifacts_zip) as zf:
@@ -272,6 +273,36 @@ def test_review_artifact_target_geometry_uses_nominatim_bbox_only_when_polygon_m
     assert feature["properties"]["geometry_source"] == "nominatim_bbox"
     assert feature["geometry"]["type"] == "Polygon"
     assert feature["geometry"]["coordinates"][0][0] == [-124.0, 32.0]
+
+
+
+
+def test_target_geometry_artifact_does_not_assume_nominatim_bbox_is_fallback(tmp_path):
+    target = _target()
+    nominatim_bbox = {"min_lat": 32.0, "max_lat": 42.0, "min_lon": -124.0, "max_lon": -114.0}
+    target.primary_geometry_geojson = None
+    target.fallback_geometry_bbox = None
+    target.fallback_geometry_source = None
+    target.last_fallback_geometry_bbox = None
+    target.last_fallback_geometry_source = None
+    target.geometry_source = "nominatim_bbox"
+    target.geometry_status = "verified"
+    target.nominatim_bbox = nominatim_bbox
+    target.effective_bbox = nominatim_bbox
+    target.bbox = nominatim_bbox
+
+    cfg = _cfg(tmp_path, enable_llm_location_inference=False)
+    _validation, outputs = ReviewAndValidationPipeline(cfg).run(
+        [target], CandidateSet(unique=[], review=[], coordinate_bearing=[])
+    )
+
+    assert outputs.target_geometry_geojson is None
+    assert outputs.target_geometry_features_written == 0
+    assert not (tmp_path / "target_geometry.geojson").exists()
+    status = json.loads((tmp_path / "logs" / "target_geometry_geojson_status.json").read_text(encoding="utf-8"))
+    assert status["created"] is False
+    assert status["skipped_without_explicit_geometry"] == 1
+    assert status["strict_artifact_geometry_only"] is True
 
 
 def test_target_geometry_artifact_requires_explicit_geometry_role(tmp_path):

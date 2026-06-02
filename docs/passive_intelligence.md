@@ -70,3 +70,8 @@ The media validation dashboard includes a `passive_intelligence` section with ev
 ## Trust boundary
 
 Passive evidence does not create trusted cameras. Trusted outputs still require the existing deterministic gates: allowed source policy, target scope, validation, coordinate requirements, and trust policy. Fast profile remains review-only.
+
+
+## Change-control guardrails
+
+Do not make assumptions or add unconfirmed behavior. Passive intelligence must remain limited to the requested evidence scoring, safe signature matching, HTTP metadata capture, protocol labeling, and explanation artifacts. New artifacts or fields should be added only when requested by the prompt or required by existing repository contracts. Target geometry artifacts and map overlays are outside passive discovery evidence and may be emitted only from explicit `primary_geometry_geojson`, `fallback_geometry_bbox`, or `last_fallback_geometry_bbox` fields.

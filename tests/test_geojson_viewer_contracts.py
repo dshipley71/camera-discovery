@@ -44,11 +44,11 @@ def test_camera_map_merges_trusted_and_untrusted_geojson_and_colors_by_media_typ
     assert "Map Refresh Rate" in html
 
 
-def test_camera_map_overlays_target_bbox_and_geocoder_point(tmp_path):
+def test_camera_map_overlays_only_explicit_target_geometry(tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "target_resolution_all.json").write_text(
-        '{"targets":[{"target_id":"example","target_label":"Example Target","scope_type":"place","bbox":{"min_lat":38.0,"max_lat":38.01,"min_lon":-77.01,"max_lon":-77.0},"nominatim_bbox":{"min_lat":38.0001,"max_lat":38.0002,"min_lon":-77.0002,"max_lon":-77.0001},"bbox_verified":true,"geometry_source":"geocoder_padded","geometry_status":"verified","bbox_padding_applied":true,"bbox_padding_reason":"known_geocoder_bbox_below_minimum_precise_target_extent","bbox_min_side_miles":1.0,"chosen_candidate":{"lat":38.00015,"lon":-77.00015,"display_name":"Example Target","result_type":"monument"}}]}',
+        '{"targets":[{"target_id":"example","target_label":"Example Target","scope_type":"place","bbox":{"min_lat":38.0,"max_lat":38.01,"min_lon":-77.01,"max_lon":-77.0},"nominatim_bbox":{"min_lat":38.0001,"max_lat":38.0002,"min_lon":-77.0002,"max_lon":-77.0001},"fallback_geometry_bbox":{"min_lat":38.0001,"max_lat":38.0002,"min_lon":-77.0002,"max_lon":-77.0001},"fallback_geometry_source":"nominatim_bbox","bbox_verified":true,"geometry_source":"geocoder_padded","geometry_status":"verified","bbox_padding_applied":true,"bbox_padding_reason":"known_geocoder_bbox_below_minimum_precise_target_extent","bbox_min_side_miles":1.0,"chosen_candidate":{"lat":38.00015,"lon":-77.00015,"display_name":"Example Target","result_type":"monument"}}]}',
         encoding="utf-8",
     )
     (tmp_path / "untrusted_camera_candidates.geojson").write_text(
@@ -64,11 +64,35 @@ def test_camera_map_overlays_target_bbox_and_geocoder_point(tmp_path):
     assert "fill: false" in html
     assert "Example Target" in html
     assert "geocoder_padded" in html
-    assert "Geocoder point" in html
+    assert "Geocoder point" not in html
+    assert "effective_bbox" not in html
     assert '"target_bbox_overlays": 1' in status
-    assert '"target_point_overlays": 1' in status
-    assert '"has_target_bbox_overlays": true' in status
+    assert '"target_point_overlays": 0' in status
+    assert '"has_target_point_overlays": false' in status
+    assert '"strict_artifact_geometry_only": true' in status
     assert '"map_embeds_target_overlay_code": true' in status
+
+
+def test_camera_map_does_not_overlay_legacy_bbox_or_geocoder_point(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "target_resolution_all.json").write_text(
+        '{"targets":[{"target_id":"legacy","target_label":"Legacy Target","scope_type":"place","bbox":{"min_lat":38.0,"max_lat":38.01,"min_lon":-77.01,"max_lon":-77.0},"effective_bbox":{"min_lat":38.0,"max_lat":38.01,"min_lon":-77.01,"max_lon":-77.0},"nominatim_bbox":{"min_lat":38.0001,"max_lat":38.0002,"min_lon":-77.0002,"max_lon":-77.0001},"bbox_verified":true,"geometry_source":"legacy_bbox","geometry_status":"verified","chosen_candidate":{"lat":38.00015,"lon":-77.00015,"display_name":"Legacy Target","result_type":"monument"}}]}',
+        encoding="utf-8",
+    )
+    (tmp_path / "untrusted_camera_candidates.geojson").write_text(
+        '{"type":"FeatureCollection","features":[]}',
+        encoding="utf-8",
+    )
+
+    html = write_embedded_camera_map(tmp_path, output_name="map.html").read_text(encoding="utf-8")
+    status = (logs / "camera_map_status.json").read_text(encoding="utf-8")
+
+    assert "Legacy Target" not in html
+    assert '"target_geometry_overlays": 0' in status
+    assert '"target_bbox_overlays": 0' in status
+    assert '"target_point_overlays": 0' in status
+    assert '"strict_artifact_geometry_only": true' in status
 
 
 def test_camera_map_prefers_target_polygon_over_rectangle_when_available(tmp_path):
@@ -76,7 +100,7 @@ def test_camera_map_prefers_target_polygon_over_rectangle_when_available(tmp_pat
     logs.mkdir()
     polygon = '{"type":"Polygon","coordinates":[[[-124,32],[-114,32],[-114,42],[-124,42],[-124,32]]]}'
     (logs / "target_resolution_all.json").write_text(
-        '{"targets":[{"target_id":"ca","target_label":"California","scope_type":"state","target_geometry_geojson":'
+        '{"targets":[{"target_id":"ca","target_label":"California","scope_type":"state","primary_geometry_geojson":'
         + polygon
         + ',"primary_geometry_source":"nominatim_polygon","fallback_geometry_bbox":{"min_lat":32,"max_lat":42,"min_lon":-124,"max_lon":-114},"bbox":{"min_lat":32,"max_lat":42,"min_lon":-124,"max_lon":-114},"bbox_verified":true,"geometry_source":"nominatim_polygon","geometry_status":"verified","chosen_candidate":{"lat":37,"lon":-119,"display_name":"California","result_type":"administrative"}}]}',
         encoding="utf-8",

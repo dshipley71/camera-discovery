@@ -82,9 +82,9 @@ logs/search_results.jsonl
 2. **Fallback geometry**: rectangular Nominatim `boundingbox`, represented as a GeoJSON polygon, only when no usable Nominatim border geometry is available.
 3. **Last fallback geometry**: generic padded bbox only when no usable Nominatim polygon/multipolygon or Nominatim bbox is available and existing review-only policy permits fallback geometry.
 
-Feature properties include target identifiers and provenance fields such as `geometry_role`, `geometry_source`, `nominatim_bbox`, `effective_bbox`, `bbox_verified`, and padding diagnostics when applicable. `review_artifacts.zip` includes `target_geometry.geojson` whenever it is written.
+Feature properties include target identifiers and explicit geometry provenance fields such as `geometry_role`, `geometry_source`, `primary_geometry_source`, `fallback_geometry_source`, `last_fallback_geometry_source`, `bbox_verified`, and geometry status. `review_artifacts.zip` includes `target_geometry.geojson` only when at least one explicit target geometry feature is written.
 
-Target geometry features are emitted only from explicit primary, fallback, or last-fallback geometry. The artifact writer must not synthesize features from legacy `bbox`, `effective_bbox`, or other convenience fields when those explicit geometry fields are absent.
+Target geometry features are emitted only from explicit primary, fallback, or last-fallback geometry fields: `primary_geometry_geojson`, `fallback_geometry_bbox`, or `last_fallback_geometry_bbox`. The artifact writer and map overlay helper must not synthesize features from legacy/convenience fields such as `bbox`, `effective_bbox`, `nominatim_bbox`, `polygon`, LLM hints, or geocoder point coordinates when those explicit geometry fields are absent.
 
 `logs/target_resolution.json`, `logs/target_resolution_all.json`, and `logs/targets/<target_id>/target_resolution.json` retain detailed resolver diagnostics. `logs/target_geometry_geojson_status.json` summarizes whether the portable target-geometry artifact was written and how many primary/fallback/last-fallback features it contains.
 
