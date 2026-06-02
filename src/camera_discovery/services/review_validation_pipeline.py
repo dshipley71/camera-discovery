@@ -785,34 +785,41 @@ class ReviewAndValidationPipeline:
 
 
     def _write_target_geometry_geojson(self, targets: list[TargetContext]) -> tuple[Any | None, int]:
-        """Write portable target geometry for downstream GIS/map applications.
+        """Write portable target geometry from explicit resolver geometry roles only.
 
-        The geometry hierarchy is intentionally explicit:
-        1. Primary geometry: Nominatim polygon/multipolygon border when available.
-        2. Fallback geometry: rectangular Nominatim boundingbox when no border is available.
-        3. Last fallback geometry: generic padded bbox only when Nominatim has no usable
-           polygon or boundingbox.
+        Target geometry artifacts are intentionally strict. A feature may be
+        emitted only when the resolver populated one of the explicit geometry
+        hierarchy fields:
+
+        1. ``primary_geometry_geojson`` for a verified boundary polygon/multipolygon.
+        2. ``fallback_geometry_bbox`` for the verified rectangular fallback bbox.
+        3. ``last_fallback_geometry_bbox`` for the configured last fallback bbox.
+
+        Do not synthesize target geometry from legacy/convenience fields such as
+        ``bbox``, ``effective_bbox``, ``nominatim_bbox``, ``polygon``, or a
+        geocoder point. Those fields can be useful diagnostics elsewhere, but
+        they are not confirmed target-geometry artifact sources.
         """
         features: list[dict[str, Any]] = []
+        skipped_without_explicit_geometry = 0
         for target in targets:
             geometry_role = None
             geometry_source = None
-            geometry = _normalized_geojson_geometry(target.target_geometry_geojson or target.primary_geometry_geojson or target.polygon)
+            geometry = _normalized_geojson_geometry(target.primary_geometry_geojson)
             if geometry is not None:
                 geometry_role = "primary"
-                geometry_source = target.primary_geometry_source or target.geometry_source or "nominatim_polygon"
-            else:
-                fallback_bbox = target.fallback_geometry_bbox or target.nominatim_bbox
-                if fallback_bbox:
-                    geometry = _bbox_polygon_geometry(fallback_bbox)
-                    geometry_role = "fallback"
-                    geometry_source = target.fallback_geometry_source or "nominatim_bbox"
-                elif target.last_fallback_geometry_bbox:
-                    geometry = _bbox_polygon_geometry(target.last_fallback_geometry_bbox)
-                    geometry_role = "last_fallback"
-                    geometry_source = target.last_fallback_geometry_source or target.geometry_source or "generic_point_bbox"
+                geometry_source = target.primary_geometry_source or "primary_geometry_geojson"
+            elif target.fallback_geometry_bbox:
+                geometry = _bbox_polygon_geometry(target.fallback_geometry_bbox)
+                geometry_role = "fallback"
+                geometry_source = target.fallback_geometry_source or "fallback_geometry_bbox"
+            elif target.last_fallback_geometry_bbox:
+                geometry = _bbox_polygon_geometry(target.last_fallback_geometry_bbox)
+                geometry_role = "last_fallback"
+                geometry_source = target.last_fallback_geometry_source or "last_fallback_geometry_bbox"
 
-            if geometry is None:
+            if geometry is None or geometry_role not in {"primary", "fallback", "last_fallback"}:
+                skipped_without_explicit_geometry += 1
                 continue
             properties = {
                 "target_id": target.target_id,
@@ -827,19 +834,10 @@ class ReviewAndValidationPipeline:
                 "last_fallback_geometry_source": target.last_fallback_geometry_source,
                 "bbox_verified": target.bbox_verified,
                 "geometry_status": target.geometry_status,
-                "nominatim_bbox": target.nominatim_bbox,
-                "effective_bbox": target.effective_bbox or target.bbox,
-                "fallback_geometry_bbox": target.fallback_geometry_bbox,
-                "last_fallback_geometry_bbox": target.last_fallback_geometry_bbox,
-                "bbox_padding_applied": target.bbox_padding_applied,
-                "bbox_padding_reason": target.bbox_padding_reason,
-                "bbox_min_side_miles": target.bbox_min_side_miles,
             }
             if target.chosen_candidate:
                 properties["geocoder_display_name"] = target.chosen_candidate.display_name
                 properties["geocoder_result_type"] = target.chosen_candidate.result_type
-                properties["geocoder_lat"] = target.chosen_candidate.lat
-                properties["geocoder_lon"] = target.chosen_candidate.lon
             features.append({"type": "Feature", "geometry": geometry, "properties": properties})
 
         path = self.config.output_dir / "target_geometry.geojson"
@@ -856,6 +854,9 @@ class ReviewAndValidationPipeline:
                 "primary_features": sum(1 for f in features if f.get("properties", {}).get("geometry_role") == "primary"),
                 "fallback_features": sum(1 for f in features if f.get("properties", {}).get("geometry_role") == "fallback"),
                 "last_fallback_features": sum(1 for f in features if f.get("properties", {}).get("geometry_role") == "last_fallback"),
+                "skipped_without_explicit_geometry": skipped_without_explicit_geometry,
+                "allowed_geometry_roles": ["primary", "fallback", "last_fallback"],
+                "strict_artifact_geometry_only": True,
             },
         )
         return (path if features else None), len(features)
