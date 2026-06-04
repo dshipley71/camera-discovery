@@ -265,7 +265,7 @@ RTSP support is limited to explicit `rtsp://` or `rtsps://` URLs supplied by the
 
 Harvest mode can filter RTSP with `--media rtsp` or include it with `--media stream`; it remains extraction-only and writes harvest playlist summaries when playable media records are present.
 
-Optional Google dorking is guarded public-source discovery only. Enable it with `CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=true` and cap it with `CAMERA_DISCOVERY_MAX_DORK_QUERIES`. Generated operator queries are bounded, target-aware, camera-intent-aware, prefer `site:` restrictions to allowed `SOURCES.md` domains, and are rechecked by deterministic block policy after search results return. The code forbids dorks for device admin/login pages, default credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset indexes.
+Google dorking is guarded public-source discovery only and is enabled by default. Disable it with `CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false` or cap it with `CAMERA_DISCOVERY_MAX_DORK_QUERIES`. Generated operator queries are bounded, target-aware, camera-intent-aware, prefer `site:` restrictions to allowed `SOURCES.md` domains, and are rechecked by deterministic block policy after search results return. The code forbids dorks for device admin/login pages, default credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset indexes.
 
 
 ## Passive camera intelligence

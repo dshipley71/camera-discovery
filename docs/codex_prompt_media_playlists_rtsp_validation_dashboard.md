@@ -359,11 +359,12 @@ If an RTSP URL appears verbatim on an allowed public source page discovered thro
 Use an existing configuration pattern if present. If a new setting is needed, prefer explicit and conservative names such as:
 
 ```text
-CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false
+CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=true
 CAMERA_DISCOVERY_MAX_DORK_QUERIES=8
+# Set CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false to disable for a run.
 ```
 
-If the current repository has profile-based search-query knobs instead of feature flags, wire dorking into that existing structure. Default should be disabled or conservative unless existing docs indicate blind-search query expansion is expected by default.
+If the current repository has profile-based search-query knobs instead of feature flags, wire dorking into that existing structure. The current requested behavior is default-on, bounded, source-policy-compliant dorking, with an explicit disable flag available for a run.
 
 ### Outputs and explanations
 
@@ -613,7 +614,7 @@ Add tests around query construction and result handling. Do not call live Google
 
 Verify:
 
-- dork query generation is disabled or conservative by default according to the chosen configuration behavior;
+- dork query generation is enabled by default, bounded, and can still be explicitly disabled;
 - generated dorks include at least one target/location term and one public-camera/camera-type term;
 - `site:`-scoped dorks use allowed source domains when available;
 - blocked domains are excluded in query construction when supported and always rejected after fake results return;

@@ -42,8 +42,25 @@ def _target() -> TargetContext:
     )
 
 
-def test_google_dorking_disabled_by_default(tmp_path):
+def test_google_dorking_enabled_by_default(tmp_path):
     cfg = RunConfig(query="Get public cameras from Example City", output_dir=tmp_path, sources_file=_sources(tmp_path / "SOURCES.md"))
+    engine = CandidateDiscoveryEngine(cfg)
+    queries = engine._search_queries(_target())
+    assert queries
+    dorks = [query for query in queries if "site:" in query.casefold()]
+    assert dorks
+    summary = json.loads((tmp_path / "logs" / "google_dorking_summary.json").read_text(encoding="utf-8"))
+    assert summary["enabled"] is True
+    assert summary["queries_generated"] == len(dorks)
+
+
+def test_google_dorking_can_be_explicitly_disabled(tmp_path):
+    cfg = RunConfig(
+        query="Get public cameras from Example City",
+        output_dir=tmp_path,
+        sources_file=_sources(tmp_path / "SOURCES.md"),
+        enable_google_dorking=False,
+    )
     engine = CandidateDiscoveryEngine(cfg)
     queries = engine._search_queries(_target())
     assert queries

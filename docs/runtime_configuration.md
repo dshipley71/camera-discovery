@@ -226,11 +226,12 @@ The `stream` category includes generic streams and RTSP records. RTSP validation
 
 Playlist export and `media_validation_dashboard.json` are normal output artifacts and do not require a separate CLI flag. They inherit the active source policy and block/private-network checks.
 
-Guarded Google dorking is off by default unless enabled in configuration:
+Guarded Google dorking is on by default and remains bounded by configuration:
 
 ```bash
-CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false
+CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=true
 CAMERA_DISCOVERY_MAX_DORK_QUERIES=8
+# Set CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false to disable it for a run.
 ```
 
 When enabled, SearchAgent adds a bounded number of operator-enhanced public-source discovery queries. Queries must include a target/location term and a public-camera or camera-type term. `site:`-scoped queries prefer allowed `SOURCES.md` domains. Results from unknown domains, where supported, are only source leads and still pass through source-policy, extraction, scope, validation, and trust gates. Dorking never targets device UIs, admin/login pages, credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset search engines.
