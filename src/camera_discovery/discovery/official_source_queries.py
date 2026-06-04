@@ -20,6 +20,12 @@ Usage::
 
 from __future__ import annotations
 
+from camera_discovery.discovery.locations import (
+    localized_camera_terms_for_intent,
+    official_site_scopes_for_location,
+    safe_exclusion_fragment,
+)
+
 # ---------------------------------------------------------------------------
 # Internal template registry
 # ---------------------------------------------------------------------------
@@ -34,10 +40,7 @@ from __future__ import annotations
 # pages, default credentials, vendor fingerprints, common RTSP paths,
 # private-network hosts, or blocked internet-asset search indexes.
 
-_SAFE_EXCLUSIONS = (
-    " -site:insecam.org -site:shodan.io -site:censys.io"
-    " -site:zoomeye.org -site:fofa.info"
-)
+_SAFE_EXCLUSIONS = safe_exclusion_fragment()
 
 # --- General official public camera pages -----------------------------------
 _GENERAL_GOV: list[tuple[str, str]] = [
@@ -267,6 +270,32 @@ def _render_template(template: str, site_scope: str, location: str, safe_exclusi
     return query
 
 
+def _site_scopes_for_template(site_scope: str, location: str) -> tuple[str, ...]:
+    """Return replacement site scopes for a template's intended source type."""
+    if not site_scope:
+        return ("",)
+    if site_scope == "site:.gov":
+        return official_site_scopes_for_location(location, include_global_fallback=True)
+    if site_scope == "site:.edu":
+        # Keep .edu for campus/weather queries, but allow country-specific
+        # official scopes to help non-US locations where education/government
+        # ccTLD patterns differ.
+        return tuple(dict.fromkeys(("site:.edu", *official_site_scopes_for_location(location, include_global_fallback=False))))
+    return (site_scope,)
+
+
+def _localized_official_queries(camera_type_intent: str, location: str, *, safe_exclusions: bool) -> list[str]:
+    """Country/language-aware public-source queries for official/source discovery."""
+    terms = localized_camera_terms_for_intent(camera_type_intent, location)
+    if not terms:
+        return []
+    queries: list[str] = []
+    for term in terms:
+        for site_scope in official_site_scopes_for_location(location, include_global_fallback=False):
+            queries.append(_render_template(f'"{term}" "{{loc}}"', site_scope, location, safe_exclusions))
+    return queries
+
+
 def official_source_queries_for_intent(
     camera_type_intent: str,
     location: str,
@@ -301,16 +330,28 @@ def official_source_queries_for_intent(
     key = _intent_key(camera_type_intent)
     groups = _INTENT_MAP.get(key, _INTENT_MAP["default"])
 
+    loc = location.strip()
     seen: set[str] = set()
     queries: list[str] = []
+
+    # Country/language-aware terms are inserted first so small query budgets
+    # still include Mexico/Ukraine/etc. specific public-source vocabulary.
+    for rendered in _localized_official_queries(camera_type_intent, loc, safe_exclusions=safe_exclusions):
+        if rendered not in seen:
+            seen.add(rendered)
+            queries.append(rendered)
+        if len(queries) >= max_queries:
+            return queries
+
     for group in groups:
         for template, site_scope in group:
-            rendered = _render_template(template, site_scope, location.strip(), safe_exclusions)
-            if rendered not in seen:
-                seen.add(rendered)
-                queries.append(rendered)
-            if len(queries) >= max_queries:
-                return queries
+            for scoped in _site_scopes_for_template(site_scope, loc):
+                rendered = _render_template(template, scoped, loc, safe_exclusions)
+                if rendered not in seen:
+                    seen.add(rendered)
+                    queries.append(rendered)
+                if len(queries) >= max_queries:
+                    return queries
     return queries
 
 
@@ -333,7 +374,7 @@ def official_source_dork_queries_for_intent(
         max_queries=max_queries * 4,
         safe_exclusions=True,
     )
-    # Keep only queries with a .gov or .edu scope; those are the ones worth
-    # spending dork budget on.
-    gov_edu = [q for q in all_queries if "site:.gov" in q or "site:.edu" in q]
-    return gov_edu[:max_queries]
+    # Keep only scoped public-source queries.  This includes location-specific
+    # official domains such as site:.gob.mx and site:.gov.ua, not only US .gov.
+    scoped = [q for q in all_queries if "site:." in q]
+    return scoped[:max_queries]

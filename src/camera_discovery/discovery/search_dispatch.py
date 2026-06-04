@@ -100,6 +100,7 @@ from camera_discovery.extraction.pagination import (
 )
 from camera_discovery.extraction.search import clean_ddg_result_url, parse_ddg_result_rows
 from camera_discovery.discovery.official_source_queries import official_source_dork_queries_for_intent, official_source_queries_for_intent
+from camera_discovery.discovery.locations import localized_camera_terms_for_intent
 from camera_discovery.discovery.search.dispatcher import SearchDispatcher
 from camera_discovery.passive_intelligence import (
     enrich_source_row_with_passive_intelligence,
@@ -202,6 +203,11 @@ class SearchDispatchMixin:
                 ]
             )
 
+
+        localized_terms = localized_camera_terms_for_intent(camera_intent, base, include_generic=False)
+        for term in localized_terms:
+            candidates.append(f"{base} {term}")
+
         # Generic structured-data discovery terms are safe for every camera type.
         candidates.extend(
             [
@@ -255,13 +261,6 @@ class SearchDispatchMixin:
                 hosts.append(host)
         exclusions = " -shodan -censys -zoomeye -fofa -insecam -login -admin -password -credentials"
         queries: list[str] = []
-        queries.extend(
-            official_source_dork_queries_for_intent(
-                target.intent.camera_type_intent or camera_intent,
-                base,
-                max_queries=max(0, self.config.max_dork_queries // 2),
-            )
-        )
         for host in _dedupe_strings(hosts):
             queries.extend(
                 [
@@ -275,6 +274,15 @@ class SearchDispatchMixin:
             )
             if len(queries) >= self.config.max_dork_queries:
                 break
+        remaining = max(0, self.config.max_dork_queries - len(queries))
+        if remaining:
+            queries.extend(
+                official_source_dork_queries_for_intent(
+                    target.intent.camera_type_intent or camera_intent,
+                    base,
+                    max_queries=remaining,
+                )
+            )
         return [q for q in _dedupe_strings(queries) if _is_safe_google_dork(q)][: self.config.max_dork_queries]
 
     def _blind_search(self, queries: list[str], client: httpx.Client | None = None) -> list[dict[str, str]]:
@@ -416,7 +424,7 @@ def _is_google_dork_query(query: str) -> bool:
 
 def _is_safe_google_dork(query: str) -> bool:
     lowered = query.casefold()
-    positive_terms = re.sub(r"-(shodan|censys|zoomeye|fofa|insecam|login|admin|password|credentials?)\b", "", lowered)
+    positive_terms = re.sub(r"-(?:site:)?(?:shodan|censys|zoomeye|fofa|insecam|login|admin|password|credentials?)(?:\.org)?\b", "", lowered)
     forbidden = (
         "rtsp://",
         "rtsps://",
@@ -439,7 +447,12 @@ def _is_safe_google_dork(query: str) -> bool:
     )
     if any(fragment in positive_terms for fragment in forbidden):
         return False
-    return bool(re.search(r"\b(camera|cameras|webcam|webcams)\b", positive_terms))
+    safe_camera_language = (
+        r"\b(camera|cameras|webcam|webcams)\b"
+        r"|\b(c[aá]mara|c[aá]maras|camaras|camara|webcams?)\b"
+        r"|камер|вебкамер"
+    )
+    return bool(re.search(safe_camera_language, positive_terms, flags=re.I | re.UNICODE))
 
 
 def _strip_site_scope(query: str) -> str:
