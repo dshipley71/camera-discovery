@@ -22,6 +22,7 @@ from camera_discovery.harvest.media_filter import (
 from camera_discovery.extraction.media import _dedupe_strings
 from camera_discovery.extraction.search import clean_ddg_result_url
 from camera_discovery.discovery.official_source_queries import official_source_queries_for_intent
+from camera_discovery.discovery.locations import localized_camera_terms_for_intent
 
 
 def dedupe_records(records: list[HarvestedUrlRecord]) -> list[HarvestedUrlRecord]:
@@ -260,15 +261,19 @@ def harvest_search_queries(query: str, max_queries: int) -> list[str]:
         f"{query} m3u8",
         f"{query} snapshot camera",
     ]
-    official_budget = min(8, max(2, max_queries // 3))
+    localized_terms = localized_camera_terms_for_intent(intent, query, include_generic=False)
+    localized = [f"{query} {term}" for term in localized_terms]
+    official_budget = min(10, max(2, max_queries // 3))
     official = official_source_queries_for_intent(
         intent,
         query,
         max_queries=official_budget,
         safe_exclusions=True,
     )
+    general_pool = _dedupe_strings([*localized, *general])
     general_limit = max(0, max_queries - len(official))
-    return _dedupe_strings(general)[:general_limit] + [q for q in official if q not in set(_dedupe_strings(general)[:general_limit])][: max_queries - general_limit]
+    selected_general = general_pool[:general_limit]
+    return _dedupe_strings(selected_general + [q for q in official if q not in set(selected_general)])[:max_queries]
 
 
 def _infer_harvest_camera_intent(query: str) -> str:
