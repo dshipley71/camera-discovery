@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import concurrent.futures
 import csv
+import json
+import shutil
+import subprocess
 from dataclasses import asdict
 import threading
 import time
@@ -27,6 +30,21 @@ from camera_discovery.discovery.candidate_priority import (
 )
 from camera_discovery.utils.geojson_viewer import write_embedded_camera_map
 from camera_discovery.utils.io import write_json, write_jsonl
+from camera_discovery.sources import load_source_policy
+from camera_discovery.utils.playlists import (
+    build_media_validation_dashboard,
+    export_candidate_playlists,
+    media_type_for_row,
+    status_bucket,
+)
+from camera_discovery.utils.url_safety import is_private_or_local_media_url, redact_url_userinfo
+from camera_discovery.passive_intelligence import (
+    add_passive_intelligence_to_dashboard,
+    candidate_evidence_record,
+    enrich_candidate_with_passive_intelligence,
+    http_metadata_from_response,
+    passive_intelligence_summary,
+)
 
 
 class ReviewAndValidationPipeline:
@@ -46,6 +64,7 @@ class ReviewAndValidationPipeline:
         self._thread_local = threading.local()
         self._validation_clients: list[httpx.Client] = []
         self._validation_clients_lock = threading.Lock()
+        self.source_policy = load_source_policy(config.sources_file, config.block_patterns)
 
     def run(self, target: TargetContext | list[TargetContext], candidates: CandidateSet, progress_callback: Callable[[str, dict[str, Any]], None] | None = None):
         targets = target if isinstance(target, list) else [target]
@@ -69,6 +88,8 @@ class ReviewAndValidationPipeline:
         return v, self._write_outputs(targets, target_map, candidates, v)
 
     def _validate(self, candidates: CandidateSet, v: ValidationSummary) -> None:
+        for candidate in candidates.unique:
+            enrich_candidate_with_passive_intelligence(candidate, self.source_policy)
         rows = prioritize_candidates(candidates.in_scope or candidates.review)
         worker_count = min(max(1, self.config.validation_workers), max(1, len(rows)))
         v.validation_workers = worker_count if rows else 0
@@ -79,6 +100,8 @@ class ReviewAndValidationPipeline:
             {
                 "selected_candidates": len(rows),
                 "selected_by_priority_bucket": priority_bucket_counts(rows),
+                "selected_by_evidence_band": _candidate_evidence_band_counts(rows),
+                "validation_prioritized_by_evidence": True,
                 "validation_workers": v.validation_workers,
                 "http_timeout": v.http_timeout,
                 "parallel_validation": v.parallel_validation,
@@ -132,6 +155,7 @@ class ReviewAndValidationPipeline:
             final_status = status or "dead_link"
             v.attempted += 1
             self._apply_validation_status(candidate, final_status, v)
+            enrich_candidate_with_passive_intelligence(candidate, self.source_policy)
         self._emit_validation_progress("validation_complete", self._validation_progress_payload(v, total=len(rows), completed=len(rows)))
 
     def _validate_indexed_candidate(self, index: int, candidate: CameraCandidate) -> tuple[int, str]:
@@ -204,12 +228,45 @@ class ReviewAndValidationPipeline:
             candidate.trust_level = "untrusted"
 
     def _validate_candidate(self, candidate: CameraCandidate) -> str:
-        media_type = str((candidate.source_metadata or {}).get("media_type") or "").casefold()
+        media_type = media_type_for_row(candidate)
+        if media_type == "rtsp":
+            return self._validate_rtsp(candidate.stream_url)
         if media_type == "image_snapshot":
-            return self._validate_image_snapshot(candidate.stream_url, candidate.source_metadata or {})
-        if media_type and media_type not in {"hls", "hls_stream", "video", "unknown"} and ".m3u8" not in candidate.stream_url.casefold():
+            return self._validate_image_snapshot(candidate.stream_url, candidate.source_metadata or {}, candidate=candidate)
+        if media_type and media_type not in {"hls", "hls_stream", "video", "unknown", "unknown_media"} and ".m3u8" not in candidate.stream_url.casefold():
             return "not_validated_media_type"
-        return self._validate_hls(candidate.stream_url)
+        return self._validate_hls(candidate.stream_url, candidate=candidate)
+
+
+    def _validate_rtsp(self, url: str) -> str:
+        if is_private_or_local_media_url(url):
+            return "restricted_rtsp"
+        ffprobe = shutil.which("ffprobe")
+        if not ffprobe:
+            return "rtsp_validation_unavailable"
+        timeout = max(1.0, min(float(self.config.http_timeout or 5.0), 10.0))
+        cmd = [ffprobe, "-v", "error", "-show_entries", "stream=codec_type", "-of", "json", url]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        except subprocess.TimeoutExpired:
+            return "offline_rtsp"
+        except Exception:
+            return "dead_rtsp"
+        stdout = (result.stdout or "")[:4096]
+        stderr = redact_url_userinfo((result.stderr or "")[:4096])
+        if result.returncode == 0:
+            try:
+                payload = json.loads(stdout or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            if payload.get("streams") or "codec_type" in stdout:
+                return "active_rtsp_verified"
+        lowered = f"{stdout} {stderr}".casefold()
+        if any(token in lowered for token in ("401", "403", "unauthorized", "forbidden", "auth", "credential", "permission")):
+            return "auth_required_rtsp"
+        if any(token in lowered for token in ("timed out", "timeout", "connection refused", "not found", "unreachable")):
+            return "offline_rtsp"
+        return "dead_rtsp"
 
     def _get_thread_validation_client(self, *, create: bool) -> httpx.Client | None:
         client = getattr(self._thread_local, "validation_client", None)
@@ -233,19 +290,22 @@ class ReviewAndValidationPipeline:
             except Exception:
                 pass
 
-    def _validate_hls(self, url: str) -> str:
+    def _validate_hls(self, url: str, *, candidate: CameraCandidate | None = None) -> str:
         try:
             client = self._get_thread_validation_client(create=False)
             if client is not None:
-                return self._validate_hls_with_client(url, client)
+                return self._validate_hls_with_client(url, client, candidate=candidate)
             with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as fallback_client:
-                return self._validate_hls_with_client(url, fallback_client)
+                return self._validate_hls_with_client(url, fallback_client, candidate=candidate)
         except Exception:
             return "dead_link"
 
-    def _validate_hls_with_client(self, url: str, client: httpx.Client) -> str:
+    def _validate_hls_with_client(self, url: str, client: httpx.Client, *, candidate: CameraCandidate | None = None) -> str:
         try:
+            started_at = time.monotonic()
             r = client.get(url)
+            # Metadata comes from a request already made for validation; it is not an extra probe.
+            self._attach_validation_http_metadata(url, r, text=r.text[:4096], started_at=started_at, candidate=candidate)
             if r.status_code in {401, 403}:
                 return "restricted_http"
             if r.status_code >= 400:
@@ -277,7 +337,7 @@ class ReviewAndValidationPipeline:
                 return urljoin(playlist_url, stripped)
         return None
 
-    def _validate_image_snapshot(self, url: str, metadata: dict | None = None) -> str:
+    def _validate_image_snapshot(self, url: str, metadata: dict | None = None, *, candidate: CameraCandidate | None = None) -> str:
         """Validate that an image snapshot endpoint is a real image and appears refreshable.
 
         This performs live HTTP checks. Static web assets are rejected; image
@@ -289,15 +349,17 @@ class ReviewAndValidationPipeline:
         try:
             client = self._get_thread_validation_client(create=False)
             if client is not None:
-                return self._validate_image_snapshot_with_client(url, metadata or {}, client)
+                return self._validate_image_snapshot_with_client(url, metadata or {}, client, candidate=candidate)
             with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as fallback_client:
-                return self._validate_image_snapshot_with_client(url, metadata or {}, fallback_client)
+                return self._validate_image_snapshot_with_client(url, metadata or {}, fallback_client, candidate=candidate)
         except Exception:
             return "dead_link"
 
-    def _validate_image_snapshot_with_client(self, url: str, metadata: dict, client: httpx.Client) -> str:
+    def _validate_image_snapshot_with_client(self, url: str, metadata: dict, client: httpx.Client, *, candidate: CameraCandidate | None = None) -> str:
         try:
+            started_at = time.monotonic()
             first = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+            self._attach_validation_http_metadata(url, first, text=None, started_at=started_at, candidate=candidate)
             first_status = _snapshot_http_status(first)
             if first_status:
                 return first_status
@@ -307,7 +369,9 @@ class ReviewAndValidationPipeline:
             delay = max(0.0, float(delay_value if delay_value is not None else getattr(self.config, "image_snapshot_refresh_delay_seconds", 2.0)))
             if delay:
                 time.sleep(delay)
+            second_started_at = time.monotonic()
             second = client.get(_cache_busted_url(url), headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+            self._attach_validation_http_metadata(url, second, text=None, started_at=second_started_at, candidate=candidate)
             second_status = _snapshot_http_status(second)
             if second_status:
                 return second_status
@@ -319,10 +383,40 @@ class ReviewAndValidationPipeline:
         except Exception:
             return "dead_link"
 
+
+    def _attach_validation_http_metadata(self, url: str, response: httpx.Response, *, text: str | None = None, started_at: float | None = None, candidate: CameraCandidate | None = None) -> None:
+        """Cache passive HTTP metadata from validation requests already in progress."""
+        try:
+            metadata = http_metadata_from_response(response, text=text, started_at=started_at)
+        except Exception:
+            return
+        if candidate is not None:
+            candidate.source_metadata.setdefault("http_metadata", metadata)
+            candidate.source_metadata.setdefault("validation_http_metadata", metadata)
+        cache = getattr(self._thread_local, "validation_http_metadata", None)
+        if cache is None:
+            cache = {}
+            self._thread_local.validation_http_metadata = cache
+        cache[url.split("#", 1)[0]] = metadata
+
+    def _apply_cached_validation_http_metadata(self, rows: list[CameraCandidate]) -> None:
+        merged: dict[str, Any] = {}
+        for client_cache in [getattr(self._thread_local, "validation_http_metadata", None)]:
+            if isinstance(client_cache, dict):
+                merged.update(client_cache)
+        for candidate in rows:
+            key = candidate.stream_url.split("#", 1)[0]
+            if key in merged:
+                candidate.source_metadata.setdefault("http_metadata", merged[key])
+                candidate.source_metadata.setdefault("validation_http_metadata", merged[key])
+
     def _write_outputs(self, targets: list[TargetContext], target_map: dict[str, TargetContext], candidates: CandidateSet, v: ValidationSummary) -> OutputSummary:
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.candidates_dir.mkdir(parents=True, exist_ok=True)
+        self._apply_cached_validation_http_metadata(candidates.unique)
+        for candidate in candidates.unique:
+            enrich_candidate_with_passive_intelligence(candidate, self.source_policy)
         trusted_allowed = {t.target_id for t in targets if t.trust_policy == TrustPolicy.TRUSTED_ALLOWED and t.bbox_verified}
         prioritized_unique = prioritize_candidates(candidates.unique)
         trusted = prioritize_candidates(
@@ -355,23 +449,52 @@ class ReviewAndValidationPipeline:
         out.camera_candidates_table_csv = str(table_path)
         out.camera_candidates_table_rows = len(prioritized_unique)
         write_jsonl(self.logs_dir / "validation_results.jsonl", [asdict(c) for c in prioritized_unique])
+        evidence_records = [candidate_evidence_record(c) for c in prioritized_unique]
+        write_jsonl(self.logs_dir / "candidate_evidence_summary.jsonl", evidence_records)
+        write_jsonl(self.logs_dir / "candidate_priority_explanation.jsonl", evidence_records)
+        passive_summary = passive_intelligence_summary(prioritized_unique)
+        write_json(self.logs_dir / "passive_intelligence_summary.json", passive_summary)
         write_json(
             self.logs_dir / "candidate_priority_summary.json",
             _candidate_priority_summary(prioritized_unique),
         )
         write_json(self.logs_dir / "validation_summary.json", asdict(v))
+        playlist_summary = export_candidate_playlists(
+            self.config.output_dir,
+            prioritized_unique,
+            trusted_candidates=trusted,
+            review_candidates=review,
+            source_policy=self.source_policy,
+        )
+        write_json(self.logs_dir / "playlist_export_summary.json", playlist_summary)
+        out.playlist_export_summary = str(self.logs_dir / "playlist_export_summary.json")
+        dashboard = build_media_validation_dashboard(
+            prioritized_unique,
+            trusted_candidates=trusted,
+            review_candidates=review,
+            validation_attempted=v.attempted,
+        )
+        add_passive_intelligence_to_dashboard(dashboard, prioritized_unique)
+        dashboard["outputs"] = {
+            "trusted_geojson_features": len(trusted),
+            "untrusted_geojson_features": len(review),
+            "candidate_table_rows": len(prioritized_unique),
+        }
+        write_json(self.config.output_dir / "media_validation_dashboard.json", dashboard)
+        write_json(self.logs_dir / "media_validation_dashboard.json", dashboard)
+        out.media_validation_dashboard = str(self.config.output_dir / "media_validation_dashboard.json")
         target_geometry_path, target_geometry_features = self._write_target_geometry_geojson(targets)
         if target_geometry_path is not None:
             out.target_geometry_geojson = str(target_geometry_path)
         out.target_geometry_features_written = target_geometry_features
         out.map_html = str(self._write_map())
         out.review_artifacts_zip = str(self.config.output_dir / "review_artifacts.zip")
-        self._write_run_explanation(targets, candidates, v, out)
+        self._write_run_explanation(targets, candidates, v, out, playlist_summary=playlist_summary, media_dashboard=dashboard)
         out.review_artifacts_zip = str(self._package_review_artifacts())
         write_json(self.logs_dir / "output_summary.json", asdict(out))
         return out
 
-    def _write_run_explanation(self, targets: list[TargetContext], candidates: CandidateSet, v: ValidationSummary, out: OutputSummary) -> None:
+    def _write_run_explanation(self, targets: list[TargetContext], candidates: CandidateSet, v: ValidationSummary, out: OutputSummary, *, playlist_summary: dict[str, Any] | None = None, media_dashboard: dict[str, Any] | None = None) -> None:
         media_counts: dict[str, int] = {}
         provider_counts: dict[str, int] = {}
         missing_coordinates = 0
@@ -389,6 +512,10 @@ class ReviewAndValidationPipeline:
                 native_candidates += 1
             if not candidate.has_coordinates:
                 missing_coordinates += 1
+        google_dorking_summary = _read_optional_json(self.logs_dir / "google_dorking_summary.json") or _google_dorking_default_summary(self.config)
+        passive_summary = _read_optional_json(self.logs_dir / "passive_intelligence_summary.json") or passive_intelligence_summary(candidates.unique)
+        write_json(self.logs_dir / "google_dorking_summary.json", google_dorking_summary)
+        write_json(self.logs_dir / "passive_intelligence_summary.json", passive_summary)
         explanation = {
             "plain_language_summary": [
                 f"Resolved {len(targets)} target(s): " + ", ".join(t.canonical_target or t.target_label or t.target_id for t in targets),
@@ -397,6 +524,9 @@ class ReviewAndValidationPipeline:
                 f"Trusted camera.geojson created: {out.trusted_geojson_created} ({out.trusted_geojson_features_written} feature(s)).",
                 f"Untrusted review GeoJSON created: {out.untrusted_geojson_created} ({out.untrusted_geojson_features_written} feature(s)).",
                 f"Coordinate-bearing GeoJSON coverage: {out.coordinate_bearing_geojson_features_written}/{out.coordinate_bearing_candidates} feature(s) written; {out.coordinate_bearing_without_geojson} coordinate-bearing candidate(s) were not written to a GeoJSON artifact.",
+                f"Media validation dashboard: {media_dashboard or {}}",
+                f"Passive intelligence scored {passive_summary.get('candidates_scored', 0)} candidate(s); evidence bands: {passive_summary.get('candidate_evidence_bands', {})}.",
+                f"Playlist exports written: {bool(playlist_summary and playlist_summary.get('created'))}.",
                 "Fast profile is review-only; use balanced/full validation when you want stream validation and trusted output authorization.",
             ],
             "candidate_source_counts": {"native_discovery": native_candidates, "harvest_input": harvest_input_candidates, "combined": len(candidates.unique)},
@@ -411,12 +541,19 @@ class ReviewAndValidationPipeline:
                 "coordinate_bearing_without_geojson": out.coordinate_bearing_without_geojson,
             },
             "validation": asdict(v),
+            "media_validation_dashboard": media_dashboard or {},
+            "passive_intelligence": passive_summary,
+            "playlist_exports": playlist_summary or {},
+            "google_dorking": google_dorking_summary,
             "outputs": asdict(out),
             "interpretation": {
                 "camera_geojson": "Trusted, validated, in-scope coordinate-bearing camera inventory. Not written when validation is disabled or no trusted records exist.",
                 "untrusted_camera_candidates_geojson": "Every coordinate-bearing candidate not written to trusted camera.geojson. These are not trusted inventory and may include rejected, out-of-scope, unknown, or review-only records for audit/map analysis.",
                 "camera_candidates_table_csv": "All non-rejected review candidates, including rows without coordinates that cannot be mapped yet.",
-                "map_html": "Interactive map for coordinate-bearing trusted/untrusted GeoJSON only.",
+                "map_html": "Interactive map for coordinate-bearing trusted/untrusted GeoJSON only. RTSP URLs are external-player links, not browser/hls.js playback.",
+                "playlist_exports": "Convenience M3U/TXT views over existing candidates and validation state; playlists do not promote trust.",
+                "media_validation_dashboard": "Top-level summary of candidate validation, trust, review, dead, restricted, not-validated counts, and passive intelligence evidence bands.",
+                "passive_intelligence": "Deterministic source/candidate evidence scoring, safe passive signatures, HTTP metadata, and protocol labels. It affects prioritization and explanation only, not trust.",
             },
         }
         write_json(self.logs_dir / "run_explanation.json", explanation)
@@ -429,6 +566,30 @@ class ReviewAndValidationPipeline:
         lines.append("## Source providers")
         lines.extend(f"- {key}: {value}" for key, value in sorted(provider_counts.items()))
         lines.append("")
+        lines.append("## Media validation dashboard")
+        for key, value in (media_dashboard or {}).items():
+            if not isinstance(value, dict):
+                lines.append(f"- `{key}`: {value}")
+        lines.append("")
+        passive = explanation.get("passive_intelligence") or {}
+        lines.append("## Passive intelligence")
+        lines.append(f"- sources_scored: {passive.get('sources_scored', 0)}")
+        lines.append(f"- candidates_scored: {passive.get('candidates_scored', 0)}")
+        lines.append(f"- candidate_evidence_bands: {passive.get('candidate_evidence_bands', {})}")
+        lines.append(f"- protocol_label_counts: {passive.get('protocol_label_counts', {})}")
+        lines.append(f"- signature_family_counts: {passive.get('signature_family_counts', {})}")
+        lines.append("")
+        lines.append("## Playlist exports")
+        for key, value in (playlist_summary or {}).get("counts", {}).items():
+            lines.append(f"- `{key}`: {value}")
+        lines.append("")
+        dorking = explanation.get("google_dorking") or {}
+        if dorking:
+            lines.append("## Google dorking")
+            lines.append(f"- enabled: {dorking.get('enabled', False)}")
+            lines.append(f"- queries_generated: {dorking.get('queries_generated', 0)}")
+            lines.append(f"- results_after_block_policy: {dorking.get('results_after_block_policy', 0)}")
+            lines.append("")
         lines.append("## Output meaning")
         for key, value in explanation["interpretation"].items():
             lines.append(f"- `{key}`: {value}")
@@ -468,6 +629,12 @@ class ReviewAndValidationPipeline:
             "camera_refresh_rate",
             "map_refresh_rate_seconds",
             "media_type",
+            "protocol_label",
+            "media_family",
+            "protocol_confidence",
+            "camera_evidence_score",
+            "camera_evidence_band",
+            "why_candidate_mattered",
             "candidate_priority_bucket",
             "trust_level",
             "validation_status",
@@ -517,6 +684,12 @@ class ReviewAndValidationPipeline:
                         "camera_refresh_rate": _camera_refresh_rate(metadata),
                         "map_refresh_rate_seconds": _camera_map_refresh_rate_seconds(metadata, self.config.image_snapshot_refresh_delay_seconds) if media_type == "image_snapshot" else None,
                         "media_type": media_type,
+                        "protocol_label": metadata.get("protocol_label"),
+                        "media_family": metadata.get("media_family"),
+                        "protocol_confidence": metadata.get("protocol_confidence"),
+                        "camera_evidence_score": metadata.get("camera_evidence_score"),
+                        "camera_evidence_band": metadata.get("camera_evidence_band"),
+                        "why_candidate_mattered": metadata.get("why_candidate_mattered"),
                         "candidate_priority_bucket": candidate_priority_label(row),
                         "trust_level": row.trust_level,
                         "validation_status": row.validation_status,
@@ -571,6 +744,20 @@ class ReviewAndValidationPipeline:
                     "json_record_path": metadata.get("json_record_path"),
                     "json_record_schema_hint": metadata.get("json_record_schema_hint"),
                     "media_type": media_type,
+                    "protocol_label": metadata.get("protocol_label"),
+                    "media_family": metadata.get("media_family"),
+                    "protocol_confidence": metadata.get("protocol_confidence"),
+                    "protocol_reasons": metadata.get("protocol_reasons"),
+                    "camera_evidence_score": metadata.get("camera_evidence_score"),
+                    "camera_evidence_band": metadata.get("camera_evidence_band"),
+                    "camera_evidence_reasons": metadata.get("camera_evidence_reasons"),
+                    "signature_matches": metadata.get("signature_matches"),
+                    "http_status": (metadata.get("http_metadata") or {}).get("http_status") if isinstance(metadata.get("http_metadata"), dict) else None,
+                    "content_type": (metadata.get("http_metadata") or {}).get("content_type") if isinstance(metadata.get("http_metadata"), dict) else None,
+                    "final_url": (metadata.get("http_metadata") or {}).get("final_url") if isinstance(metadata.get("http_metadata"), dict) else None,
+                    "source_evidence_score": metadata.get("source_camera_evidence_score") or metadata.get("source_evidence_score"),
+                    "source_evidence_band": metadata.get("source_camera_evidence_band") or metadata.get("source_evidence_band"),
+                    "why_candidate_mattered": metadata.get("why_candidate_mattered"),
                     "candidate_priority_bucket": candidate_priority_label(c),
                     "snapshot_url": snapshot_url,
                     "thumbnail_url": snapshot_url,
@@ -598,34 +785,41 @@ class ReviewAndValidationPipeline:
 
 
     def _write_target_geometry_geojson(self, targets: list[TargetContext]) -> tuple[Any | None, int]:
-        """Write portable target geometry for downstream GIS/map applications.
+        """Write portable target geometry from explicit resolver geometry roles only.
 
-        The geometry hierarchy is intentionally explicit:
-        1. Primary geometry: Nominatim polygon/multipolygon border when available.
-        2. Fallback geometry: rectangular Nominatim boundingbox when no border is available.
-        3. Last fallback geometry: generic padded bbox only when Nominatim has no usable
-           polygon or boundingbox.
+        Target geometry artifacts are intentionally strict. A feature may be
+        emitted only when the resolver populated one of the explicit geometry
+        hierarchy fields:
+
+        1. ``primary_geometry_geojson`` for a verified boundary polygon/multipolygon.
+        2. ``fallback_geometry_bbox`` for the verified rectangular fallback bbox.
+        3. ``last_fallback_geometry_bbox`` for the configured last fallback bbox.
+
+        Do not synthesize target geometry from legacy/convenience fields such as
+        ``bbox``, ``effective_bbox``, ``nominatim_bbox``, ``polygon``, or a
+        geocoder point. Those fields can be useful diagnostics elsewhere, but
+        they are not confirmed target-geometry artifact sources.
         """
         features: list[dict[str, Any]] = []
+        skipped_without_explicit_geometry = 0
         for target in targets:
             geometry_role = None
             geometry_source = None
-            geometry = _normalized_geojson_geometry(target.target_geometry_geojson or target.primary_geometry_geojson or target.polygon)
+            geometry = _normalized_geojson_geometry(target.primary_geometry_geojson)
             if geometry is not None:
                 geometry_role = "primary"
-                geometry_source = target.primary_geometry_source or target.geometry_source or "nominatim_polygon"
-            else:
-                fallback_bbox = target.fallback_geometry_bbox or target.nominatim_bbox
-                if fallback_bbox:
-                    geometry = _bbox_polygon_geometry(fallback_bbox)
-                    geometry_role = "fallback"
-                    geometry_source = target.fallback_geometry_source or "nominatim_bbox"
-                elif target.last_fallback_geometry_bbox:
-                    geometry = _bbox_polygon_geometry(target.last_fallback_geometry_bbox)
-                    geometry_role = "last_fallback"
-                    geometry_source = target.last_fallback_geometry_source or target.geometry_source or "generic_point_bbox"
+                geometry_source = target.primary_geometry_source or "primary_geometry_geojson"
+            elif target.fallback_geometry_bbox:
+                geometry = _bbox_polygon_geometry(target.fallback_geometry_bbox)
+                geometry_role = "fallback"
+                geometry_source = target.fallback_geometry_source or "fallback_geometry_bbox"
+            elif target.last_fallback_geometry_bbox:
+                geometry = _bbox_polygon_geometry(target.last_fallback_geometry_bbox)
+                geometry_role = "last_fallback"
+                geometry_source = target.last_fallback_geometry_source or "last_fallback_geometry_bbox"
 
-            if geometry is None:
+            if geometry is None or geometry_role not in {"primary", "fallback", "last_fallback"}:
+                skipped_without_explicit_geometry += 1
                 continue
             properties = {
                 "target_id": target.target_id,
@@ -640,19 +834,10 @@ class ReviewAndValidationPipeline:
                 "last_fallback_geometry_source": target.last_fallback_geometry_source,
                 "bbox_verified": target.bbox_verified,
                 "geometry_status": target.geometry_status,
-                "nominatim_bbox": target.nominatim_bbox,
-                "effective_bbox": target.effective_bbox or target.bbox,
-                "fallback_geometry_bbox": target.fallback_geometry_bbox,
-                "last_fallback_geometry_bbox": target.last_fallback_geometry_bbox,
-                "bbox_padding_applied": target.bbox_padding_applied,
-                "bbox_padding_reason": target.bbox_padding_reason,
-                "bbox_min_side_miles": target.bbox_min_side_miles,
             }
             if target.chosen_candidate:
                 properties["geocoder_display_name"] = target.chosen_candidate.display_name
                 properties["geocoder_result_type"] = target.chosen_candidate.result_type
-                properties["geocoder_lat"] = target.chosen_candidate.lat
-                properties["geocoder_lon"] = target.chosen_candidate.lon
             features.append({"type": "Feature", "geometry": geometry, "properties": properties})
 
         path = self.config.output_dir / "target_geometry.geojson"
@@ -669,6 +854,9 @@ class ReviewAndValidationPipeline:
                 "primary_features": sum(1 for f in features if f.get("properties", {}).get("geometry_role") == "primary"),
                 "fallback_features": sum(1 for f in features if f.get("properties", {}).get("geometry_role") == "fallback"),
                 "last_fallback_features": sum(1 for f in features if f.get("properties", {}).get("geometry_role") == "last_fallback"),
+                "skipped_without_explicit_geometry": skipped_without_explicit_geometry,
+                "allowed_geometry_roles": ["primary", "fallback", "last_fallback"],
+                "strict_artifact_geometry_only": True,
             },
         )
         return (path if features else None), len(features)
@@ -707,11 +895,11 @@ class ReviewAndValidationPipeline:
     def _package_review_artifacts(self):
         zpath = self.config.output_dir / "review_artifacts.zip"
         with ZipFile(zpath, "w", ZIP_DEFLATED) as z:
-            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "target_geometry.geojson", "camera_inventory.jsonl", "cameras.md", "map.html", "camera_candidates_table.csv", "RUN_EXPLANATION.md"]:
+            for rel in ["camera.geojson", "untrusted_camera_candidates.geojson", "target_geometry.geojson", "camera_inventory.jsonl", "cameras.md", "map.html", "camera_candidates_table.csv", "media_validation_dashboard.json", "RUN_EXPLANATION.md"]:
                 p = self.config.output_dir / rel
                 if p.exists():
                     z.write(p, rel)
-            for sub in ["logs", "candidates"]:
+            for sub in ["logs", "candidates", "playlists"]:
                 folder = self.config.output_dir / sub
                 if folder.exists():
                     for p in folder.rglob("*"):
@@ -757,7 +945,7 @@ def _bbox_polygon_geometry(bbox: dict[str, Any] | None) -> dict[str, Any] | None
     }
 
 def _validation_status_category(status: str) -> str:
-    if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing"}:
+    if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing", "active_rtsp_verified"}:
         return "live"
     if status in {
         "dead_link",
@@ -766,9 +954,31 @@ def _validation_status_category(status: str) -> str:
         "active_playlist_dead_segments",
         "static_image_asset",
         "image_snapshot_not_image",
+        "dead_rtsp",
+        "offline_rtsp",
     }:
         return "dead"
+    if status in {"restricted_rtsp", "auth_required_rtsp"}:
+        return "unknown"
     return "unknown"
+
+
+
+def _google_dorking_default_summary(config: RunConfig) -> dict[str, Any]:
+    return {
+        "enabled": bool(config.enable_google_dorking),
+        "queries_generated": 0,
+        "results_seen": 0,
+        "results_after_block_policy": 0,
+        "promoted_source_leads": 0,
+        "candidates_extracted": 0,
+    }
+
+def _read_optional_json(path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        return {}
 
 
 def _candidate_priority_summary(candidates: list[CameraCandidate]) -> dict[str, object]:
@@ -783,6 +993,8 @@ def _candidate_priority_summary(candidates: list[CameraCandidate]) -> dict[str, 
         "located_out_of_scope_candidates": len(located_out_of_scope),
         "unlocated_candidates": len(unlocated),
         "by_priority_bucket": priority_bucket_counts(candidates),
+        "by_evidence_band": _candidate_evidence_band_counts(candidates),
+        "validation_prioritized_by_evidence": True,
     }
 
 
@@ -945,3 +1157,11 @@ def _snapshot_responses_differ(first: httpx.Response, second: httpx.Response) ->
     if first_modified and second_modified and first_modified != second_modified:
         return True
     return first.content != second.content
+
+
+def _candidate_evidence_band_counts(candidates: list[CameraCandidate]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        band = str((candidate.source_metadata or {}).get("camera_evidence_band") or "none")
+        counts[band] = counts.get(band, 0) + 1
+    return {key: counts.get(key, 0) for key in ("very_strong", "strong", "moderate", "weak", "none") if counts.get(key, 0)}

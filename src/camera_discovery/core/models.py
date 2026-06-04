@@ -62,6 +62,13 @@ class RunConfig:
 
     max_search_queries: int = 4
     max_search_results_per_query: int = 5
+    search_engines: list[str] = field(default_factory=lambda: ["ddg", "bing", "searxng"])
+    searxng_base_url: str = ""
+    searxng_categories: str = "general"
+    searxng_max_results: int = 10
+    ddg_delay_seconds: float = 1.0
+    enable_google_dorking: bool = True
+    max_dork_queries: int = 8
     max_pages: int = 25
     max_hls_candidates: int = 100
     max_image_snapshot_candidates: int = 50
@@ -314,6 +321,11 @@ class HarvestConfig:
     media: list[str] = field(default_factory=list)
     max_search_queries: int = 40
     max_search_results_per_query: int = 50
+    search_engines: list[str] = field(default_factory=lambda: ["ddg", "bing", "searxng"])
+    searxng_base_url: str = ""
+    searxng_categories: str = "general"
+    searxng_max_results: int = 50
+    ddg_delay_seconds: float = 1.0
     max_source_rows: int = 5000
     max_pages_per_source: int = 25
     max_structured_endpoints_per_page: int = 500
@@ -525,6 +537,8 @@ class OutputSummary:
     camera_candidates_table_rows: int = 0
     target_geometry_geojson: str | None = None
     target_geometry_features_written: int = 0
+    playlist_export_summary: str | None = None
+    media_validation_dashboard: str | None = None
 
 
 @dataclass

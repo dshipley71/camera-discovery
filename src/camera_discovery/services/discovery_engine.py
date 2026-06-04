@@ -236,6 +236,10 @@ class CandidateDiscoveryEngine(
         self._scope_candidates(unique, target)
         self._apply_llm_candidate_review(unique, target)
         cs = self._build_candidate_set(raw, unique)
+        dork_summary = getattr(self, "_google_dorking_summary", None)
+        if isinstance(dork_summary, dict) and dork_summary.get("enabled"):
+            dork_summary["candidates_extracted"] = sum(1 for c in cs.raw if (c.source_metadata or {}).get("query") and "site:" in str((c.source_metadata or {}).get("query")).casefold())
+            write_json(self.logs_dir / "google_dorking_summary.json", dork_summary)
         self._write_artifacts(queries, results, cs, target)
         self._emit_progress(
             "discovery_complete",

@@ -13,6 +13,7 @@ from camera_discovery.extraction.media import (
     _dedupe_strings,
     _float_or_none,
     _looks_like_hls,
+    _looks_like_rtsp,
     _looks_like_image,
     _looks_like_non_camera_asset,
     _looks_like_thumbnail_asset,
@@ -44,7 +45,7 @@ JSON_FIELD_ALIASES: dict[str, set[str]] = {
     "owner": {"owner", "operator", "maintainer"},
     "agency": {"agency", "organization", "organisation", "department", "provider"},
     "milepost": {"milepost", "mile_marker", "milemarker", "postmile", "post_mile"},
-    "stream_url": {"stream_url", "streamurl", "streaming_url", "streamingurl", "streamingvideourl", "streaming_video_url", "video_url", "videourl", "hls_url", "hlsurl", "hls", "m3u8", "url", "src"},
+    "stream_url": {"stream_url", "streamurl", "streaming_url", "streamingurl", "streamingvideourl", "streaming_video_url", "video_url", "videourl", "hls_url", "hlsurl", "hls", "m3u8", "rtsp", "rtsp_url", "rtspurl", "rtsps", "url", "src"},
     "snapshot_url": {"snapshot_url", "snapshoturl", "current_image_url", "currentimageurl", "image_url", "imageurl", "camera_image_url", "cameraimageurl", "still_image_url", "stillimageurl", "currentimage", "image"},
     "thumbnail_url": {"thumbnail_url", "thumbnailurl", "thumb_url", "thumburl", "preview_url", "previewurl", "poster_url", "posterurl", "reference_image_url", "referenceimageurl", "referenceimage1url"},
     "refresh_rate": {"camera_refresh_rate", "camerarefreshrate", "refresh_rate", "refreshrate", "refresh_seconds", "refreshseconds", "refresh_interval", "refreshinterval", "update_interval", "updateinterval", "update_frequency", "updatefrequency", "currentimageupdatefrequency", "referenceimageupdatefrequency", "image_refresh_seconds", "imagerefreshseconds"},
@@ -161,6 +162,8 @@ def _source_record_schema_hint(record: dict[str, Any]) -> str:
 
 def _media_type_from_url_and_key(url: str, key_norm: str) -> str | None:
     lower = url.casefold()
+    if _looks_like_rtsp(url):
+        return "rtsp"
     if _looks_like_hls(url) or ".m3u8" in lower:
         return "hls"
     if re.search(r"\.(?:mjpg|mjpeg)(?:\?|$)", lower) or "mjpeg" in key_norm:
@@ -169,7 +172,7 @@ def _media_type_from_url_and_key(url: str, key_norm: str) -> str | None:
         return "video_file"
     if _looks_like_image(url) or key_norm in {_normalize_key(alias) for alias in JSON_FIELD_ALIASES["snapshot_url"]}:
         return "image_snapshot"
-    if lower.startswith(("http://", "https://")) and any(token in key_norm for token in ("stream", "video", "media")):
+    if lower.startswith(("http://", "https://", "rtsp://", "rtsps://")) and any(token in key_norm for token in ("stream", "video", "media")):
         return "other"
     return None
 
@@ -284,8 +287,9 @@ def _record_media_urls(record: dict[str, Any], base_url: str) -> list[tuple[str,
             absolute = canonical_media_url(urljoin(base_url, raw))
             lower = absolute.casefold()
             has_media_extension = bool(re.search(r"\.(?:m3u8|mjpg|mjpeg|mp4|webm|mov|jpg|jpeg|png|webp)(?:\?|$)", lower))
+            is_rtsp_url = lower.startswith(("rtsp://", "rtsps://"))
             is_media_key = key_norm in stream_aliases or key_norm in snapshot_aliases
-            if not has_media_extension and not is_media_key:
+            if not has_media_extension and not is_media_key and not is_rtsp_url:
                 continue
             media_type = _media_type_from_url_and_key(absolute, key_norm)
             if not media_type:

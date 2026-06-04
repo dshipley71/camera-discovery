@@ -9,12 +9,14 @@ from camera_discovery.core.models import HarvestedUrlRecord
 from camera_discovery.extraction.media import _looks_like_non_camera_asset
 
 
-SUPPORTED_MEDIA_TYPES = ("hls", "mjpeg", "image_snapshot", "video_file", "stream", "unknown_media")
+SUPPORTED_MEDIA_TYPES = ("hls", "rtsp", "mjpeg", "image_snapshot", "video_file", "stream", "unknown_media")
 SUPPORTED_MEDIA_CATEGORIES = {
     "all",
     "*",
     "hls",
     "mjpeg",
+    "rtsp",
+    "rtsps",
     "image",
     "snapshot",
     "image_snapshot",
@@ -39,6 +41,7 @@ CAMERA_IMAGE_EVIDENCE_TERMS = {
 CAMERA_IMAGE_ASSET_ROLES = {"current_image_snapshot", "reference_image_snapshot", "image_snapshot"}
 CATEGORY_EXTENSIONS = {
     "hls": {".m3u8"},
+    "rtsp": set(),
     "mjpeg": {".mjpg", ".mjpeg"},
     "image_snapshot": {".jpg", ".jpeg", ".png", ".webp"},
     "video_file": {".mp4", ".webm", ".mov", ".m4v"},
@@ -46,9 +49,9 @@ CATEGORY_EXTENSIONS = {
     "unknown_media": set(),
 }
 JSON_ENDPOINT_HINT_RE = re.compile(r"(?:\.json(?:\?|$)|/api/|/feed|/feeds|/layer|/layers|/query|MapServer|FeatureServer|camera|cameras)", re.I)
-URL_RE = re.compile(r"https?://[^\s'\"<>\\)\]}]+", re.I)
+URL_RE = re.compile(r"(?:https?|rtsps?)://[^\s'\"<>\\)\]}]+", re.I)
 QUOTED_MEDIA_RE = re.compile(
-    r"[\"']([^\"']+\.(?:m3u8|mjpg|mjpeg|jpg|jpeg|png|webp|mp4|webm|mov|m4v)(?:\?[^\"']*)?)[\"']",
+    r"[\"']((?:rtsps?://[^\"']+)|[^\"']+\.(?:m3u8|mjpg|mjpeg|jpg|jpeg|png|webp|mp4|webm|mov|m4v)(?:\?[^\"']*)?)[\"']",
     re.I,
 )
 MEDIA_EXTENSION_RE = re.compile(r"\.(m3u8|mjpg|mjpeg|jpg|jpeg|png|webp|mp4|webm|mov|m4v)(?:$|[?#])", re.I)
@@ -213,6 +216,8 @@ def parse_media_filter(values: Iterable[str] | None) -> MediaFilter:
             invalid.append(token)
         else:
             categories.add(normalized)
+            if normalized == "stream":
+                categories.add("rtsp")
             extensions.update(CATEGORY_EXTENSIONS.get(normalized, set()))
     if invalid:
         examples = ".m3u8, .m3u8,mp4, hls, image,stream, video_file"
@@ -234,6 +239,8 @@ def normalize_media_token(token: str) -> str:
         return "image_snapshot"
     if token == "snapshot":
         return "image_snapshot"
+    if token in {"rtsps"}:
+        return "rtsp"
     if token == "video":
         return "video_file"
     if token == "unknown":
@@ -241,9 +248,11 @@ def normalize_media_token(token: str) -> str:
     return token
 
 def classify_media_url(url: str, *, key_hint: str = "", content_type: str = "") -> str | None:
-    if not url or not url.startswith(("http://", "https://")):
+    if not url or not url.startswith(("http://", "https://", "rtsp://", "rtsps://")):
         return None
     lowered = url.casefold()
+    if lowered.startswith(("rtsp://", "rtsps://")):
+        return "rtsp"
     path = urlparse(url).path.casefold()
     ctype = content_type.casefold()
     if path.endswith(".m3u8") or ".m3u8" in lowered or "mpegurl" in ctype:
@@ -254,7 +263,7 @@ def classify_media_url(url: str, *, key_hint: str = "", content_type: str = "") 
         return "video_file"
     if path.endswith((".jpg", ".jpeg", ".png", ".webp")):
         return "image_snapshot"
-    if any(token in key_hint.casefold() for token in ("stream", "video", "media", "mjpeg")) and url.startswith(("http://", "https://")):
+    if any(token in key_hint.casefold() for token in ("stream", "video", "media", "mjpeg", "rtsp")) and url.startswith(("http://", "https://", "rtsp://", "rtsps://")):
         return "stream"
     if any(token in lowered for token in ("/stream", "stream=", "/video", "video=", "/media", "media=")) and not MEDIA_EXTENSION_RE.search(url):
         return "stream"
