@@ -99,6 +99,8 @@ from camera_discovery.extraction.pagination import (
     _pagination_rows,
 )
 from camera_discovery.extraction.search import clean_ddg_result_url, parse_ddg_result_rows
+from camera_discovery.discovery.official_source_queries import official_source_dork_queries_for_intent, official_source_queries_for_intent
+from camera_discovery.discovery.search.dispatcher import SearchDispatcher
 from camera_discovery.passive_intelligence import (
     enrich_source_row_with_passive_intelligence,
     source_row_evidence_record,
@@ -209,7 +211,26 @@ class SearchDispatchMixin:
                 f"{base} public live cameras m3u8",
             ]
         )
-        normal_queries = _dedupe_strings(candidates)[: self.config.max_search_queries]
+        # Reserve part of the blind-search query budget for high-signal
+        # official-source queries. These templates stay within public/official
+        # sources and exclude blocked internet-asset indexes.
+        official_limit = (min(8, max(2, self.config.max_search_queries // 3)) if self.config.max_search_queries > 4 else 0)
+        official_queries = (
+            [
+                _strip_site_scope(query)
+                for query in official_source_queries_for_intent(
+                    target.intent.camera_type_intent or camera_intent,
+                    base,
+                    max_queries=official_limit,
+                    safe_exclusions=False,
+                )
+            ]
+            if official_limit > 0
+            else []
+        )
+        general_limit = max(0, self.config.max_search_queries - len(official_queries))
+        normal_queries = _dedupe_strings(candidates)[:general_limit] + [q for q in official_queries if q not in set(_dedupe_strings(candidates)[:general_limit])]
+        normal_queries = _dedupe_strings(normal_queries)[: self.config.max_search_queries]
         dork_queries = self._google_dork_queries(target, base, camera_intent) if self.config.enable_google_dorking else []
         self._google_dorking_summary = {
             "enabled": bool(self.config.enable_google_dorking),
@@ -234,6 +255,13 @@ class SearchDispatchMixin:
                 hosts.append(host)
         exclusions = " -shodan -censys -zoomeye -fofa -insecam -login -admin -password -credentials"
         queries: list[str] = []
+        queries.extend(
+            official_source_dork_queries_for_intent(
+                target.intent.camera_type_intent or camera_intent,
+                base,
+                max_queries=max(0, self.config.max_dork_queries // 2),
+            )
+        )
         for host in _dedupe_strings(hosts):
             queries.extend(
                 [
@@ -250,6 +278,29 @@ class SearchDispatchMixin:
         return [q for q in _dedupe_strings(queries) if _is_safe_google_dork(q)][: self.config.max_dork_queries]
 
     def _blind_search(self, queries: list[str], client: httpx.Client | None = None) -> list[dict[str, str]]:
+        # Google-dork guardrail tests and existing callers monkeypatch this
+        # module's DDG fetch/parser path. Keep pure dork batches on that legacy
+        # path so dorking remains explicitly opt-in and bounded. Normal blind
+        # search uses the multi-engine dispatcher.
+        if queries and all(_is_google_dork_query(query) for query in queries):
+            return self._legacy_ddg_blind_search(queries, client)
+        dispatcher = SearchDispatcher(self.config, self.source_policy, self.logs_dir)
+        rows, diagnostics = dispatcher.search_all(queries)
+        dork_rows = [row for row in rows if _is_google_dork_query(str(row.get("query") or ""))]
+        if dork_rows:
+            for row in dork_rows:
+                row["discovery_query_kind"] = "google_dork"
+                row["source_kind"] = row.get("source_kind") or "search_result"
+            summary = getattr(self, "_google_dorking_summary", {}) or {}
+            summary["results_seen"] = int(summary.get("results_seen") or 0) + len(dork_rows)
+            self._google_dorking_summary = summary
+        if not rows:
+            for diag in diagnostics:
+                if diag.get("error"):
+                    rows.append({"query": str(diag.get("query") or ""), "url": "", "title": "", "error": str(diag.get("error")), "source_provider": f"blind:{diag.get('engine') or 'search'}"})
+        return rows
+
+    def _legacy_ddg_blind_search(self, queries: list[str], client: httpx.Client | None = None) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
         owns_client = client is None
         client = client or self._make_client()
@@ -259,16 +310,17 @@ class SearchDispatchMixin:
                     resp = _get_with_retry(client, f"https://duckduckgo.com/html/?q={quote_plus(query)}")
                     resp.raise_for_status()
                     parsed = self._parse_ddg(query, resp.text)
-                    if _is_google_dork_query(query):
-                        for row in parsed:
-                            row["discovery_query_kind"] = "google_dork"
-                            row["source_kind"] = row.get("source_kind") or "search_result"
-                        summary = getattr(self, "_google_dorking_summary", {}) or {}
-                        summary["results_seen"] = int(summary.get("results_seen") or 0) + len(parsed)
-                        self._google_dorking_summary = summary
+                    for row in parsed:
+                        row["discovery_query_kind"] = "google_dork"
+                        row["source_kind"] = row.get("source_kind") or "search_result"
+                        row.setdefault("search_engine", "ddg")
+                        row.setdefault("source_provider", "blind:ddg")
+                    summary = getattr(self, "_google_dorking_summary", {}) or {}
+                    summary["results_seen"] = int(summary.get("results_seen") or 0) + len(parsed)
+                    self._google_dorking_summary = summary
                     rows.extend(parsed)
                 except Exception as exc:
-                    rows.append({"query": query, "url": "", "title": "", "error": repr(exc), "source_provider": "blind"})
+                    rows.append({"query": query, "url": "", "title": "", "error": repr(exc), "source_provider": "blind:ddg"})
         finally:
             if owns_client:
                 client.close()
@@ -352,7 +404,7 @@ class SearchDispatchMixin:
 
 
 def _safe_query_phrase(value: str) -> str:
-    text = re.sub(r"[^A-Za-z0-9 ,._'-]+", " ", str(value or ""))
+    text = re.sub(r"[^\w\s,._'’/-]+", " ", str(value or ""), flags=re.UNICODE)
     text = " ".join(text.split())[:120]
     return f'"{text}"' if " " in text else text
 
@@ -388,3 +440,12 @@ def _is_safe_google_dork(query: str) -> bool:
     if any(fragment in positive_terms for fragment in forbidden):
         return False
     return bool(re.search(r"\b(camera|cameras|webcam|webcams)\b", positive_terms))
+
+
+def _strip_site_scope(query: str) -> str:
+    # Normal official-source expansion should not become Google dorking unless
+    # enable_google_dorking is explicitly true. Remove positive site scopes and
+    # blocked-site exclusions for ordinary blind-search queries.
+    cleaned = re.sub(r"\s+site:\.[A-Za-z0-9.-]+", "", str(query))
+    cleaned = re.sub(r"\s+-site:[^\s]+", "", cleaned)
+    return " ".join(cleaned.split())

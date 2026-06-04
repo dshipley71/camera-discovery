@@ -41,6 +41,7 @@ from camera_discovery.enrichment.location import (
     _valid_lat_lon,
 )
 from camera_discovery.extraction.browser import BrowserCaptureDecision, BrowserCaptureResult, PageDiscoverySignals, browser_backend_preflight
+from camera_discovery.extraction.endpoints import extract_endpoint_urls_from_text
 from camera_discovery.extraction.html import (
     _first_nonempty,
     _html_soup,
@@ -291,10 +292,9 @@ class CandidateExtractionMixin:
             absolute = urljoin(url, href)
             if JSON_FEED_HINT_RE.search(absolute) and not self.source_policy.is_blocked(absolute):
                 hrefs.append(absolute)
-        for raw in re.findall(r'["\']([^"\']*(?:\.json|/api/|/feed|/feeds|/layer|/layers|MapServer|FeatureServer|/query)[^"\']*)["\']', html, flags=re.I):
-            absolute = urljoin(url, raw)
-            if absolute.startswith("http") and not self.source_policy.is_blocked(absolute):
-                hrefs.append(absolute)
+        for endpoint in extract_endpoint_urls_from_text(html, url):
+            if not self.source_policy.is_blocked(endpoint):
+                hrefs.append(endpoint)
         out: list[CameraCandidate] = []
         endpoint_logs: list[dict[str, Any]] = []
         for feed_url in _dedupe_strings(_expand_structured_endpoint_urls(hrefs))[: self.config.max_structured_endpoints_per_page]:
