@@ -32,7 +32,7 @@ from camera_discovery.discovery.source_rows import (
     _target_region_slugs,
     _url_query_mapping,
 )
-from camera_discovery.enrichment.location import (
+from camera_discovery.enrichment.location_evidence import (
     _append_target_context_to_query,
     _candidate_has_location_inference_evidence,
     _candidate_location_enrichment_sort_key,

@@ -5,7 +5,7 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
 from camera_discovery.core.models import CameraCandidate
-from camera_discovery.enrichment.location import _valid_lat_lon
+from camera_discovery.enrichment.location_evidence import _valid_lat_lon
 from camera_discovery.harvest.media_filter import canonical_media_url
 from camera_discovery.extraction.media import (
     _candidate_media_type,

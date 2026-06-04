@@ -19,7 +19,7 @@ from camera_discovery.cli_commands.progress import (
 )
 from camera_discovery.core.models import CameraCandidate, CandidateSet, HarvestInputMode, RunConfig, RunState, TargetContext, TrustPolicy
 from camera_discovery.discovery.candidate_priority import priority_bucket_counts, prioritize_candidate_set
-from camera_discovery.enrichment.location import _point_in_geojson_geometry
+from camera_discovery.enrichment.location_evidence import _point_in_geojson_geometry
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
 from camera_discovery.services.harvest_handoff import (
     describe_harvest_handoff,

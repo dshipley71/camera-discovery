@@ -22,7 +22,7 @@ from camera_discovery.harvest.media_filter import (
 from camera_discovery.extraction.media import _dedupe_strings
 from camera_discovery.extraction.search import clean_ddg_result_url
 from camera_discovery.discovery.official_source_queries import official_source_queries_for_intent
-from camera_discovery.discovery.locations import localized_camera_terms_for_intent
+from camera_discovery.discovery.location_profiles import localized_camera_terms_for_intent
 
 
 def dedupe_records(records: list[HarvestedUrlRecord]) -> list[HarvestedUrlRecord]:
