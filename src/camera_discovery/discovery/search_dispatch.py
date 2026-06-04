@@ -26,7 +26,7 @@ from camera_discovery.discovery.source_rows import (
     _target_region_slugs,
     _url_query_mapping,
 )
-from camera_discovery.enrichment.location import (
+from camera_discovery.enrichment.location_evidence import (
     _append_target_context_to_query,
     _candidate_has_location_inference_evidence,
     _candidate_location_enrichment_sort_key,
@@ -100,7 +100,7 @@ from camera_discovery.extraction.pagination import (
 )
 from camera_discovery.extraction.search import clean_ddg_result_url, parse_ddg_result_rows
 from camera_discovery.discovery.official_source_queries import official_source_dork_queries_for_intent, official_source_queries_for_intent
-from camera_discovery.discovery.locations import localized_camera_terms_for_intent
+from camera_discovery.discovery.location_profiles import localized_camera_terms_for_intent
 from camera_discovery.discovery.search.dispatcher import SearchDispatcher
 from camera_discovery.passive_intelligence import (
     enrich_source_row_with_passive_intelligence,
@@ -448,9 +448,11 @@ def _is_safe_google_dork(query: str) -> bool:
     if any(fragment in positive_terms for fragment in forbidden):
         return False
     safe_camera_language = (
-        r"\b(camera|cameras|webcam|webcams)\b"
-        r"|\b(c[aá]mara|c[aá]maras|camaras|camara|webcams?)\b"
-        r"|камер|вебкамер"
+        r"\b(camera|cameras|webcam|webcams|livecam|cctv)\b"
+        r"|\b(c[aá]mara|c[aá]maras|camaras|camara|câmeras?|cameras?|cam[eé]ras?)\b"
+        r"|камер|вебкамер|kamera|kamery|webkamera|webbkamera|livekamera"
+        r"|カメラ|攝影機|摄像头|影像|路況|路况|카메라|กล้อง|كاميرا|كاميرات|מצלמ"
+        r"|monitoreo vial|tr[aá]fico|trafico|verkehr|traffic|road|highway"
     )
     return bool(re.search(safe_camera_language, positive_terms, flags=re.I | re.UNICODE))
 

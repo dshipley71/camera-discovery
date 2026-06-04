@@ -20,7 +20,7 @@ Usage::
 
 from __future__ import annotations
 
-from camera_discovery.discovery.locations import (
+from camera_discovery.discovery.location_profiles import (
     localized_camera_terms_for_intent,
     official_site_scopes_for_location,
     safe_exclusion_fragment,
