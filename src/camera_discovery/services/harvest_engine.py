@@ -24,11 +24,13 @@ from camera_discovery.core.models import (
     HarvestedUrlRecord,
     RunConfig,
 )
+from camera_discovery.extraction.endpoints import extract_endpoint_urls_from_text
 from camera_discovery.extraction.html import _html_soup
 from camera_discovery.extraction.http import _get_with_retry
 from camera_discovery.extraction.media import _dedupe_strings, _looks_like_non_camera_asset
 from camera_discovery.extraction.pagination import _expand_structured_endpoint_urls, _pagination_rows
 from camera_discovery.extraction.search import parse_ddg_result_rows
+from camera_discovery.discovery.search.dispatcher import SearchDispatcher
 from camera_discovery.extraction.browser import browser_backend_preflight
 from camera_discovery.harvest.json_records import (
     count_json_records,
@@ -317,33 +319,13 @@ class CameraUrlHarvestEngine:
 
     def _blind_rows(self) -> list[dict[str, str]]:
         queries = harvest_search_queries(self.config.query, self.config.max_search_queries)
-        rows: list[dict[str, str]] = []
-        diagnostics: list[dict[str, Any]] = []
-        client = self._make_client()
-        try:
-            for query in queries:
-                search_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
-                try:
-                    resp = _get_with_retry(client, search_url)
-                    resp.raise_for_status()
-                    parsed = self._parse_ddg(query, resp.text)
-                    diagnostics.append(
-                        {
-                            "query": query,
-                            "url": search_url,
-                            "status_code": resp.status_code,
-                            "response_bytes": len(resp.content or b""),
-                            "parsed_rows": len(parsed),
-                        }
-                    )
-                    rows.extend(parsed)
-                except Exception as exc:
-                    diagnostics.append({"query": query, "url": search_url, "error": repr(exc), "parsed_rows": 0})
-                    self._log_error("blind_search_error", query, exc)
-        finally:
-            client.close()
+        dispatcher = SearchDispatcher(self.config, self.source_policy, self.logs_dir)
+        rows, diagnostics = dispatcher.search_all(queries)
         if diagnostics:
             write_jsonl(self.logs_dir / "harvest_blind_search_diagnostics.jsonl", diagnostics)
+        for diag in diagnostics:
+            if diag.get("error"):
+                self._log_error("blind_search_error", str(diag.get("query") or ""), RuntimeError(str(diag.get("error"))))
         self._blind_search_diagnostics = diagnostics
         return rows
 
@@ -593,11 +575,9 @@ class CameraUrlHarvestEngine:
             absolute = urljoin(source_url, raw)
             if JSON_ENDPOINT_HINT_RE.search(absolute) and not self.source_policy.is_blocked(absolute):
                 hrefs.append(absolute)
-        for variant_name, variant in text_variants(text):
-            for raw in re.findall(r"[\"']([^\"']*(?:\.json|/api/|/feed|/feeds|/layer|/layers|/query|MapServer|FeatureServer)[^\"']*)[\"']", variant, flags=re.I):
-                absolute = urljoin(source_url, clean_extracted_url(raw))
-                if absolute.startswith(("http://", "https://")) and not self.source_policy.is_blocked(absolute):
-                    hrefs.append(absolute)
+        for endpoint in extract_endpoint_urls_from_text(text, source_url):
+            if not self.source_policy.is_blocked(endpoint):
+                hrefs.append(endpoint)
         records: list[HarvestedUrlRecord] = []
         endpoint_logs: list[dict[str, Any]] = []
         for endpoint in _dedupe_strings(_expand_structured_endpoint_urls(hrefs))[: self.config.max_structured_endpoints_per_page]:

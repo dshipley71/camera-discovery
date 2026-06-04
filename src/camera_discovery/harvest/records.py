@@ -21,6 +21,7 @@ from camera_discovery.harvest.media_filter import (
 )
 from camera_discovery.extraction.media import _dedupe_strings
 from camera_discovery.extraction.search import clean_ddg_result_url
+from camera_discovery.discovery.official_source_queries import official_source_queries_for_intent
 
 
 def dedupe_records(records: list[HarvestedUrlRecord]) -> list[HarvestedUrlRecord]:
@@ -242,7 +243,10 @@ def row_from_source_entry(entry: SourceEntry, query: str, *, provider: str) -> d
     }
 
 def harvest_search_queries(query: str, max_queries: int) -> list[str]:
-    candidates = [
+    if max_queries <= 0:
+        return []
+    intent = _infer_harvest_camera_intent(query)
+    general = [
         query,
         f"{query} public cameras",
         f"{query} live cameras",
@@ -251,10 +255,39 @@ def harvest_search_queries(query: str, max_queries: int) -> list[str]:
         f"{query} camera feed json",
         f"{query} public camera API json",
         f"{query} camera MapServer FeatureServer",
+        f"{query} camera FeatureServer query",
+        f"{query} camera GeoJSON",
         f"{query} m3u8",
         f"{query} snapshot camera",
     ]
-    return _dedupe_strings(candidates)[:max_queries] if max_queries else []
+    official_budget = min(8, max(2, max_queries // 3))
+    official = official_source_queries_for_intent(
+        intent,
+        query,
+        max_queries=official_budget,
+        safe_exclusions=True,
+    )
+    general_limit = max(0, max_queries - len(official))
+    return _dedupe_strings(general)[:general_limit] + [q for q in official if q not in set(_dedupe_strings(general)[:general_limit])][: max_queries - general_limit]
+
+
+def _infer_harvest_camera_intent(query: str) -> str:
+    lowered = str(query or "").replace("_", " ").casefold()
+    for intent, terms in {
+        "traffic": ("traffic", "road", "roads", "highway", "freeway", "transportation", "511"),
+        "weather": ("weather", "meteorological", "airport weather"),
+        "airport": ("airport", "airfield", "aviation", "runway"),
+        "beach": ("beach", "surf", "coastal", "shore", "pier"),
+        "harbor": ("harbor", "port", "marina", "waterfront", "ferry"),
+        "park": ("park", "wildlife", "trail", "visitor center"),
+        "mountain": ("mountain", "ski", "snow", "pass"),
+        "campus": ("campus", "university", "college"),
+        "construction": ("construction", "project", "bridge", "infrastructure"),
+        "city": ("city", "downtown", "municipal"),
+    }.items():
+        if any(term in lowered for term in terms):
+            return intent
+    return "default"
 
 def clean_ddg_url(href: str) -> str:
     return clean_ddg_result_url(href)

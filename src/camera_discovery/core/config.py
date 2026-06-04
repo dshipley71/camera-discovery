@@ -95,6 +95,16 @@ def _stage_model(stage_var: str, llm_model: str | None, default: str = "gemma3:2
     return os.getenv(stage_var) or llm_model or default
 
 
+def _split_search_engines(value: str | None) -> list[str]:
+    raw = value or "ddg,bing,searxng"
+    engines = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    allowed = {"ddg", "bing", "searxng"}
+    invalid = [engine for engine in engines if engine not in allowed]
+    if invalid:
+        raise ValueError(f"Invalid search engine(s): {', '.join(invalid)}; expected any of: ddg,bing,searxng")
+    return engines or ["ddg", "bing", "searxng"]
+
+
 def _default_target_intent_model(provider: str, llm_model: str | None) -> str | None:
     explicit = os.getenv("CAMERA_DISCOVERY_TARGET_INTENT_MODEL")
     if explicit:
@@ -191,7 +201,12 @@ def load_run_config(
         max_candidate_reviews=max(0, _int_env("CAMERA_DISCOVERY_MAX_CANDIDATE_REVIEWS", max_total_candidates)),
         max_search_queries=_int_env("CAMERA_DISCOVERY_MAX_SEARCH_QUERIES", 4),
         max_search_results_per_query=_int_env("CAMERA_DISCOVERY_MAX_SEARCH_RESULTS_PER_QUERY", 5),
-        enable_google_dorking=_bool_env("CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING", False),
+        search_engines=_split_search_engines(os.getenv("CAMERA_DISCOVERY_SEARCH_ENGINES")),
+        searxng_base_url=os.getenv("CAMERA_DISCOVERY_SEARXNG_BASE_URL", ""),
+        searxng_categories=os.getenv("CAMERA_DISCOVERY_SEARXNG_CATEGORIES", "general"),
+        searxng_max_results=max(0, _int_env("CAMERA_DISCOVERY_SEARXNG_MAX_RESULTS", 10)),
+        ddg_delay_seconds=max(0.0, _float_env("CAMERA_DISCOVERY_DDG_DELAY_SECONDS", 1.0)),
+        enable_google_dorking=_bool_env("CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING", True),
         max_dork_queries=max(0, _int_env("CAMERA_DISCOVERY_MAX_DORK_QUERIES", 8)),
         max_pages=_int_env("CAMERA_DISCOVERY_MAX_PAGES", 25),
         max_hls_candidates=max_hls_candidates,
@@ -282,6 +297,11 @@ def load_harvest_config(
         media=media or [],
         max_search_queries=max(0, int(max_search_queries if max_search_queries is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_SEARCH_QUERIES", _int_env("CAMERA_DISCOVERY_MAX_SEARCH_QUERIES", 40)))),
         max_search_results_per_query=max(0, int(max_search_results_per_query if max_search_results_per_query is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_SEARCH_RESULTS_PER_QUERY", _int_env("CAMERA_DISCOVERY_MAX_SEARCH_RESULTS_PER_QUERY", 50)))),
+        search_engines=_split_search_engines(os.getenv("CAMERA_DISCOVERY_HARVEST_SEARCH_ENGINES", os.getenv("CAMERA_DISCOVERY_SEARCH_ENGINES"))),
+        searxng_base_url=os.getenv("CAMERA_DISCOVERY_HARVEST_SEARXNG_BASE_URL", os.getenv("CAMERA_DISCOVERY_SEARXNG_BASE_URL", "")),
+        searxng_categories=os.getenv("CAMERA_DISCOVERY_HARVEST_SEARXNG_CATEGORIES", os.getenv("CAMERA_DISCOVERY_SEARXNG_CATEGORIES", "general")),
+        searxng_max_results=max(0, _int_env("CAMERA_DISCOVERY_HARVEST_SEARXNG_MAX_RESULTS", _int_env("CAMERA_DISCOVERY_SEARXNG_MAX_RESULTS", 50))),
+        ddg_delay_seconds=max(0.0, _float_env("CAMERA_DISCOVERY_HARVEST_DDG_DELAY_SECONDS", _float_env("CAMERA_DISCOVERY_DDG_DELAY_SECONDS", 1.0))),
         max_source_rows=max(0, int(max_source_rows if max_source_rows is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_SOURCE_ROWS", 5000))),
         max_pages_per_source=max(1, int(max_pages_per_source if max_pages_per_source is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_PAGES_PER_SOURCE", _int_env("CAMERA_DISCOVERY_MAX_DIRECTORY_PAGES", 25)))),
         max_structured_endpoints_per_page=max(0, int(max_structured_endpoints_per_page if max_structured_endpoints_per_page is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", _int_env("CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", 500)))),
