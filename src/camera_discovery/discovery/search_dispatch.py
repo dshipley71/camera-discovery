@@ -99,6 +99,12 @@ from camera_discovery.extraction.pagination import (
     _pagination_rows,
 )
 from camera_discovery.extraction.search import clean_ddg_result_url, parse_ddg_result_rows
+from camera_discovery.discovery.official_source_queries import official_source_dork_queries_for_intent, official_source_queries_for_intent
+from camera_discovery.discovery.search.dispatcher import SearchDispatcher
+from camera_discovery.passive_intelligence import (
+    enrich_source_row_with_passive_intelligence,
+    source_row_evidence_record,
+)
 
 
 class SearchDispatchMixin:
@@ -205,9 +211,96 @@ class SearchDispatchMixin:
                 f"{base} public live cameras m3u8",
             ]
         )
-        return _dedupe_strings(candidates)[: self.config.max_search_queries]
+        # Reserve part of the blind-search query budget for high-signal
+        # official-source queries. These templates stay within public/official
+        # sources and exclude blocked internet-asset indexes.
+        official_limit = (min(8, max(2, self.config.max_search_queries // 3)) if self.config.max_search_queries > 4 else 0)
+        official_queries = (
+            [
+                _strip_site_scope(query)
+                for query in official_source_queries_for_intent(
+                    target.intent.camera_type_intent or camera_intent,
+                    base,
+                    max_queries=official_limit,
+                    safe_exclusions=False,
+                )
+            ]
+            if official_limit > 0
+            else []
+        )
+        general_limit = max(0, self.config.max_search_queries - len(official_queries))
+        normal_queries = _dedupe_strings(candidates)[:general_limit] + [q for q in official_queries if q not in set(_dedupe_strings(candidates)[:general_limit])]
+        normal_queries = _dedupe_strings(normal_queries)[: self.config.max_search_queries]
+        dork_queries = self._google_dork_queries(target, base, camera_intent) if self.config.enable_google_dorking else []
+        self._google_dorking_summary = {
+            "enabled": bool(self.config.enable_google_dorking),
+            "queries_generated": len(dork_queries),
+            "results_seen": 0,
+            "results_after_block_policy": 0,
+            "promoted_source_leads": 0,
+            "candidates_extracted": 0,
+        }
+        write_json(self.logs_dir / "google_dorking_summary.json", self._google_dorking_summary)
+        return _dedupe_strings(normal_queries + dork_queries)
+
+    def _google_dork_queries(self, target: TargetContext, base: str, camera_intent: str) -> list[str]:
+        target_term = _safe_query_phrase(base or target.user_query)
+        if not target_term:
+            return []
+        camera_term = "traffic cameras" if "traffic" in camera_intent else ("weather cameras" if "weather" in camera_intent else "public cameras")
+        hosts: list[str] = []
+        for entry in self.source_policy.enabled_allowed_sources():
+            host = urlparse(entry.url).netloc.casefold()
+            if host and not self.source_policy.is_blocked(entry.url):
+                hosts.append(host)
+        exclusions = " -shodan -censys -zoomeye -fofa -insecam -login -admin -password -credentials"
+        queries: list[str] = []
+        queries.extend(
+            official_source_dork_queries_for_intent(
+                target.intent.camera_type_intent or camera_intent,
+                base,
+                max_queries=max(0, self.config.max_dork_queries // 2),
+            )
+        )
+        for host in _dedupe_strings(hosts):
+            queries.extend(
+                [
+                    f"site:{host} {target_term} {camera_term}{exclusions}",
+                    f"site:{host} {target_term} webcam OR cameras{exclusions}",
+                    f"site:{host} filetype:json {target_term} camera{exclusions}",
+                    f"site:{host} filetype:geojson {target_term} camera{exclusions}",
+                    f"site:{host} intitle:camera {target_term}{exclusions}",
+                    f"site:{host} inurl:camera {target_term} public{exclusions}",
+                ]
+            )
+            if len(queries) >= self.config.max_dork_queries:
+                break
+        return [q for q in _dedupe_strings(queries) if _is_safe_google_dork(q)][: self.config.max_dork_queries]
 
     def _blind_search(self, queries: list[str], client: httpx.Client | None = None) -> list[dict[str, str]]:
+        # Google-dork guardrail tests and existing callers monkeypatch this
+        # module's DDG fetch/parser path. Keep pure dork batches on that legacy
+        # path so dorking remains explicitly opt-in and bounded. Normal blind
+        # search uses the multi-engine dispatcher.
+        if queries and all(_is_google_dork_query(query) for query in queries):
+            return self._legacy_ddg_blind_search(queries, client)
+        dispatcher = SearchDispatcher(self.config, self.source_policy, self.logs_dir)
+        rows, diagnostics = dispatcher.search_all(queries)
+        dork_rows = [row for row in rows if _is_google_dork_query(str(row.get("query") or ""))]
+        if dork_rows:
+            for row in dork_rows:
+                row["discovery_query_kind"] = "google_dork"
+                row["source_kind"] = row.get("source_kind") or "search_result"
+            summary = getattr(self, "_google_dorking_summary", {}) or {}
+            summary["results_seen"] = int(summary.get("results_seen") or 0) + len(dork_rows)
+            self._google_dorking_summary = summary
+        if not rows:
+            for diag in diagnostics:
+                if diag.get("error"):
+                    rows.append({"query": str(diag.get("query") or ""), "url": "", "title": "", "error": str(diag.get("error")), "source_provider": f"blind:{diag.get('engine') or 'search'}"})
+        return rows
+
+    def _legacy_ddg_blind_search(self, queries: list[str], client: httpx.Client | None = None) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
         owns_client = client is None
         client = client or self._make_client()
@@ -216,9 +309,18 @@ class SearchDispatchMixin:
                 try:
                     resp = _get_with_retry(client, f"https://duckduckgo.com/html/?q={quote_plus(query)}")
                     resp.raise_for_status()
-                    rows.extend(self._parse_ddg(query, resp.text))
+                    parsed = self._parse_ddg(query, resp.text)
+                    for row in parsed:
+                        row["discovery_query_kind"] = "google_dork"
+                        row["source_kind"] = row.get("source_kind") or "search_result"
+                        row.setdefault("search_engine", "ddg")
+                        row.setdefault("source_provider", "blind:ddg")
+                    summary = getattr(self, "_google_dorking_summary", {}) or {}
+                    summary["results_seen"] = int(summary.get("results_seen") or 0) + len(parsed)
+                    self._google_dorking_summary = summary
+                    rows.extend(parsed)
                 except Exception as exc:
-                    rows.append({"query": query, "url": "", "title": "", "error": repr(exc), "source_provider": "blind"})
+                    rows.append({"query": query, "url": "", "title": "", "error": repr(exc), "source_provider": "blind:ddg"})
         finally:
             if owns_client:
                 client.close()
@@ -242,22 +344,33 @@ class SearchDispatchMixin:
         for row in rows:
             url = row.get("url") or ""
             key = url.split("#", 1)[0]
-            if not url.startswith("http") or key in seen:
+            if not url.startswith(("http://", "https://", "rtsp://", "rtsps://")) or key in seen:
                 continue
             reason = self.source_policy.block_reason(url)
             if reason:
-                blocked = dict(row)
+                blocked = enrich_source_row_with_passive_intelligence(dict(row), self.source_policy)
                 blocked["blocked_reason"] = reason
                 blocked_rows.append(blocked)
                 continue
             seen.add(key)
-            selected.append({**row, "url": key})
+            selected_row = enrich_source_row_with_passive_intelligence({**row, "url": key}, self.source_policy)
+            selected.append(selected_row)
+            if key.startswith(("rtsp://", "rtsps://")):
+                continue
             for page_row in _pagination_rows({**row, "url": key}, self.config.max_directory_pages if row.get("source_provider") in {"directory", "direct"} else 1):
                 page_key = page_row["url"].split("#", 1)[0]
                 if page_key not in seen and not self.source_policy.block_reason(page_key):
                     seen.add(page_key)
-                    selected.append(page_row)
+                    selected.append(enrich_source_row_with_passive_intelligence(page_row, self.source_policy))
+        selected.sort(key=lambda row: (-int(row.get("source_camera_evidence_score") or 0), str(row.get("source_provider") or ""), str(row.get("url") or "")))
         write_jsonl(self.logs_dir / "blocked_source_rows.jsonl", blocked_rows)
+        write_jsonl(self.logs_dir / "source_row_evidence_summary.jsonl", [source_row_evidence_record(row) for row in selected + blocked_rows])
+        summary = getattr(self, "_google_dorking_summary", None)
+        if isinstance(summary, dict) and summary.get("enabled"):
+            dork_selected = [row for row in selected if row.get("discovery_query_kind") == "google_dork"]
+            summary["results_after_block_policy"] = len(dork_selected)
+            summary["promoted_source_leads"] = len(dork_selected)
+            write_json(self.logs_dir / "google_dorking_summary.json", summary)
         return selected
 
     def _promoted_asset_host_rows(self, candidates: list[CameraCandidate], target: TargetContext, existing_rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -288,3 +401,51 @@ class SearchDispatchMixin:
         if rows:
             write_jsonl(self.logs_dir / "promoted_asset_host_rows.jsonl", rows)
         return rows
+
+
+def _safe_query_phrase(value: str) -> str:
+    text = re.sub(r"[^\w\s,._'’/-]+", " ", str(value or ""), flags=re.UNICODE)
+    text = " ".join(text.split())[:120]
+    return f'"{text}"' if " " in text else text
+
+
+def _is_google_dork_query(query: str) -> bool:
+    lowered = query.casefold()
+    return any(operator in lowered for operator in ("site:", "filetype:", "intitle:", "inurl:"))
+
+
+def _is_safe_google_dork(query: str) -> bool:
+    lowered = query.casefold()
+    positive_terms = re.sub(r"-(shodan|censys|zoomeye|fofa|insecam|login|admin|password|credentials?)\b", "", lowered)
+    forbidden = (
+        "rtsp://",
+        "rtsps://",
+        "password",
+        "credential",
+        "default login",
+        "admin login",
+        "wp-admin",
+        "axis-cgi",
+        "streaming/channels",
+        "cam/realmonitor",
+        "192.168.",
+        "10.",
+        "172.16.",
+        "shodan",
+        "censys",
+        "zoomeye",
+        "fofa",
+        "insecam",
+    )
+    if any(fragment in positive_terms for fragment in forbidden):
+        return False
+    return bool(re.search(r"\b(camera|cameras|webcam|webcams)\b", positive_terms))
+
+
+def _strip_site_scope(query: str) -> str:
+    # Normal official-source expansion should not become Google dorking unless
+    # enable_google_dorking is explicitly true. Remove positive site scopes and
+    # blocked-site exclusions for ordinary blind-search queries.
+    cleaned = re.sub(r"\s+site:\.[A-Za-z0-9.-]+", "", str(query))
+    cleaned = re.sub(r"\s+-site:[^\s]+", "", cleaned)
+    return " ".join(cleaned.split())

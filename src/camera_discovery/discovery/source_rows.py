@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 from camera_discovery.core.models import TargetContext
 from camera_discovery.sources import SourceEntry, SourcePolicy
-from camera_discovery.extraction.media import _dedupe_strings, _looks_like_hls
+from camera_discovery.extraction.media import _dedupe_strings, _looks_like_hls, _looks_like_rtsp
 
 
 class DirectorySourceProvider:

@@ -102,6 +102,7 @@ from camera_discovery.extraction.pagination import (
     _pagination_rows,
 )
 from camera_discovery.extraction.search import clean_ddg_result_url, parse_ddg_result_rows
+from camera_discovery.passive_intelligence import enrich_candidate_with_passive_intelligence
 
 
 class CandidateProcessingMixin:
@@ -127,6 +128,7 @@ class CandidateProcessingMixin:
                 camera_id = _camera_id_from_url(c.stream_url)
                 if camera_id:
                     c.source_metadata["camera_id"] = camera_id
+            enrich_candidate_with_passive_intelligence(c, self.source_policy)
         return candidates
 
     def _build_candidate_set(self, raw: list[CameraCandidate], unique: list[CameraCandidate]) -> CandidateSet:

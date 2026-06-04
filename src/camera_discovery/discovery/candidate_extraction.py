@@ -41,6 +41,7 @@ from camera_discovery.enrichment.location import (
     _valid_lat_lon,
 )
 from camera_discovery.extraction.browser import BrowserCaptureDecision, BrowserCaptureResult, PageDiscoverySignals, browser_backend_preflight
+from camera_discovery.extraction.endpoints import extract_endpoint_urls_from_text
 from camera_discovery.extraction.html import (
     _first_nonempty,
     _html_soup,
@@ -77,6 +78,7 @@ from camera_discovery.extraction.media import (
     IMAGE_RE,
     JSON_FEED_HINT_RE,
     M3U8_RE,
+    RTSP_RE,
     MAP_LAYER_API_RE,
     _candidate_media_type,
     _chunks,
@@ -85,6 +87,7 @@ from camera_discovery.extraction.media import (
     _float_or_none,
     _int_or_none,
     _looks_like_hls,
+    _looks_like_rtsp,
     _looks_like_image,
     _looks_like_non_camera_asset,
     _camera_id_from_url,
@@ -99,6 +102,10 @@ from camera_discovery.extraction.pagination import (
 )
 from camera_discovery.extraction.search import clean_ddg_result_url, parse_ddg_result_rows
 from camera_discovery.harvest.media_filter import canonical_media_url
+from camera_discovery.passive_intelligence import (
+    enrich_candidate_with_passive_intelligence,
+    http_metadata_from_response,
+)
 
 
 class CandidateExtractionMixin:
@@ -111,6 +118,11 @@ class CandidateExtractionMixin:
         if _looks_like_hls(url):
             candidate = self._candidate_from_stream(url, url, row, "direct_hls")
             candidate.source_metadata["media_type"] = "hls"
+            return [candidate]
+        if _looks_like_rtsp(url):
+            candidate = self._candidate_from_stream(url, url, row, "direct_rtsp")
+            candidate.source_metadata["media_type"] = "rtsp"
+            candidate.source_metadata["asset_role"] = "rtsp_stream"
             return [candidate]
         static_candidates, signals = self._extract_from_page_with_signals(url, row, client, phase=phase)
         decision = self._browser_capture_decision(row, static_candidates, signals, phase)
@@ -169,14 +181,20 @@ class CandidateExtractionMixin:
         owns_client = client is None
         client = client or self._make_client()
         try:
+            started_at = time.monotonic()
             resp = _get_with_retry(client, url)
             resp.raise_for_status()
             text = resp.text
             content_type = resp.headers.get("content-type", "")
+            row["http_metadata"] = http_metadata_from_response(resp, text=text, started_at=started_at)
             out = self._extract_from_response(url, row, text, content_type)
             if "html" in content_type.lower() or "<html" in text[:1000].lower():
                 out.extend(self._extract_from_linked_feeds(url, row, text, client))
             deduped = self._dedupe(out)
+            for candidate in deduped:
+                candidate.source_metadata.setdefault("source_http_metadata", row.get("http_metadata") or {})
+                candidate.source_metadata.setdefault("http_metadata", row.get("http_metadata") or {})
+                enrich_candidate_with_passive_intelligence(candidate, self.source_policy)
             signals = self._page_discovery_signals(url, row, text, content_type, resp.status_code, len(deduped))
             write_jsonl(self.logs_dir / "page_discovery_signals.jsonl", [signals.to_log_record(row, phase)], append=True)
             return deduped, signals
@@ -213,6 +231,7 @@ class CandidateExtractionMixin:
     def _extract_from_text(self, url: str, row: dict[str, str], text: str, *, include_image_regex: bool = True) -> list[CameraCandidate]:
         out: list[CameraCandidate] = []
         out.extend(self._extract_hls_from_text(url, row, text, "hls_regex"))
+        out.extend(self._extract_rtsp_from_text(url, row, text, "rtsp_regex"))
         if include_image_regex:
             out.extend(self._extract_images_from_text(url, row, text, "image_snapshot_regex"))
         return self._dedupe(out)
@@ -273,21 +292,27 @@ class CandidateExtractionMixin:
             absolute = urljoin(url, href)
             if JSON_FEED_HINT_RE.search(absolute) and not self.source_policy.is_blocked(absolute):
                 hrefs.append(absolute)
-        for raw in re.findall(r'["\']([^"\']*(?:\.json|/api/|/feed|/feeds|/layer|/layers|MapServer|FeatureServer|/query)[^"\']*)["\']', html, flags=re.I):
-            absolute = urljoin(url, raw)
-            if absolute.startswith("http") and not self.source_policy.is_blocked(absolute):
-                hrefs.append(absolute)
+        for endpoint in extract_endpoint_urls_from_text(html, url):
+            if not self.source_policy.is_blocked(endpoint):
+                hrefs.append(endpoint)
         out: list[CameraCandidate] = []
         endpoint_logs: list[dict[str, Any]] = []
         for feed_url in _dedupe_strings(_expand_structured_endpoint_urls(hrefs))[: self.config.max_structured_endpoints_per_page]:
             try:
+                started_at = time.monotonic()
                 resp = client.get(feed_url)
+                http_metadata = http_metadata_from_response(resp, text=resp.text if resp.status_code < 400 else None, started_at=started_at)
                 if resp.status_code >= 400:
-                    endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "status": resp.status_code, "candidates": 0})
+                    endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "status": resp.status_code, "http_metadata": http_metadata, "candidates": 0})
                     continue
                 before = len(out)
-                out.extend(self._extract_from_response(feed_url, row, resp.text, resp.headers.get("content-type", "")))
-                endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "status": resp.status_code, "candidates": len(out) - before})
+                extracted = self._extract_from_response(feed_url, {**row, "http_metadata": http_metadata}, resp.text, resp.headers.get("content-type", ""))
+                for candidate in extracted:
+                    candidate.source_metadata.setdefault("source_http_metadata", http_metadata)
+                    candidate.source_metadata.setdefault("http_metadata", http_metadata)
+                    enrich_candidate_with_passive_intelligence(candidate, self.source_policy)
+                out.extend(extracted)
+                endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "status": resp.status_code, "http_metadata": http_metadata, "candidates": len(out) - before})
             except Exception as exc:
                 endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "error": repr(exc), "candidates": 0})
                 continue
@@ -310,6 +335,25 @@ class CandidateExtractionMixin:
                     candidate.lat, candidate.lon = local_coords
                     candidate.coordinate_source = "proximity_text"
                 out.append(candidate)
+        return out
+
+
+    def _extract_rtsp_from_text(self, source_url: str, row: dict[str, str], text: str, method: str) -> list[CameraCandidate]:
+        out: list[CameraCandidate] = []
+        for match in RTSP_RE.finditer(text):
+            stream = canonical_media_url(match.group(0))
+            if not _looks_like_rtsp(stream) or self.source_policy.is_blocked(stream):
+                continue
+            candidate = self._candidate_from_stream(stream, source_url, row, method)
+            candidate.source_metadata["media_type"] = "rtsp"
+            candidate.source_metadata["asset_role"] = "rtsp_stream"
+            start = max(0, match.start() - 500)
+            end = min(len(text), match.end() + 500)
+            local_coords = self._extract_first_coord(text[start:end])
+            if local_coords:
+                candidate.lat, candidate.lon = local_coords
+                candidate.coordinate_source = "proximity_text"
+            out.append(candidate)
         return out
 
     def _extract_images_from_text(self, source_url: str, row: dict[str, str], text: str, method: str) -> list[CameraCandidate]:
@@ -472,6 +516,8 @@ class CandidateExtractionMixin:
             candidate.source_metadata["media_url"] = media_url
             if media_type == "hls":
                 candidate.source_metadata["stream_url"] = media_url
+            elif media_type == "rtsp":
+                candidate.source_metadata["asset_role"] = "rtsp_stream"
             elif media_type == "image_snapshot":
                 candidate.source_metadata["snapshot_url"] = media_url
             candidate.source_metadata["camera_id"] = _stable_camera_id(candidate.source_metadata, media_url) or candidate.source_metadata.get("camera_id")
@@ -508,6 +554,8 @@ class CandidateExtractionMixin:
             candidate.source_metadata["media_url"] = media_url
             if media_type == "hls":
                 candidate.source_metadata["stream_url"] = media_url
+            elif media_type == "rtsp":
+                candidate.source_metadata["asset_role"] = "rtsp_stream"
             elif media_type == "image_snapshot":
                 candidate.source_metadata["snapshot_url"] = media_url
             candidate.source_metadata["camera_id"] = _stable_camera_id(candidate.source_metadata, media_url) or candidate.source_metadata.get("camera_id")
@@ -525,14 +573,22 @@ class CandidateExtractionMixin:
             "source_scope_hint": row.get("source_scope_hint"),
             "source_notes": row.get("source_notes"),
             "query": row.get("query"),
+            "source_camera_evidence_score": row.get("source_camera_evidence_score"),
+            "source_camera_evidence_band": row.get("source_camera_evidence_band"),
+            "source_camera_evidence_reasons": row.get("source_camera_evidence_reasons"),
+            "source_signature_matches": row.get("source_signature_matches"),
+            "source_http_metadata": row.get("http_metadata"),
+            "http_metadata": row.get("http_metadata"),
         }
-        return CameraCandidate(
+        candidate = CameraCandidate(
             stream_url=stream_url,
             source_url=source_url,
             discovery_method=method,
             title=row.get("title") or row.get("source_name"),
-            source_metadata={k: v for k, v in metadata.items() if v},
+            source_metadata={k: v for k, v in metadata.items() if v not in (None, "", [], {})},
         )
+        enrich_candidate_with_passive_intelligence(candidate, self.source_policy)
+        return candidate
 
     def _extract_first_coord(self, text: str) -> tuple[float, float] | None:
         for match in COORD_RE.finditer(text):
