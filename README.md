@@ -271,3 +271,8 @@ Google dorking is guarded public-source discovery only and is enabled by default
 ## Passive camera intelligence
 
 The discovery and validation pipeline now includes a passive intelligence layer. It deterministically scores source rows and candidates, applies safe camera/media URL signature matching to already-discovered evidence, captures allowlisted HTTP metadata from requests the pipeline already makes, adds richer protocol labels, and writes explanation artifacts showing why sources and candidates mattered. Passive evidence affects prioritization and review only; it never bypasses `SOURCES.md`, target scope, media validation, or trusted-output rules. See `docs/passive_intelligence.md`.
+
+### International official-source discovery
+
+camera-discovery now includes country/language-aware official-source query expansion for public camera source discovery. Mexico and Ukraine are covered by regression tests, and unknown countries use ISO alpha-2 ccTLD hints where available. Unsafe direct device-interface dorks are intentionally excluded. See `docs/international_official_source_discovery.md`.
+

@@ -48,3 +48,5 @@ Notebook run-inspection cells should print `media_validation_dashboard.json` whe
 ## Passive intelligence artifact display
 
 The notebooks include a passive intelligence summary cell that reads source-code-generated artifacts after a run completes. The cell shows evidence-band counts, protocol-label counts, signature-family counts, and top evidence reasons. It does not patch source code or move notebook helpers into `src/`.
+
+- `camera_discovery_harvest_all_media_handoff_balanced_validation_test.ipynb` — all-media harvest handoff into balanced validation.

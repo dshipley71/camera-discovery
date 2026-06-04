@@ -359,3 +359,22 @@ def test_harvest_reports_sources_md_directory_usage(tmp_path, monkeypatch):
     assert (out / "logs" / "source_rows_summary.json").exists()
     handoff = json.loads((out / "harvest_handoff.json").read_text(encoding="utf-8"))
     assert handoff["source_rows"]["sources_file_used"] is True
+
+
+def test_notebook_smoke_imports_pin_repo_src_for_running_kernel():
+    import json
+
+    notebooks = [
+        Path("notebooks/camera_discovery_harvest_urls_test.ipynb"),
+        Path("notebooks/camera_discovery_live_test.ipynb"),
+        Path("notebooks/camera_discovery_harvest_hls_only_test.ipynb"),
+        Path("notebooks/camera_discovery_harvest_hls_handoff_full_validation_test.ipynb"),
+        Path("notebooks/camera_discovery_harvest_all_media_handoff_balanced_validation_test.ipynb"),
+        Path("notebooks/camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb"),
+        Path("notebooks/camera_discovery_pipeline_only_profiles_test.ipynb"),
+    ]
+    for notebook in notebooks:
+        data = json.loads(notebook.read_text(encoding="utf-8"))
+        source = "\n".join("".join(cell.get("source", [])) for cell in data.get("cells", []))
+        assert 'repo_src = Path.cwd() / "src"' in source
+        assert "sys.path.insert(0, str(repo_src))" in source
