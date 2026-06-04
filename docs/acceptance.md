@@ -75,3 +75,8 @@ For validation-stage changes, verify that:
 - `CAMERA_DISCOVERY_VALIDATION_WORKERS` controls bounded concurrency and is not a candidate cap;
 - plain progress and event progress expose validation candidate milestones;
 - no validation candidate cap is added to source code or notebooks.
+
+
+## Passive intelligence acceptance
+
+A valid implementation must score source rows and candidates deterministically, include evidence reasons, constrain signature matching to already-discovered public evidence, capture only allowlisted/redacted HTTP metadata, add passive protocol labels, and emit passive intelligence summaries. Evidence scores must never bypass blocked-source policy, target scope, validation, or trust gates. No active scanning, RTSP brute forcing, credential probing, packet capture, or vulnerability-oriented behavior is allowed.

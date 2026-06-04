@@ -211,14 +211,14 @@ The artifacts package must contain a portable target-geometry GeoJSON file. Use 
 
 For each resolved target:
 
-- if Nominatim returned a usable polygon/multipolygon, write that border as the feature geometry and set properties such as `geometry_role=primary` and `geometry_source=nominatim_polygon`;
-- if no primary border is available but Nominatim returned a usable `boundingbox`, write a rectangle polygon from that bbox and set `geometry_role=fallback` and `geometry_source=nominatim_bbox`;
-- if neither Nominatim geometry nor Nominatim bbox is available, write the generic padded box only when existing policy allows it, and set `geometry_role=last_fallback`;
-- include useful properties such as `target_id`, `target_label`, `scope_type`, `nominatim_bbox`, `effective_bbox`, `bbox_verified`, `bbox_padding_applied`, and geocoder display/result metadata when available.
+- if the resolver populated `primary_geometry_geojson`, write that geometry and set `geometry_role=primary`;
+- if no primary geometry is available but the resolver populated `fallback_geometry_bbox`, write a rectangle polygon from that explicit fallback bbox and set `geometry_role=fallback`;
+- if neither primary nor fallback geometry is available but the resolver populated `last_fallback_geometry_bbox`, write that explicit last-fallback rectangle and set `geometry_role=last_fallback`;
+- include only explicit target-geometry artifact properties such as `target_id`, `target_label`, `scope_type`, `geometry_role`, `geometry_source`, `primary_geometry_source`, `fallback_geometry_source`, `last_fallback_geometry_source`, `bbox_verified`, and `geometry_status`. Keep `nominatim_bbox`, `effective_bbox`, `bbox`, and geocoder point coordinates in diagnostic logs, not as artifact geometry sources.
 
-`review_artifacts.zip` must include `target_geometry.geojson` whenever it is written. For a California query with Nominatim border geometry available, the geometry in this artifact must be the California border polygon/multipolygon, not the rectangular bbox. The rectangular bbox should remain available in properties and diagnostic logs for search bounds/fallback display.
+`review_artifacts.zip` must include `target_geometry.geojson` whenever it is written. For a California query with Nominatim border geometry available, the resolver should place the verified border in `primary_geometry_geojson`; the artifact writer must then use that explicit primary field.
 
-Strict artifact emission rule: do not emit target geometry artifacts from inferred legacy fields, opportunistic resolver state, or backward-compatible assumptions. `target_geometry.geojson` features may be emitted only from explicit `primary`, `fallback`, or `last_fallback` geometry fields produced by the resolver. If those explicit fields are missing, do not synthesize a feature from `bbox`, `effective_bbox`, or other convenience fields. Log that no explicit target geometry was available instead of guessing.
+Strict artifact emission rule: do not emit target geometry artifacts from inferred legacy fields, opportunistic resolver state, or backward-compatible assumptions. `target_geometry.geojson` features may be emitted only from explicit `primary_geometry_geojson`, `fallback_geometry_bbox`, or `last_fallback_geometry_bbox` fields produced by the resolver. If those explicit fields are missing, do not synthesize a feature from `bbox`, `effective_bbox`, `nominatim_bbox`, `polygon`, geocoder point coordinates, or other convenience fields. Log that no explicit target geometry was available instead of guessing.
 
 Do not add assumptions, helper workflows, notebook bootstrap behavior, artifact branches, or compatibility behavior that the prompt did not explicitly require or that is not confirmed by repository evidence. When in doubt, preserve existing behavior and document the uncertainty rather than adding unrequested behavior.
 
@@ -406,7 +406,7 @@ Required source behavior:
 ```
 
 - Candidate scope checks should use the verified primary polygon/multipolygon when available. Use the rectangular fallback bbox only when no primary polygon exists. Use last-fallback generic geometry only as review-only fallback according to existing trust policy.
-- Map rendering should add `L.geoJSON(...)` border-only overlays for primary polygons/multipolygons. Draw `L.rectangle(...)` only when the rectangle is actually the fallback geometry, or as a dashed effective search extent for a padded small target. Do not fill target geometry overlays.
+- Map rendering should add `L.geoJSON(...)` border-only overlays for explicit primary polygons/multipolygons. Draw `L.rectangle(...)` only from explicit `fallback_geometry_bbox` or `last_fallback_geometry_bbox`. Do not draw dashed effective search extents or geocoder point overlays as target geometry artifacts. Do not fill target geometry overlays.
 - For small precise locations, preserve the Nominatim polygon if present, preserve the Nominatim bbox as fallback, and separately compute the padded effective search bbox when needed. Do not replace a real polygon with only a generic square.
 - Add regression tests that do not perform live network calls:
   - accepted Nominatim polygon/multipolygon becomes primary geometry;

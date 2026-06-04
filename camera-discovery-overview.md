@@ -57,3 +57,8 @@ Coordinate-bearing, deterministically in-scope candidates are ordered ahead of u
 Static extraction runs first. Browser capture is optional, budgeted, and preflighted. Playwright is the default backend. CloakBrowser is selected with `--browser-backend cloakbrowser` or `CAMERA_DISCOVERY_BROWSER_BACKEND=cloakbrowser`.
 
 If the backend is missing or unusable, diagnostics are written and repeated page-level failures should be avoided. Browser success must never be faked.
+
+
+## Passive Intelligence
+
+The application now includes passive camera intelligence to rank and explain source rows and candidates. It scores deterministic evidence, applies safe URL/path/media signatures to discovered content, captures redacted HTTP metadata from existing requests, and labels protocols such as HLS, RTSP, MJPEG, image snapshot, DASH, WebRTC, RTMP, SRT, and MP4. These signals improve prioritization and analyst review only; they do not bypass scope, validation, source policy, or trust gates.

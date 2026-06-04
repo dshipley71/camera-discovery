@@ -119,3 +119,16 @@ python -m mypy src/camera_discovery/core src/camera_discovery/llm
 ```
 
 Browser dependencies are optional. Do not pretend browser-dependent behavior succeeded when the backend was missing.
+
+
+## Media playlist, RTSP, dashboard, and dorking guardrails
+
+- Playlist/TXT exports are derived convenience artifacts only. They must not promote candidates to trusted output or bypass source-policy, scope, validation, geometry, or private-network checks.
+- RTSP support is limited to explicit user-supplied URLs or RTSP/RSTS URLs extracted verbatim from allowed public source content. Do not synthesize RTSP URLs, probe default/common paths, enumerate ports, infer vendors, or test credentials.
+- `media_validation_dashboard.json` counts must come from actual candidate/validation state.
+- Google dorking support is bounded public-source discovery only. Do not add dorks for exposed device UIs, admin pages, default credentials, vendor fingerprints, RTSP hunting, private-network hosts, or blocked internet-asset indexes.
+
+
+## Passive intelligence regeneration requirement
+
+Agent-generated implementations must include the passive intelligence layer under `src/camera_discovery/passive_intelligence/` or an equivalent cohesive package. The layer may score and label already-discovered evidence only. It must not add active scanning, host probing, RTSP brute-force path generation, credential probing, packet capture, vulnerability enrichment, or security-index integrations. Evidence score may prioritize extraction/validation/review order, but source policy, target scope, validation, and trust gates remain authoritative.

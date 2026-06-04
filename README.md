@@ -142,6 +142,7 @@ Supported harvest media filters include:
 ```text
 all
 hls / .m3u8
+rtsp / rtsps / rtsp:// / rtsps://
 image / image_snapshot / .jpg / .jpeg / .png / .webp
 mjpeg / .mjpg / .mjpeg
 video / video_file / .mp4 / .webm / .mov / .m4v
@@ -254,3 +255,19 @@ python -m mypy src/camera_discovery/core src/camera_discovery/llm
 ```
 
 GitHub Actions in `.github/workflows/tests.yml` runs compile, Ruff, pytest, and a MyPy smoke check on pushes/PRs for Python 3.11 and 3.12.
+
+
+## Media playlists, RTSP, dashboard, and guarded dorking
+
+Normal `camera-discovery run` outputs now include deterministic playlist convenience views under `playlists/` and a top-level `media_validation_dashboard.json`. Playlist files are derived from the current candidate/trust/validation state; they do not promote a camera to trusted inventory and they still respect `SOURCES.md`, block patterns, and private/local URL rejection. Typical playlist files include `trusted_media.m3u`, `trusted_media.txt`, `untrusted_review_media.m3u`, `hls_candidates.m3u`, `rtsp_candidates.m3u`, `live_or_reachable_media.m3u`, `dead_or_restricted_media.txt`, and `image_snapshots.txt`.
+
+RTSP support is limited to explicit `rtsp://` or `rtsps://` URLs supplied by the user or extracted verbatim from allowed public source pages/endpoints. The application does not synthesize RTSP URLs, probe common paths, enumerate ports, or test credentials. RTSP candidates are classified as `media_type=rtsp`; validation uses `ffprobe` when available and returns statuses such as `active_rtsp_verified`, `auth_required_rtsp`, `offline_rtsp`, `dead_rtsp`, or `rtsp_validation_unavailable`. Browser maps show RTSP as an external-player URL rather than attempting hls.js playback.
+
+Harvest mode can filter RTSP with `--media rtsp` or include it with `--media stream`; it remains extraction-only and writes harvest playlist summaries when playable media records are present.
+
+Google dorking is guarded public-source discovery only and is enabled by default. Disable it with `CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false` or cap it with `CAMERA_DISCOVERY_MAX_DORK_QUERIES`. Generated operator queries are bounded, target-aware, camera-intent-aware, prefer `site:` restrictions to allowed `SOURCES.md` domains, and are rechecked by deterministic block policy after search results return. The code forbids dorks for device admin/login pages, default credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset indexes.
+
+
+## Passive camera intelligence
+
+The discovery and validation pipeline now includes a passive intelligence layer. It deterministically scores source rows and candidates, applies safe camera/media URL signature matching to already-discovered evidence, captures allowlisted HTTP metadata from requests the pipeline already makes, adds richer protocol labels, and writes explanation artifacts showing why sources and candidates mattered. Passive evidence affects prioritization and review only; it never bypasses `SOURCES.md`, target scope, media validation, or trusted-output rules. See `docs/passive_intelligence.md`.

@@ -27,14 +27,24 @@ Handoff notebooks use `handoff-only` by default so native discovery is disabled 
 
 Target-resolution diagnostics preserve both the accepted Nominatim bounding box and the effective bbox used by downstream scope checks. For very small precise targets such as buildings, monuments, or addresses, the effective bbox may be padded to the minimum practical extent while the original Nominatim bbox and padding reason remain in `logs/target_resolution*.json`.
 
-Generated notebook maps overlay target bounding boxes as border-only rectangles and include geocoder target points alongside the camera coordinate markers from trusted/untrusted GeoJSON outputs. This makes it easier to audit whether discovered camera coordinates fall inside the Nominatim-derived target geometry.
+Generated notebook maps overlay target geometry only when the resolver emitted explicit `primary_geometry_geojson`, `fallback_geometry_bbox`, or `last_fallback_geometry_bbox` fields. They do not synthesize target overlays from legacy `bbox`, `effective_bbox`, `nominatim_bbox`, or geocoder point coordinates.
 
 ## Nominatim target geometry overlays
 
 The notebooks regenerate maps from the installed repository `camera_discovery` package and inspect target-resolution logs for the Nominatim geometry hierarchy:
 
-1. Primary geometry: Nominatim polygon or multipolygon (`target_geometry_geojson` / `primary_geometry_source=nominatim_polygon`).
+1. Primary geometry: Nominatim polygon or multipolygon (`primary_geometry_geojson` / `primary_geometry_source=nominatim_polygon`).
 2. Fallback geometry: Nominatim rectangular bbox (`fallback_geometry_bbox` / `fallback_geometry_source=nominatim_bbox`).
 3. Last fallback geometry: generic padded bbox only when no usable Nominatim polygon or bbox exists (`last_fallback_geometry_bbox`).
 
-Map cells should show primary target borders with border-only GeoJSON overlays and show geocoder target points alongside camera coordinate points. Rectangular overlays are fallback-only, except dashed effective search extents for padded small locations.
+Map cells should show primary target borders with border-only GeoJSON overlays. Rectangular overlays are fallback-only. Geocoder target points and dashed effective search extents are diagnostics, not target-geometry overlays.
+
+
+## Playlist, dashboard, and dorking inspection
+
+Notebook run-inspection cells should print `media_validation_dashboard.json` when present, list `playlists/` outputs, and show high-level `logs/google_dorking_summary.json` counts when that optional feature is enabled. RTSP examples should remain optional/commented; browsers do not play RTSP with hls.js, so RTSP links are intended for external players such as VLC or another authorized RTSP-capable client.
+
+
+## Passive intelligence artifact display
+
+The notebooks include a passive intelligence summary cell that reads source-code-generated artifacts after a run completes. The cell shows evidence-band counts, protocol-label counts, signature-family counts, and top evidence reasons. It does not patch source code or move notebook helpers into `src/`.

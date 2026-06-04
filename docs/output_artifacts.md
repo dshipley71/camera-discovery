@@ -82,9 +82,9 @@ logs/search_results.jsonl
 2. **Fallback geometry**: rectangular Nominatim `boundingbox`, represented as a GeoJSON polygon, only when no usable Nominatim border geometry is available.
 3. **Last fallback geometry**: generic padded bbox only when no usable Nominatim polygon/multipolygon or Nominatim bbox is available and existing review-only policy permits fallback geometry.
 
-Feature properties include target identifiers and provenance fields such as `geometry_role`, `geometry_source`, `nominatim_bbox`, `effective_bbox`, `bbox_verified`, and padding diagnostics when applicable. `review_artifacts.zip` includes `target_geometry.geojson` whenever it is written.
+Feature properties include target identifiers and explicit geometry provenance fields such as `geometry_role`, `geometry_source`, `primary_geometry_source`, `fallback_geometry_source`, `last_fallback_geometry_source`, `bbox_verified`, and geometry status. `review_artifacts.zip` includes `target_geometry.geojson` only when at least one explicit target geometry feature is written.
 
-Target geometry features are emitted only from explicit primary, fallback, or last-fallback geometry. The artifact writer must not synthesize features from legacy `bbox`, `effective_bbox`, or other convenience fields when those explicit geometry fields are absent.
+Target geometry features are emitted only from explicit primary, fallback, or last-fallback geometry fields: `primary_geometry_geojson`, `fallback_geometry_bbox`, or `last_fallback_geometry_bbox`. The artifact writer and map overlay helper must not synthesize features from legacy/convenience fields such as `bbox`, `effective_bbox`, `nominatim_bbox`, `polygon`, LLM hints, or geocoder point coordinates when those explicit geometry fields are absent.
 
 `logs/target_resolution.json`, `logs/target_resolution_all.json`, and `logs/targets/<target_id>/target_resolution.json` retain detailed resolver diagnostics. `logs/target_geometry_geojson_status.json` summarizes whether the portable target-geometry artifact was written and how many primary/fallback/last-fallback features it contains.
 
@@ -189,3 +189,60 @@ These files can be very large and should be used mainly for debugging.
 For media-filtered harvests, normal `run --harvest-input harvest_handoff.json` loads filtered media records from `camera_urls.jsonl` by default. For all-media harvests, it may load structured inventory.
 
 `run --harvest-input` writes candidate summaries with separate `native_discovery`, `harvest_input`, and `combined` sections. In the default `--harvest-input-mode handoff-only` path, native discovery is disabled and handoff candidate counts are bounded by the selected handoff records/assets and resolved target count. In `--harvest-input-mode seed`, the harvest input is merged with normal native discovery and may produce many additional candidates. The normal pipeline treats all loaded harvest records as untrusted data and still applies target resolution, deterministic scope gates, validation, and trust rules.
+
+
+## Playlist exports and media validation dashboard
+
+Normal `camera-discovery run` writes playlist and text outputs under `playlists/` after deterministic validation/output classification:
+
+```text
+playlists/trusted_media.m3u
+playlists/trusted_media.txt
+playlists/untrusted_review_media.m3u
+playlists/untrusted_review_media.txt
+playlists/hls_candidates.m3u
+playlists/hls_candidates.txt
+playlists/rtsp_candidates.m3u
+playlists/rtsp_candidates.txt
+playlists/live_or_reachable_media.m3u
+playlists/live_or_reachable_media.txt
+playlists/dead_or_restricted_media.txt
+playlists/image_snapshots.txt
+logs/playlist_export_summary.json
+```
+
+TXT files contain one URL per line. M3U files use extended M3U metadata for playable stream-style media. Image snapshots are written to TXT only because they are refreshing image URLs, not video playlists. `dead_or_restricted_media.txt` is diagnostic only and intentionally has no `.m3u` companion. Playlist eligibility never changes trust: `trusted_media.*` contains only candidates already eligible for trusted output, while review playlists remain untrusted audit conveniences.
+
+Normal runs also write `media_validation_dashboard.json` at the run-output top level and `logs/media_validation_dashboard.json`. Required top-level fields are:
+
+```json
+{
+  "total_candidates": 0,
+  "validated": 0,
+  "trusted": 0,
+  "untrusted_review": 0,
+  "dead": 0,
+  "restricted": 0,
+  "not_validated": 0
+}
+```
+
+Counts are derived from real candidate rows and validation statuses, not placeholders. Optional nested fields include `by_media_type`, `by_validation_status`, and `outputs`. `RUN_EXPLANATION.md`, `logs/run_explanation.json`, and `review_artifacts.zip` include or reference the dashboard and playlist summary.
+
+Harvest mode remains extraction-only. When harvested media records exist, it writes:
+
+```text
+playlists/harvested_media.m3u
+playlists/harvested_media.txt
+playlists/harvested_hls.m3u
+playlists/harvested_hls.txt
+playlists/harvested_rtsp.m3u
+playlists/harvested_rtsp.txt
+playlists/harvested_image_snapshots.txt
+logs/playlist_export_summary.json
+```
+
+
+## Passive intelligence artifacts
+
+Normal discovery runs can write passive intelligence artifacts under `logs/`: `passive_intelligence_summary.json`, `source_row_evidence_summary.jsonl`, `candidate_evidence_summary.jsonl`, and `candidate_priority_explanation.jsonl`. `media_validation_dashboard.json` includes a `passive_intelligence` section with evidence bands, protocol label counts, signature family counts, and top evidence reasons. Candidate CSV and GeoJSON properties include compact evidence score, band, protocol, HTTP status/content type/final URL, and why-candidate-mattered fields.
