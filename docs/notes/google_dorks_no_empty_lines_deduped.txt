@@ -1,0 +1,108 @@
+inurl:LvApplinurl:index.html
+intitle:"snc-rz30" (Commonly targets Sony network cameras)
+intitle:"Toshiba Network Camera"
+intitle:"EvoCam"
+inurl:/view/index.shtml
+inurl:/view/view.shtml
+inurl:viewerframe?mode=
+intitle:"Live View / - AXIS"
+inurl:axis-cgi/jpg
+inurl:currenttime inurl:top.htm
+inurl:/view.shtml
+inurl:"lvappl.htm"
+inurl:”CgiStart?page=”
+intitle:”Live View/ — AXIS”
+inurl:iview/view.shtml
+inurl:ViewerFrame?M0de=
+inurl:ViewerFrame?M0de=Refresh
+intitle:Live View / AXIS | inurl:view/view.shtml^
+inurl:ViewerFrame?Mode=
+inurl:ViewerFrame?Mode=Refresh
+inurl:view/index.shtml
+inurl:view/view.shtml
+liveapplet
+intitle:liveapplet
+allintitle:Network Camera NetworkCamera
+intitle:axis intitle:video server
+intitle:liveapplet inurl:LvAppl
+intitle:EvoCam inurl:webcam.html
+intitle:Live NetSnap Cam-Server feed
+intitle:Live View / AXIS 206M
+intitle:Live View / AXIS 206W
+intitle:Live View / AXIS 210″
+inurl:indexFrame.shtml Axis
+intitle:start inurl:cgistart
+intitle:WJ-NT104 Main Page
+intitle:snc-z20 inurl:home/
+intitle:snc-cs3 inurl:home/
+intitle:snc-rz30 inurl:home/
+intitle:sony network camera snc-p1″
+viewnetcam.com
+intitle:Toshiba Network Camera user login
+intitle:i-Catcher Console Web Monitor
+inurl:"CgiStart?page="
+inurl:camctrl.cgi
+inurl:"view/index.shtml"
+intitle:"IP CAMERA Viewer" intext:"setting |Client setting"
+intitle:"Device(" AND intext:"Network Camera" AND "language:" "AND "Password"
+intitle:"webcam 7" inurl:"/gallery.html"
+intitle:"yawcam" inurl:":8081"
+intitle:"iGuard Fingerprint Security System"
+(intitle:MOBOTIX intitle:PDAS) | (intitle:MOBOTIX intitle:Seiten) | (inurl:/pda/index.html +camera)
+intitle:"Edr1680 remote viewer"
+intitle:"NetCam Live Image" -.edu -.gov -johnny.ihackstuff.com
+intitle:"INTELLINET" intitle:"IP Camera Homepage"
+intitle:"WEBDVR" -inurl:product -inurl:demo
+intitle:"Middle frame of Videoconference Management System" ext:htm
+tilt intitle:"Live View / - AXIS" | inurl:view/view.shtml
+inurl:"MultiCameraFrame?Mode=Motion"
+VB Viewer inurl:/viewer/live/ja/live.html
+intitle:"IP CAMERA Viewer" intext:"setting | Client setting"
+intitle:"Device(" AND intext:"Network Camera" AND "language:" AND "Password"
+intitle:"webcam 7" inurl:'/gallery.html'
+intitle:"Yawcam" inurl:8081
+inurl:control/camerainfo
+intitle:"webcamXP 5" -download
+inurl:"/view/view.shtml?id="
+inurl:/view/viewer_index.shtml
+intext:"powered by webcamXP 5"
+intitle:webcam 7 inurl:8080 -intext:8080
+intitle:"Live View / - AXIS" | inurl:view/view.shtml OR inurl:view/indexFrame.shtml | intitle:"MJPG Live Demo" | "intext:Select preset position"
+allintitle: Axis 2.10 OR 2.12 OR 2.30 OR 2.31 OR 2.32 OR 2.33 OR 2.34 OR 2.40 OR 2.42 OR 2.43 "Network Camera "
+allintitle:Edr1680 remote viewer
+allintitle: EverFocus | EDSR | EDSR400 Applet
+allintitle: EDR1600 login | Welcome
+intitle:"BlueNet Video Viewer"
+intitle:"SNC-RZ30" -demo
+inurl:cgi-bin/guestimage.html
+(intitle:(EyeSpyFX|OptiCamFX) "go to camera")|(inurl:servlet/DetectBrowser)
+intitle:"Veo Observer XT" -inurl:shtml|pl|php|htm|asp|aspx|pdf|cfm -intext:observer
+intitle:"AXIS 240 Camera Server" intext:"server push" -help
+intitle:"--- VIDEO WEB SERVER ---" intext:"Video Web Server" "Any time & Any where" username password
+intitle:HomeSeer.Web.Control | Home.Status.Events.Log
+intitle:"supervisioncam protocol"
+intitle:"active webcam page"
+intitle:”Live View / - AXIS” | inurl:view/view.shtml^
+inurl:axis-cgi/mjpg (motion-JPEG)
+inurl:view/indexFrame.shtml
+liveap�plet
+intitle:”live view” intitle:axis
+allintitle:”Network Cam�era NetworkCamera”
+intitle:axis intitle:”video server”
+intitle:”EvoCam” inurl:”webcam.html”
+intitle:”Live Net�Snap Cam-Server feed”
+intitle:”Live View / - AXIS”
+intitle:”Live View / - AXIS 206M”
+intitle:”Live View / - AXIS 206W”
+intitle:”Live View / - AXIS 210?
+inurl:”MultiCameraFrame?Mode=Motion”
+intitle:”WJ-NT104 Main Page”
+intext:”MOBOTIX M1? intext:”Open Menu”
+intext:”MOBOTIX M10? intext:”Open Menu”
+intext:”MOBOTIX D10? intext:”Open Menu”
+intitle:”sony network camera snc-p1?
+intitle:”sony network camera snc-m1?
+site:.viewnetcam.com �www?.viewnet?cam?.com
+intitle:”Toshiba Network Camera” user login
+intitle:”netcam live image”
+intitle:”i-Catcher Console - Web Monitor”
