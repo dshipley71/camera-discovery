@@ -31,6 +31,7 @@ from camera_discovery.extraction.media import _dedupe_strings, _looks_like_non_c
 from camera_discovery.extraction.pagination import _expand_structured_endpoint_urls, _pagination_rows
 from camera_discovery.extraction.search import parse_ddg_result_rows
 from camera_discovery.discovery.search.dispatcher import SearchDispatcher
+from camera_discovery.discovery.search_dispatch import _is_google_dork_query as _is_harvest_dork_query
 from camera_discovery.extraction.browser import browser_backend_preflight
 from camera_discovery.harvest.json_records import (
     count_json_records,
