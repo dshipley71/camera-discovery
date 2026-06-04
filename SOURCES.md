@@ -18,26 +18,6 @@ Blocked sources are a global deny policy and are respected by `blind`, `director
 | EarthTV | https://earthtv.com | site | global | true |  |
 | GeoWebcams | https://www.geowebcams.com | site | global | true |  |
 | CamStreamer | https://camstreamer.com/live | site | global | true |  |
-| ipcamlive | https://ipcamlive.com | site | global | true |  |
-| iplivecam | https://iplivecam.com | site | global | true |  |
-| iplivecams | https://iplivecams.com | site | global | true |  |
-| iwcpinc | https://iwcpinc.com | site | global | true |  |
-| liveworldwebcams | https://liveworldwebcams.com | site | global | true |  |
-| myearthcam | https://myearthcamcam.com | site | global | true |  |
-| nizuc | https://nizuc.com | site | global | true |  |
-| opentopia | https://opentopia.com | site | global | true |  |
-| puentesfronterizos.gob.mx | https://puentesfronterizos.gob.mx | site | global | true |  |
-| sammo.icmyl.unam.mx | https://sammo.icmyl.unam.mx | site | global | true |  |
-| slshotels | https://slshotels.com | site | global | true |  |
-| streamlock.net | https://streamlock.net | site | global | true |  |
-| terminaltcp | https://terminaltcp.com | site | global | true |  |
-| trafficland | https://trafficland.com | site | global | true |  |
-| villapalmarcancun | https://villapalmarcancun.com | site | global | true |  |
-| webcamhopper | https://webcamhopper.com | site | global | true |  |
-| webcamsdemexico | https://webcamsdemexico.com | site | global | true |  |
-| worldlivecamera | https://worldlivecamera.com | site | global | true |  |
-| worldviewstream | https://worldviewstream.com | site | global | true |  |
-| youtube | https://youtube.com | site | global | true |  |
 
 ## Blocked Sources
 

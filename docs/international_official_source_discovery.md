@@ -5,7 +5,7 @@ This repository keeps the public-camera discovery workflow location-agnostic.  I
 ## Implemented
 
 - Country/language-aware official-source query expansion in `camera_discovery.discovery.official_source_queries`.
-- Search profiles in `camera_discovery.discovery.locations` for country code, ccTLD, official-domain, and localized public-camera terms.
+- Shared search profiles in `camera_discovery.geo.location_profiles` for country code, ccTLD, official-domain, country aliases, and localized public-camera terms. Discovery imports them through `camera_discovery.discovery.location_profiles`; enrichment imports shared alias helpers directly from the neutral geo module.
 - Mexico test coverage for `.gob.mx` / `.mx` plus Spanish terms such as `cámaras en vivo`, `cámaras viales`, `cámaras de tráfico`, and `monitoreo vial`.
 - Ukraine test coverage for `.gov.ua` / `.ua` plus Ukrainian terms such as `камери онлайн`, `вебкамери`, and `камери дорожнього руху`.
 - Generic country-code fallback using ISO alpha-2 codes for ccTLD-oriented source discovery.
@@ -46,3 +46,19 @@ camera-discovery harvest-urls "Mexico City, Mexico public cameras" \
 ```
 
 The normal validation run still performs target resolution, scope checks, validation, trust separation, and output writing. The all-media harvest is intentionally broad and should not be treated as trusted output.
+
+## Expanded country profiles
+
+The shared profile module now includes first-batch and second-batch country profiles, additional Asian profiles, Arabic-speaking country profiles, and Russia. These profiles provide safe public-source search hints only: official/public site scopes, localized camera terms, localized traffic/weather/airport/beach/harbor/city terms, and country aliases/codes.
+
+The profiles remain location-agnostic. Mexico, Japan, Egypt, Russia, or any other profile does not bypass target resolution, geocoding, scope validation, trust gates, validation, or artifact rules. The profile only improves source-discovery query generation.
+
+Implemented profile groups include:
+
+- First batch: Canada, Australia, New Zealand, Brazil, Chile, Argentina, Colombia, Spain, France, Germany, Japan, South Korea, Taiwan, Singapore, India.
+- Second batch: Netherlands, Norway, Sweden, Finland, Poland, Italy, Portugal, South Africa, United Arab Emirates, Israel, Thailand, Indonesia, Philippines, Malaysia.
+- Additional Asian profiles: Vietnam, Hong Kong, China, Pakistan, Bangladesh, Sri Lanka, Nepal, Saudi Arabia, Qatar, Kazakhstan, Turkey.
+- Arabic-speaking profiles: Algeria, Bahrain, Comoros, Djibouti, Egypt, Iraq, Jordan, Kuwait, Lebanon, Libya, Mauritania, Morocco, Oman, Palestine, Qatar, Saudi Arabia, Somalia, Sudan, Syria, Tunisia, United Arab Emirates, Yemen.
+- Russia: Russia / Russian Federation with Russian-language public camera terms and `.gov.ru` / `.ru` search scopes.
+
+Unsafe device-interface dorks remain excluded. The expanded safe-dork validator accepts multilingual public camera and traffic terms, but still blocks direct device/admin/vendor/login/default-credential patterns.

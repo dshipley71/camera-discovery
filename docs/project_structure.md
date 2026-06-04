@@ -52,7 +52,9 @@ camera_discovery.cli
 | `harvest/records.py` | Harvest URL record creation, dedupe, search query construction. |
 | `harvest/json_records.py` | Harvest-specific JSON metadata promotion. |
 | `harvest/outputs.py` | Harvest output summary/source-row summary helpers. |
-| `enrichment/location.py` | Coordinate and location-evidence helpers. |
+| `geo/location_profiles.py` | Shared country/profile aliases, country codes, official public-source scopes, and localized safe camera terms. |
+| `discovery/location_profiles.py` | Discovery-facing location profile imports for safe source-query expansion. |
+| `enrichment/location_evidence.py` | Coordinate and location-evidence helpers. |
 | `sources/` | Source registry and global block policy. |
 | `llm/` | Provider factory and provider-specific clients. |
 | `utils/` | File IO and GeoJSON/map rendering. |
