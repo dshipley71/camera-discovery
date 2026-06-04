@@ -36,3 +36,13 @@ Review-only output may include coordinate-bearing untrusted candidates with expl
 ## Multi-location requirement
 
 Merged outputs must preserve `target_id`, `target_label`, and `target_index` for every feature and table row.
+
+
+## Passive intelligence integration
+
+Validation and output writing should preserve passive evidence fields in validation results, candidate tables, GeoJSON, dashboards, and review artifact zips. Validation HTTP metadata may be attached from HTTP requests already made for HLS or image snapshot validation. Evidence scores are prioritization/explanation signals only; final trust remains deterministic.
+
+
+## Strict target geometry artifact rule
+
+Artifacts and map overlays that represent target geometry must be emitted only from explicit resolver geometry hierarchy fields: `primary_geometry_geojson`, `fallback_geometry_bbox`, or `last_fallback_geometry_bbox`. Do not synthesize artifact geometry from `bbox`, `effective_bbox`, `nominatim_bbox`, `polygon`, LLM hints, or geocoder point coordinates. Do not add unconfirmed fields or behavior when repository evidence is ambiguous; implement the narrow requested behavior and document limitations.

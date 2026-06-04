@@ -72,3 +72,8 @@ candidates/<target_id>/agentic_candidates.jsonl
 candidates/<target_id>/agentic_candidates_unique.jsonl
 logs/targets/<target_id>/candidate_discovery_summary.json
 ```
+
+
+## Passive source and candidate evidence
+
+Candidate discovery must enrich source rows and candidates with passive camera evidence score, evidence band, reasons, safe signature matches, protocol label, and HTTP metadata when already available from normal fetches. This enrichment is deterministic and may be used to sort source rows or candidate queues, but it must never generate new vendor-path URLs, probe hosts, bypass blocked sources, or promote trust.
