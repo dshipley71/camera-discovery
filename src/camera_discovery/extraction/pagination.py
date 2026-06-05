@@ -38,22 +38,15 @@ def _looks_like_paginated_directory_url(url: str) -> bool:
     return any(token in lower for token in ("/camera", "/cameras", "/traffic", "/category/", "/livet", "webcam", "cctv"))
 
 def _expand_structured_endpoint_urls(urls: list[str]) -> list[str]:
-    expanded: list[str] = []
-    for url in urls:
-        expanded.append(url)
-        parsed = urlparse(url)
-        path = parsed.path.rstrip("/")
-        if re.search(r"/(?:MapServer|FeatureServer)(?:/\d+)?$", path, re.I):
-            base = parsed._replace(query="", fragment="").geturl().rstrip("/")
-            if re.search(r"/(?:MapServer|FeatureServer)$", path, re.I):
-                # Try a small generic range of layer IDs. Non-existing layers are harmless and logged.
-                for layer in range(0, 8):
-                    expanded.append(f"{base}/{layer}/query?where=1%3D1&outFields=*&returnGeometry=true&f=json")
-            else:
-                expanded.append(f"{base}/query?where=1%3D1&outFields=*&returnGeometry=true&f=json")
-        elif "/query" in path.casefold() and not parsed.query:
-            expanded.append(parsed._replace(query="where=1%3D1&outFields=*&returnGeometry=true&f=json").geturl())
-    return _dedupe_strings(expanded)
+    """Compatibility URL expander for explicitly linked structured endpoints.
+
+    This function intentionally does not enumerate guessed ArcGIS layer IDs.
+    Metadata-driven expansion lives in ``extraction.endpoints`` and requires a
+    caller-provided fetch function so it can obey source-policy and HTTP budgets.
+    """
+    from camera_discovery.extraction.endpoints import expand_structured_endpoint_refs_from_metadata
+
+    return [ref.url for ref in expand_structured_endpoint_refs_from_metadata(urls, fetch_json=None, max_endpoints=len(urls) or 1)]
 
 def _asset_host_discovery_urls(host: str, target: TargetContext) -> list[str]:
     scheme_host = f"https://{host}"

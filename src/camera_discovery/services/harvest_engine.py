@@ -24,11 +24,16 @@ from camera_discovery.core.models import (
     HarvestedUrlRecord,
     RunConfig,
 )
-from camera_discovery.extraction.endpoints import extract_endpoint_urls_from_text
+from camera_discovery.extraction.endpoints import (
+    StructuredEndpointRef,
+    expand_structured_endpoint_refs_from_metadata,
+    extract_structured_endpoint_refs_from_text,
+    linked_script_urls_from_html,
+)
 from camera_discovery.extraction.html import _html_soup
 from camera_discovery.extraction.http import _get_with_retry
 from camera_discovery.extraction.media import _dedupe_strings, _looks_like_non_camera_asset
-from camera_discovery.extraction.pagination import _expand_structured_endpoint_urls, _pagination_rows
+from camera_discovery.extraction.pagination import _pagination_rows
 from camera_discovery.extraction.search import parse_ddg_result_rows
 from camera_discovery.discovery.search.dispatcher import SearchDispatcher
 from camera_discovery.discovery.search_dispatch import _is_google_dork_query as _is_harvest_dork_query
@@ -590,24 +595,64 @@ class CameraUrlHarvestEngine:
             absolute = urljoin(source_url, raw)
             if JSON_ENDPOINT_HINT_RE.search(absolute) and not self.source_policy.is_blocked(absolute):
                 hrefs.append(absolute)
-        for endpoint in extract_endpoint_urls_from_text(text, source_url):
-            if not self.source_policy.is_blocked(endpoint):
-                hrefs.append(endpoint)
-        records: list[HarvestedUrlRecord] = []
+        endpoint_refs: list[StructuredEndpointRef] = []
+        for endpoint_ref in extract_structured_endpoint_refs_from_text(text, source_url):
+            if not self.source_policy.is_blocked(endpoint_ref.url):
+                endpoint_refs.append(endpoint_ref)
         endpoint_logs: list[dict[str, Any]] = []
-        for endpoint in _dedupe_strings(_expand_structured_endpoint_urls(hrefs))[: self.config.max_structured_endpoints_per_page]:
+        for script_url in linked_script_urls_from_html(text, source_url, max_scripts=min(8, self.config.max_structured_endpoints_per_page)):
+            if self.source_policy.is_blocked(script_url):
+                continue
+            try:
+                resp = client.get(script_url)
+                endpoint_logs.append({"page_url": source_url, "script_url": script_url, "status": resp.status_code, "script_endpoint_refs": 0})
+                if resp.status_code < 400:
+                    script_refs = [ref for ref in extract_structured_endpoint_refs_from_text(resp.text, script_url) if not self.source_policy.is_blocked(ref.url)]
+                    endpoint_logs[-1]["script_endpoint_refs"] = len(script_refs)
+                    endpoint_refs.extend(script_refs)
+            except Exception as exc:
+                endpoint_logs.append({"page_url": source_url, "script_url": script_url, "error": repr(exc), "script_endpoint_refs": 0})
+        endpoint_refs.extend(StructuredEndpointRef(endpoint, "linked_endpoint", "html_link_or_script_src", source_url) for endpoint in hrefs if not self.source_policy.is_blocked(endpoint))
+
+        def fetch_json(fetch_url: str) -> Any | None:
+            if self.source_policy.is_blocked(fetch_url):
+                return None
+            try:
+                resp = client.get(fetch_url)
+            except Exception:
+                return None
+            if resp.status_code >= 400:
+                return None
+            try:
+                return json.loads(resp.text)
+            except json.JSONDecodeError:
+                return None
+
+        expanded_refs = expand_structured_endpoint_refs_from_metadata(
+            endpoint_refs,
+            fetch_json=fetch_json,
+            is_blocked=self.source_policy.is_blocked,
+            max_endpoints=self.config.max_structured_endpoints_per_page,
+        )
+        records: list[HarvestedUrlRecord] = []
+        for endpoint_ref in expanded_refs:
+            endpoint = endpoint_ref.url
             if self.source_policy.is_blocked(endpoint):
                 continue
             try:
                 resp = client.get(endpoint)
                 if resp.status_code >= 400:
-                    endpoint_logs.append({"page_url": source_url, "endpoint_url": endpoint, "status": resp.status_code, "records": 0})
+                    endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "status": resp.status_code, "records": 0})
                     continue
                 before = len(records)
-                records.extend(self._extract_from_payload(endpoint, row, resp.text, resp.headers.get("content-type", ""), method="linked_endpoint"))
-                endpoint_logs.append({"page_url": source_url, "endpoint_url": endpoint, "status": resp.status_code, "records": len(records) - before})
+                extracted = self._extract_from_payload(endpoint, row, resp.text, resp.headers.get("content-type", ""), method="linked_endpoint")
+                for record in extracted:
+                    record.metadata.setdefault("structured_endpoint_type", endpoint_ref.endpoint_type)
+                    record.metadata.setdefault("structured_endpoint_reason", endpoint_ref.reason)
+                records.extend(extracted)
+                endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "status": resp.status_code, "records": len(records) - before})
             except Exception as exc:
-                endpoint_logs.append({"page_url": source_url, "endpoint_url": endpoint, "error": repr(exc), "records": 0})
+                endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "error": repr(exc), "records": 0})
         if endpoint_logs:
             write_jsonl(self.logs_dir / "harvest_structured_endpoint_discovery.jsonl", endpoint_logs, append=True)
         return dedupe_records(records)
