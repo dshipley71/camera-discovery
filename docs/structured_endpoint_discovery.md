@@ -49,3 +49,11 @@ runs/.../logs/harvest_structured_endpoint_discovery.jsonl
 ```
 
 Each record includes the page URL, endpoint URL, endpoint type, discovery reason, status/error, and candidate or record counts where available.
+
+## Structured endpoint response caching
+
+Normal discovery and `harvest-urls` create a bounded in-memory response cache for each source-page extraction. Successful responses fetched while expanding structured metadata are reused when the same canonical endpoint is later processed for candidate or media-record extraction. Explicitly linked JavaScript responses use the same page-scoped cache.
+
+The cache deliberately remains page-scoped. It does not persist responses across source pages or runs, which avoids stale cross-page data and unbounded memory growth. Network exceptions and HTTP error responses are not cached, so the existing later extraction request still has an opportunity to succeed after a transient failure.
+
+Structured endpoint diagnostics include `response_cache_hit` for fetched scripts and extraction endpoints. A value of `true` confirms that extraction reused a response already obtained during the same source-page discovery pass instead of issuing a duplicate request.
