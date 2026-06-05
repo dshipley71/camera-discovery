@@ -57,6 +57,34 @@ class StructuredEndpointRef:
         return record
 
 
+class StructuredEndpointResponseCache:
+    """Cache successful structured-endpoint responses for one extraction scope.
+
+    Callers deliberately control the cache lifetime. Normal discovery and harvest
+    create one cache per source-page extraction so metadata expansion and record
+    extraction can reuse the exact same successful response without introducing
+    cross-page staleness or unbounded run-level memory. Failed requests and HTTP
+    error responses are not cached, preserving the existing later retry chance.
+    """
+
+    def __init__(self) -> None:
+        self._responses: dict[str, Any] = {}
+
+    def get_or_fetch(self, url: str, fetch: Callable[[str], Any]) -> tuple[Any, bool]:
+        key = _response_cache_key(url)
+        cached = self._responses.get(key)
+        if cached is not None:
+            return cached, True
+        response = fetch(url)
+        status_code = getattr(response, "status_code", None)
+        if isinstance(status_code, int) and status_code < 400:
+            self._responses[key] = response
+        return response, False
+
+    def __len__(self) -> int:
+        return len(self._responses)
+
+
 def extract_endpoint_urls_from_text(text: str, base_url: str, *, max_bytes: int = 2_000_000) -> list[str]:
     """Extract public JSON/API/ArcGIS/GeoJSON endpoint URLs from page text.
 
@@ -257,6 +285,11 @@ def _with_query(url: str, params: dict[str, str]) -> str:
     for key, value in params.items():
         query.setdefault(key, [value])
     return parsed._replace(query=urlencode(query, doseq=True)).geturl()
+
+
+def _response_cache_key(url: str) -> str:
+    """Return an exact canonical fetch key without folding path/query case."""
+    return canonical_media_url(url).split("#", 1)[0]
 
 
 def _canonical_endpoint_key(url: str) -> str:

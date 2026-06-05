@@ -26,6 +26,7 @@ from camera_discovery.core.models import (
 )
 from camera_discovery.extraction.endpoints import (
     StructuredEndpointRef,
+    StructuredEndpointResponseCache,
     expand_structured_endpoint_refs_from_metadata,
     extract_structured_endpoint_refs_from_text,
     linked_script_urls_from_html,
@@ -600,12 +601,13 @@ class CameraUrlHarvestEngine:
             if not self.source_policy.is_blocked(endpoint_ref.url):
                 endpoint_refs.append(endpoint_ref)
         endpoint_logs: list[dict[str, Any]] = []
+        response_cache = StructuredEndpointResponseCache()
         for script_url in linked_script_urls_from_html(text, source_url, max_scripts=min(8, self.config.max_structured_endpoints_per_page)):
             if self.source_policy.is_blocked(script_url):
                 continue
             try:
-                resp = client.get(script_url)
-                endpoint_logs.append({"page_url": source_url, "script_url": script_url, "status": resp.status_code, "script_endpoint_refs": 0})
+                resp, cache_hit = response_cache.get_or_fetch(script_url, client.get)
+                endpoint_logs.append({"page_url": source_url, "script_url": script_url, "status": resp.status_code, "script_endpoint_refs": 0, "response_cache_hit": cache_hit})
                 if resp.status_code < 400:
                     script_refs = [ref for ref in extract_structured_endpoint_refs_from_text(resp.text, script_url) if not self.source_policy.is_blocked(ref.url)]
                     endpoint_logs[-1]["script_endpoint_refs"] = len(script_refs)
@@ -618,7 +620,7 @@ class CameraUrlHarvestEngine:
             if self.source_policy.is_blocked(fetch_url):
                 return None
             try:
-                resp = client.get(fetch_url)
+                resp, _cache_hit = response_cache.get_or_fetch(fetch_url, client.get)
             except Exception:
                 return None
             if resp.status_code >= 400:
@@ -640,9 +642,9 @@ class CameraUrlHarvestEngine:
             if self.source_policy.is_blocked(endpoint):
                 continue
             try:
-                resp = client.get(endpoint)
+                resp, cache_hit = response_cache.get_or_fetch(endpoint, client.get)
                 if resp.status_code >= 400:
-                    endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "status": resp.status_code, "records": 0})
+                    endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "status": resp.status_code, "records": 0, "response_cache_hit": cache_hit})
                     continue
                 before = len(records)
                 extracted = self._extract_from_payload(endpoint, row, resp.text, resp.headers.get("content-type", ""), method="linked_endpoint")
@@ -650,7 +652,7 @@ class CameraUrlHarvestEngine:
                     record.metadata.setdefault("structured_endpoint_type", endpoint_ref.endpoint_type)
                     record.metadata.setdefault("structured_endpoint_reason", endpoint_ref.reason)
                 records.extend(extracted)
-                endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "status": resp.status_code, "records": len(records) - before})
+                endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "status": resp.status_code, "records": len(records) - before, "response_cache_hit": cache_hit})
             except Exception as exc:
                 endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "error": repr(exc), "records": 0})
         if endpoint_logs:
