@@ -43,6 +43,7 @@ from camera_discovery.enrichment.location_evidence import (
 from camera_discovery.extraction.browser import BrowserCaptureDecision, BrowserCaptureResult, PageDiscoverySignals, browser_backend_preflight
 from camera_discovery.extraction.endpoints import (
     StructuredEndpointRef,
+    StructuredEndpointResponseCache,
     expand_structured_endpoint_refs_from_metadata,
     extract_structured_endpoint_refs_from_text,
     linked_script_urls_from_html,
@@ -301,14 +302,19 @@ class CandidateExtractionMixin:
             if not self.source_policy.is_blocked(endpoint_ref.url):
                 endpoint_refs.append(endpoint_ref)
         endpoint_logs: list[dict[str, Any]] = []
+        response_cache = StructuredEndpointResponseCache()
         for script_url in linked_script_urls_from_html(html, url, max_scripts=min(8, self.config.max_structured_endpoints_per_page)):
             if self.source_policy.is_blocked(script_url):
                 continue
             try:
                 started_at = time.monotonic()
-                script_resp = client.get(script_url)
-                script_http_metadata = http_metadata_from_response(script_resp, text=script_resp.text if script_resp.status_code < 400 else None, started_at=started_at)
-                endpoint_logs.append({"page_url": url, "script_url": script_url, "status": script_resp.status_code, "http_metadata": script_http_metadata, "script_endpoint_refs": 0})
+                script_resp, cache_hit = response_cache.get_or_fetch(script_url, client.get)
+                script_http_metadata = http_metadata_from_response(
+                    script_resp,
+                    text=script_resp.text if script_resp.status_code < 400 else None,
+                    started_at=None if cache_hit else started_at,
+                )
+                endpoint_logs.append({"page_url": url, "script_url": script_url, "status": script_resp.status_code, "http_metadata": script_http_metadata, "script_endpoint_refs": 0, "response_cache_hit": cache_hit})
                 if script_resp.status_code < 400:
                     script_refs = [ref for ref in extract_structured_endpoint_refs_from_text(script_resp.text, script_url) if not self.source_policy.is_blocked(ref.url)]
                     endpoint_logs[-1]["script_endpoint_refs"] = len(script_refs)
@@ -322,7 +328,7 @@ class CandidateExtractionMixin:
             if self.source_policy.is_blocked(fetch_url):
                 return None
             try:
-                resp = client.get(fetch_url)
+                resp, _cache_hit = response_cache.get_or_fetch(fetch_url, client.get)
             except Exception:
                 return None
             if resp.status_code >= 400:
@@ -345,10 +351,14 @@ class CandidateExtractionMixin:
                 continue
             try:
                 started_at = time.monotonic()
-                resp = client.get(feed_url)
-                http_metadata = http_metadata_from_response(resp, text=resp.text if resp.status_code < 400 else None, started_at=started_at)
+                resp, cache_hit = response_cache.get_or_fetch(feed_url, client.get)
+                http_metadata = http_metadata_from_response(
+                    resp,
+                    text=resp.text if resp.status_code < 400 else None,
+                    started_at=None if cache_hit else started_at,
+                )
                 if resp.status_code >= 400:
-                    endpoint_logs.append({**endpoint_ref.to_log_record(page_url=url), "status": resp.status_code, "http_metadata": http_metadata, "candidates": 0})
+                    endpoint_logs.append({**endpoint_ref.to_log_record(page_url=url), "status": resp.status_code, "http_metadata": http_metadata, "candidates": 0, "response_cache_hit": cache_hit})
                     continue
                 before = len(out)
                 extracted = self._extract_from_response(feed_url, {**row, "http_metadata": http_metadata}, resp.text, resp.headers.get("content-type", ""))
@@ -359,7 +369,7 @@ class CandidateExtractionMixin:
                     candidate.source_metadata.setdefault("structured_endpoint_reason", endpoint_ref.reason)
                     enrich_candidate_with_passive_intelligence(candidate, self.source_policy)
                 out.extend(extracted)
-                endpoint_logs.append({**endpoint_ref.to_log_record(page_url=url), "status": resp.status_code, "http_metadata": http_metadata, "candidates": len(out) - before})
+                endpoint_logs.append({**endpoint_ref.to_log_record(page_url=url), "status": resp.status_code, "http_metadata": http_metadata, "candidates": len(out) - before, "response_cache_hit": cache_hit})
             except Exception as exc:
                 endpoint_logs.append({**endpoint_ref.to_log_record(page_url=url), "error": repr(exc), "candidates": 0})
                 continue
