@@ -28,3 +28,5 @@ Historical `docs/codex_prompt_*.md` files are implementation traceability record
 ## Passive intelligence documentation
 
 See `passive_intelligence.md` for the passive source/candidate evidence scoring, safe signature matching, HTTP metadata, protocol labeling, and review-artifact behavior. The corresponding implementation prompt is `codex_prompt_passive_camera_intelligence.md`.
+
+- [Structured Endpoint Discovery](structured_endpoint_discovery.md)

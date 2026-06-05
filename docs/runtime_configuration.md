@@ -240,3 +240,8 @@ When enabled, SearchAgent adds a bounded number of operator-enhanced public-sour
 ## Passive intelligence runtime behavior
 
 Passive intelligence is part of the normal source/candidate processing flow and does not require a separate runtime profile. It only analyzes evidence already discovered by the configured discovery mode and source policy. It may affect source and validation priority ordering, but it does not change fast/balanced/full validation semantics or trusted-output authorization.
+
+
+## Metadata-driven structured endpoint discovery
+
+`max_structured_endpoints_per_page` bounds the number of structured endpoints selected from each source page. Structured endpoints include explicit JSON/GeoJSON/API links, endpoint literals in page or script text, advertised ArcGIS REST layers/tables, OGC API Features links, and explicit WFS links. ArcGIS service roots are expanded from fetched public service metadata only; fixed layer-ID guessing is intentionally not used.
