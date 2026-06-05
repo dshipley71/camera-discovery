@@ -41,7 +41,12 @@ from camera_discovery.enrichment.location_evidence import (
     _valid_lat_lon,
 )
 from camera_discovery.extraction.browser import BrowserCaptureDecision, BrowserCaptureResult, PageDiscoverySignals, browser_backend_preflight
-from camera_discovery.extraction.endpoints import extract_endpoint_urls_from_text
+from camera_discovery.extraction.endpoints import (
+    StructuredEndpointRef,
+    expand_structured_endpoint_refs_from_metadata,
+    extract_structured_endpoint_refs_from_text,
+    linked_script_urls_from_html,
+)
 from camera_discovery.extraction.html import (
     _first_nonempty,
     _html_soup,
@@ -95,7 +100,6 @@ from camera_discovery.extraction.media import (
 )
 from camera_discovery.extraction.pagination import (
     _asset_host_discovery_urls,
-    _expand_structured_endpoint_urls,
     _looks_like_paginated_directory_url,
     _looks_like_pagination_url,
     _pagination_rows,
@@ -292,29 +296,72 @@ class CandidateExtractionMixin:
             absolute = urljoin(url, href)
             if JSON_FEED_HINT_RE.search(absolute) and not self.source_policy.is_blocked(absolute):
                 hrefs.append(absolute)
-        for endpoint in extract_endpoint_urls_from_text(html, url):
-            if not self.source_policy.is_blocked(endpoint):
-                hrefs.append(endpoint)
-        out: list[CameraCandidate] = []
+        endpoint_refs: list[StructuredEndpointRef] = []
+        for endpoint_ref in extract_structured_endpoint_refs_from_text(html, url):
+            if not self.source_policy.is_blocked(endpoint_ref.url):
+                endpoint_refs.append(endpoint_ref)
         endpoint_logs: list[dict[str, Any]] = []
-        for feed_url in _dedupe_strings(_expand_structured_endpoint_urls(hrefs))[: self.config.max_structured_endpoints_per_page]:
+        for script_url in linked_script_urls_from_html(html, url, max_scripts=min(8, self.config.max_structured_endpoints_per_page)):
+            if self.source_policy.is_blocked(script_url):
+                continue
+            try:
+                started_at = time.monotonic()
+                script_resp = client.get(script_url)
+                script_http_metadata = http_metadata_from_response(script_resp, text=script_resp.text if script_resp.status_code < 400 else None, started_at=started_at)
+                endpoint_logs.append({"page_url": url, "script_url": script_url, "status": script_resp.status_code, "http_metadata": script_http_metadata, "script_endpoint_refs": 0})
+                if script_resp.status_code < 400:
+                    script_refs = [ref for ref in extract_structured_endpoint_refs_from_text(script_resp.text, script_url) if not self.source_policy.is_blocked(ref.url)]
+                    endpoint_logs[-1]["script_endpoint_refs"] = len(script_refs)
+                    endpoint_refs.extend(script_refs)
+            except Exception as exc:
+                endpoint_logs.append({"page_url": url, "script_url": script_url, "error": repr(exc), "script_endpoint_refs": 0})
+        href_refs = [StructuredEndpointRef(endpoint, "linked_endpoint", "html_link_or_script_src", url) for endpoint in hrefs if not self.source_policy.is_blocked(endpoint)]
+        endpoint_refs.extend(href_refs)
+
+        def fetch_json(fetch_url: str) -> Any | None:
+            if self.source_policy.is_blocked(fetch_url):
+                return None
+            try:
+                resp = client.get(fetch_url)
+            except Exception:
+                return None
+            if resp.status_code >= 400:
+                return None
+            try:
+                return json.loads(resp.text)
+            except json.JSONDecodeError:
+                return None
+
+        expanded_refs = expand_structured_endpoint_refs_from_metadata(
+            endpoint_refs,
+            fetch_json=fetch_json,
+            is_blocked=self.source_policy.is_blocked,
+            max_endpoints=self.config.max_structured_endpoints_per_page,
+        )
+        out: list[CameraCandidate] = []
+        for endpoint_ref in expanded_refs:
+            feed_url = endpoint_ref.url
+            if self.source_policy.is_blocked(feed_url):
+                continue
             try:
                 started_at = time.monotonic()
                 resp = client.get(feed_url)
                 http_metadata = http_metadata_from_response(resp, text=resp.text if resp.status_code < 400 else None, started_at=started_at)
                 if resp.status_code >= 400:
-                    endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "status": resp.status_code, "http_metadata": http_metadata, "candidates": 0})
+                    endpoint_logs.append({**endpoint_ref.to_log_record(page_url=url), "status": resp.status_code, "http_metadata": http_metadata, "candidates": 0})
                     continue
                 before = len(out)
                 extracted = self._extract_from_response(feed_url, {**row, "http_metadata": http_metadata}, resp.text, resp.headers.get("content-type", ""))
                 for candidate in extracted:
                     candidate.source_metadata.setdefault("source_http_metadata", http_metadata)
                     candidate.source_metadata.setdefault("http_metadata", http_metadata)
+                    candidate.source_metadata.setdefault("structured_endpoint_type", endpoint_ref.endpoint_type)
+                    candidate.source_metadata.setdefault("structured_endpoint_reason", endpoint_ref.reason)
                     enrich_candidate_with_passive_intelligence(candidate, self.source_policy)
                 out.extend(extracted)
-                endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "status": resp.status_code, "http_metadata": http_metadata, "candidates": len(out) - before})
+                endpoint_logs.append({**endpoint_ref.to_log_record(page_url=url), "status": resp.status_code, "http_metadata": http_metadata, "candidates": len(out) - before})
             except Exception as exc:
-                endpoint_logs.append({"page_url": url, "endpoint_url": feed_url, "error": repr(exc), "candidates": 0})
+                endpoint_logs.append({**endpoint_ref.to_log_record(page_url=url), "error": repr(exc), "candidates": 0})
                 continue
         if endpoint_logs:
             write_jsonl(self.logs_dir / "structured_endpoint_discovery.jsonl", endpoint_logs, append=True)
