@@ -78,6 +78,11 @@ class RunConfig:
     max_streams: int = 150
     max_directory_pages: int = 8
     max_structured_endpoints_per_page: int = 20
+    arcgis_pagination_strategy: str = "auto"
+    arcgis_page_size: int = 1000
+    arcgis_object_id_batch_size: int = 500
+    max_arcgis_pages_per_layer: int = 100
+    max_arcgis_records_per_layer: int = 0
 
     # Browser/network capture is an optional second-stage extraction path. Static
     # extraction runs first; these limits prevent dynamic rendering from consuming
@@ -329,6 +334,11 @@ class HarvestConfig:
     max_source_rows: int = 5000
     max_pages_per_source: int = 25
     max_structured_endpoints_per_page: int = 500
+    arcgis_pagination_strategy: str = "auto"
+    arcgis_page_size: int = 1000
+    arcgis_object_id_batch_size: int = 500
+    max_arcgis_pages_per_layer: int = 100
+    max_arcgis_records_per_layer: int = 0
     enable_browser_capture: bool = True
     browser_backend: str = "playwright"
     browser_capture_timeout_ms: int = 15000

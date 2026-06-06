@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+from camera_discovery.core.models import HarvestConfig, RunConfig
 from camera_discovery.extraction.endpoints import (
     StructuredEndpointRef,
     expand_structured_endpoint_refs_from_metadata,
@@ -7,6 +10,8 @@ from camera_discovery.extraction.endpoints import (
     linked_script_urls_from_html,
 )
 from camera_discovery.extraction.pagination import _expand_structured_endpoint_urls
+from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
+from camera_discovery.services.harvest_engine import CameraUrlHarvestEngine
 
 
 def test_arcgis_service_expands_only_advertised_layers() -> None:
@@ -71,3 +76,52 @@ def test_ogc_collections_expand_to_advertised_items_links() -> None:
 
     assert "https://example.test/ogc/cameras/items?f=json" in urls
     assert "https://example.test/ogc/collections/cameras/items?f=json" in urls
+
+
+class _Response:
+    def __init__(self, data: dict):
+        self.status_code = 200
+        self.text = json.dumps(data)
+        self.headers = {"content-type": "application/json"}
+
+
+class _ArcGisWorkflowClient:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def get(self, url: str) -> _Response:
+        self.calls.append(url)
+        if url.endswith("/FeatureServer?f=pjson"):
+            return _Response({"layers": [{"id": 0, "name": "Cameras"}]})
+        if url.endswith("/FeatureServer/0?f=pjson"):
+            return _Response({"maxRecordCount": 1, "objectIdField": "OBJECTID", "fields": [{"name": "OBJECTID", "type": "esriFieldTypeOID"}], "advancedQueryCapabilities": {"supportsPagination": True, "supportsOrderBy": True}})
+        if "resultOffset=0" in url:
+            return _Response({"features": [{"attributes": {"OBJECTID": 1, "imageUrl": "https://media.example.test/cam1.jpg", "name": "Camera One"}, "geometry": {"x": -75.0, "y": 40.0}}], "exceededTransferLimit": True})
+        if "resultOffset=1" in url:
+            return _Response({"features": [{"attributes": {"OBJECTID": 2, "imageUrl": "https://media.example.test/cam2.jpg", "name": "Camera Two"}, "geometry": {"x": -75.1, "y": 40.1}}], "exceededTransferLimit": False})
+        raise AssertionError(f"unexpected URL {url}")
+
+
+def test_normal_discovery_uses_shared_arcgis_paginator(tmp_path) -> None:
+    engine = CandidateDiscoveryEngine(RunConfig(query="traffic cameras", output_dir=tmp_path, enable_browser_capture=False, sources_file=None, block_patterns=[]))
+    engine.logs_dir.mkdir(parents=True, exist_ok=True)
+    client = _ArcGisWorkflowClient()
+    html = '<script>fetch("https://example.test/arcgis/rest/services/CCTV/FeatureServer")</script>'
+
+    candidates = engine._extract_from_linked_feeds("https://example.test/map", {"url": "https://example.test/map"}, html, client)  # noqa: SLF001
+
+    assert len(candidates) == 2
+    assert any("resultOffset=1" in call for call in client.calls)
+
+
+def test_harvest_mode_uses_shared_arcgis_paginator(tmp_path) -> None:
+    engine = CameraUrlHarvestEngine(HarvestConfig(query="traffic cameras", output_dir=tmp_path, enable_browser_capture=False, sources_file=None, block_patterns=[]))
+    engine.output_dir.mkdir(parents=True, exist_ok=True)
+    engine.logs_dir.mkdir(parents=True, exist_ok=True)
+    client = _ArcGisWorkflowClient()
+    html = '<script>fetch("https://example.test/arcgis/rest/services/CCTV/FeatureServer")</script>'
+
+    records = engine._extract_linked_endpoints("https://example.test/map", {"url": "https://example.test/map"}, html, client)  # noqa: SLF001
+
+    assert len(records) == 2
+    assert any("resultOffset=1" in call for call in client.calls)
