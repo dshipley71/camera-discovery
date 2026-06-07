@@ -24,6 +24,12 @@ from camera_discovery.core.models import (
     HarvestedUrlRecord,
     RunConfig,
 )
+from camera_discovery.extraction.arcgis_pagination import (
+    ArcGisPaginationConfig,
+    ArcGisSyntheticResponse,
+    is_arcgis_query_url,
+    paginate_arcgis_layer,
+)
 from camera_discovery.extraction.endpoints import (
     StructuredEndpointRef,
     StructuredEndpointResponseCache,
@@ -642,7 +648,20 @@ class CameraUrlHarvestEngine:
             if self.source_policy.is_blocked(endpoint):
                 continue
             try:
-                resp, cache_hit = response_cache.get_or_fetch(endpoint, client.get)
+                pagination_diag: list[dict[str, Any]] = []
+                if endpoint_ref.endpoint_type == "arcgis_query" or is_arcgis_query_url(endpoint):
+                    page_result = paginate_arcgis_layer(
+                        endpoint,
+                        http_client=client,
+                        source_policy=self.source_policy,
+                        response_cache=response_cache,
+                        config=self._arcgis_pagination_config(),
+                        diagnostics=pagination_diag,
+                    )
+                    resp = ArcGisSyntheticResponse(endpoint, page_result.payload)
+                    cache_hit = False
+                else:
+                    resp, cache_hit = response_cache.get_or_fetch(endpoint, client.get)
                 if resp.status_code >= 400:
                     endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "status": resp.status_code, "records": 0, "response_cache_hit": cache_hit})
                     continue
@@ -652,12 +671,25 @@ class CameraUrlHarvestEngine:
                     record.metadata.setdefault("structured_endpoint_type", endpoint_ref.endpoint_type)
                     record.metadata.setdefault("structured_endpoint_reason", endpoint_ref.reason)
                 records.extend(extracted)
-                endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "status": resp.status_code, "records": len(records) - before, "response_cache_hit": cache_hit})
+                endpoint_record = {**endpoint_ref.to_log_record(page_url=source_url), "status": resp.status_code, "records": len(records) - before, "response_cache_hit": cache_hit}
+                if pagination_diag:
+                    endpoint_record["arcgis_pagination"] = pagination_diag[-1]
+                endpoint_logs.append(endpoint_record)
             except Exception as exc:
                 endpoint_logs.append({**endpoint_ref.to_log_record(page_url=source_url), "error": repr(exc), "records": 0})
         if endpoint_logs:
             write_jsonl(self.logs_dir / "harvest_structured_endpoint_discovery.jsonl", endpoint_logs, append=True)
         return dedupe_records(records)
+
+
+    def _arcgis_pagination_config(self) -> ArcGisPaginationConfig:
+        return ArcGisPaginationConfig(
+            strategy=getattr(self.config, "arcgis_pagination_strategy", "auto"),
+            page_size=getattr(self.config, "arcgis_page_size", 1000),
+            object_id_batch_size=getattr(self.config, "arcgis_object_id_batch_size", 500),
+            max_pages_per_layer=getattr(self.config, "max_arcgis_pages_per_layer", 100),
+            max_records_per_layer=getattr(self.config, "max_arcgis_records_per_layer", 0),
+        )
 
     def _extract_from_browser(self, source_url: str, row: dict[str, str]) -> list[HarvestedUrlRecord]:
         if not self._reserve_browser_page(source_url):

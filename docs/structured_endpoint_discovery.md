@@ -26,7 +26,7 @@ Explicit layer URLs are normalized to bounded read-only query URLs using:
 where=1=1&outFields=*&returnGeometry=true&f=json
 ```
 
-Those queries still pass source-policy checks, HTTP limits, extraction filters, scope handling, validation, and trust gates.
+Those queries still pass source-policy checks, HTTP limits, extraction filters, scope handling, validation, and trust gates. Large ArcGIS layers are fetched through the shared bounded paginator described in [ArcGIS feature-layer pagination](arcgis_pagination.md), so normal discovery and `harvest-urls` use the same offset/object-ID retrieval logic without changing workflow trust boundaries.
 
 ## Workflow boundaries
 
@@ -48,7 +48,7 @@ Harvest mode writes diagnostics to:
 runs/.../logs/harvest_structured_endpoint_discovery.jsonl
 ```
 
-Each record includes the page URL, endpoint URL, endpoint type, discovery reason, status/error, and candidate or record counts where available.
+Each record includes the page URL, endpoint URL, endpoint type, discovery reason, status/error, and candidate or record counts where available. ArcGIS layer records also include `arcgis_pagination` diagnostics with the selected strategy, record/page counts, duplicate counts, response-cache hits, fallback use, stop reason, and errors.
 
 ## Structured endpoint response caching
 

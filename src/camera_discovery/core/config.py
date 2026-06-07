@@ -126,6 +126,14 @@ def _default_target_intent_fallback_model(provider: str) -> str | None:
 
 
 
+
+def _arcgis_strategy_env() -> str:
+    strategy = os.getenv("CAMERA_DISCOVERY_ARCGIS_PAGINATION_STRATEGY", "auto").strip().lower()
+    allowed = {"auto", "offset", "object_ids", "single_page"}
+    if strategy not in allowed:
+        raise ValueError(f"Invalid CAMERA_DISCOVERY_ARCGIS_PAGINATION_STRATEGY={strategy!r}; expected one of: {', '.join(sorted(allowed))}")
+    return strategy
+
 def _browser_backend_env() -> str:
     backend = os.getenv("CAMERA_DISCOVERY_BROWSER_BACKEND", "playwright").strip().lower()
     if backend not in _ALLOWED_BROWSER_BACKENDS:
@@ -215,6 +223,11 @@ def load_run_config(
         max_streams=_deprecated_max_streams_env(max_total_candidates),
         max_directory_pages=max(1, _int_env("CAMERA_DISCOVERY_MAX_DIRECTORY_PAGES", 8)),
         max_structured_endpoints_per_page=max(1, _int_env("CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", 20)),
+        arcgis_pagination_strategy=_arcgis_strategy_env(),
+        arcgis_page_size=max(1, _int_env("CAMERA_DISCOVERY_ARCGIS_PAGE_SIZE", 1000)),
+        arcgis_object_id_batch_size=max(1, _int_env("CAMERA_DISCOVERY_ARCGIS_OBJECT_ID_BATCH_SIZE", 500)),
+        max_arcgis_pages_per_layer=max(1, _int_env("CAMERA_DISCOVERY_MAX_ARCGIS_PAGES_PER_LAYER", 100)),
+        max_arcgis_records_per_layer=max(0, _int_env("CAMERA_DISCOVERY_MAX_ARCGIS_RECORDS_PER_LAYER", 0)),
         enable_browser_capture=_bool_env("CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE", True),
         browser_backend=configured_browser_backend,
         browser_capture_timeout_ms=max(1000, _int_env("CAMERA_DISCOVERY_BROWSER_CAPTURE_TIMEOUT_MS", 15000)),
@@ -305,6 +318,11 @@ def load_harvest_config(
         max_source_rows=max(0, int(max_source_rows if max_source_rows is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_SOURCE_ROWS", 5000))),
         max_pages_per_source=max(1, int(max_pages_per_source if max_pages_per_source is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_PAGES_PER_SOURCE", _int_env("CAMERA_DISCOVERY_MAX_DIRECTORY_PAGES", 25)))),
         max_structured_endpoints_per_page=max(0, int(max_structured_endpoints_per_page if max_structured_endpoints_per_page is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", _int_env("CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", 500)))),
+        arcgis_pagination_strategy=_arcgis_strategy_env(),
+        arcgis_page_size=max(1, _int_env("CAMERA_DISCOVERY_ARCGIS_PAGE_SIZE", 1000)),
+        arcgis_object_id_batch_size=max(1, _int_env("CAMERA_DISCOVERY_ARCGIS_OBJECT_ID_BATCH_SIZE", 500)),
+        max_arcgis_pages_per_layer=max(1, _int_env("CAMERA_DISCOVERY_MAX_ARCGIS_PAGES_PER_LAYER", 100)),
+        max_arcgis_records_per_layer=max(0, _int_env("CAMERA_DISCOVERY_MAX_ARCGIS_RECORDS_PER_LAYER", 0)),
         enable_browser_capture=_bool_env("CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE", True) if enable_browser_capture is None else bool(enable_browser_capture),
         browser_backend=configured_browser_backend,
         browser_capture_timeout_ms=max(1000, _int_env("CAMERA_DISCOVERY_BROWSER_CAPTURE_TIMEOUT_MS", 15000)),
