@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from camera_discovery.core.models import CameraCandidate
+from camera_discovery.evidence.media_records import ExtractedEvidence, evidence_to_camera_candidate
 from camera_discovery.harvest.media_filter import canonical_media_url
 from camera_discovery.sources import SourcePolicy
 
@@ -148,34 +149,39 @@ def harvest_records_to_candidates(
             metadata.setdefault("source_provided_only", True)
             metadata.setdefault("validated", False)
             metadata.setdefault("trusted", False)
+            metadata.setdefault("scope_filtered", False)
             metadata.setdefault("llm_reviewed", False)
             metadata.setdefault("harvest_input", True)
             metadata.setdefault("media_type", asset.get("media_type"))
             metadata.setdefault("camera_record_id", record.get("camera_record_id"))
             metadata.setdefault("asset_id", asset.get("asset_id"))
+            metadata.setdefault("source_policy_checked", True)
             lat = _coerce_float(record.get("lat"))
             lon = _coerce_float(record.get("lon"))
             if not _plausible_lat_lon(lat, lon):
                 lat = _coerce_float(asset.get("lat"))
                 lon = _coerce_float(asset.get("lon"))
-            candidate = CameraCandidate(
-                stream_url=canonical_url,
+            evidence = ExtractedEvidence(
+                media_url=canonical_url,
                 source_url=asset.get("source_url") or record.get("source_endpoint_url") or record.get("source_page_url"),
-                discovery_method="harvest_handoff",
+                media_type=asset.get("media_type") or record.get("media_type"),
                 title=record.get("title") or asset.get("title"),
                 lat=lat if _plausible_lat_lon(lat, lon) else None,
                 lon=lon if _plausible_lat_lon(lat, lon) else None,
-                location_text=record.get("location_text") or asset.get("location_text"),
+                source_provider=record.get("source_provider") or asset.get("source_provider"),
                 source_metadata=metadata,
+                extraction_method=str(asset.get("discovery_method") or record.get("discovery_method") or "harvest_handoff"),
+            )
+            candidate = evidence_to_camera_candidate(
+                evidence,
                 target_id=target_id,
                 target_index=target_index,
                 target_label=target_label,
-                coordinate_source=record.get("coordinate_source") or asset.get("coordinate_source"),
-                reasons=["seeded from harvest input; still unvalidated/untrusted until normal run processing"],
             )
+            candidate.location_text = record.get("location_text") or asset.get("location_text")
+            candidate.coordinate_source = record.get("coordinate_source") or asset.get("coordinate_source")
             candidates.append(candidate)
     return candidates
-
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():

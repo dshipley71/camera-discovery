@@ -9,7 +9,7 @@ The repository has two workflows:
 | `camera-discovery run` | Full target-aware pipeline: resolve target(s), discover candidates, enrich/scope coordinates, optionally validate media, write trusted/review artifacts. |
 | `camera-discovery harvest-urls` | Extraction-only raw media harvesting: collect URL records and structured camera/media inventory without target resolution, validation, trust, GeoJSON, maps, or review ZIPs. |
 
-The trust boundary is deliberate: LLMs interpret and rank evidence, while deterministic code verifies geometry, validates media, authorizes trusted output, and writes artifacts.
+The trust boundary is deliberate: LLMs interpret and rank evidence, while deterministic code verifies geometry, validates media, authorizes trusted output, and writes artifacts. A shared neutral evidence layer under `src/camera_discovery/evidence/` normalizes source-provided media evidence for harvest and handoff conversion without assigning scope, validation, or trust.
 
 ## Pipeline diagram
 
@@ -93,6 +93,9 @@ camera-discovery run "California traffic cameras" \
 --block-pattern
 --harvest-input
 --harvest-input-mode handoff-only|seed
+--harvest-first
+--harvest-media
+--harvest-max-source-rows
 --browser-backend playwright|cloakbrowser
 --http-timeout SECONDS
 --progress / --no-progress
@@ -165,7 +168,7 @@ CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE=false \
     --progress-style plain
 ```
 
-`harvest_handoff.json` uses `schema_version: harvest-handoff/v2`. Media-filtered harvests default to the filtered media artifact (`camera_urls.jsonl`), so an HLS-only harvest remains HLS-only when passed to `run --harvest-input`.
+`harvest_handoff.json` uses `schema_version: harvest-handoff/v2` and includes `evidence_schema_version: extracted-evidence/v1`. Media-filtered harvests default to the filtered media artifact (`camera_urls.jsonl`), so an HLS-only harvest remains HLS-only when passed to `run --harvest-input`. Referenced records include `source_policy_checked: true` where applicable; `blocked_reason`, when present in diagnostics, is never used to promote output.
 
 `run --harvest-input` supports two explicit modes:
 
@@ -173,6 +176,31 @@ CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE=false \
 - `seed`: loads the harvest handoff records as starting candidates, then runs the normal discovery pipeline and merges native candidates with handoff candidates. This can be much larger and slower, and should be selected only when that expansion is intentional.
 
 All loaded harvest records remain source-provided, unvalidated, and untrusted until the normal pipeline applies target resolution, deterministic scope gating, validation, and trust rules.
+
+
+## Harvest-first combined convenience mode
+
+`run` can optionally execute harvest first and then feed the generated handoff into the normal target-aware pipeline:
+
+```bash
+camera-discovery run "California traffic cameras" \
+  --harvest-first \
+  --harvest-media .m3u8 \
+  --harvest-max-source-rows 1000 \
+  --harvest-input-mode handoff-only
+```
+
+This is a convenience orchestration only. Internally it builds a real `HarvestConfig`, runs `CameraUrlHarvestEngine.harvest()`, reads the generated `harvest_handoff.json`, and then continues through the existing `run --harvest-input` path. Harvested records remain source-provided, unvalidated evidence; trusted outputs can only be produced by the normal run pipeline after target resolution, deterministic scope gates, validation, and trust rules.
+
+Combined mode keeps artifact families separate:
+
+```text
+<output-dir>/
+  harvest/   # camera_urls.*, camera_records.jsonl, media assets, endpoints, inventory, harvest_handoff.json
+  run/       # normal discovery summaries, GeoJSON/maps when eligible, validation/dashboard artifacts, review package
+```
+
+Harvest-first uses harvest-specific budget flags such as `--harvest-media` and `--harvest-max-source-rows` so harvest-scale collection does not silently rewrite normal run budgets. The handoff manifest remains the formal bridge and includes `evidence_schema_version: extracted-evidence/v1`; referenced harvest records include `source_policy_checked: true` when they have passed source-policy filtering, while any `blocked_reason` remains diagnostic-only and is never an output-promotion signal.
 
 ## Browser capture
 
