@@ -5,6 +5,7 @@ These notebooks exercise the current public CLI workflows without moving noteboo
 | Notebook | Purpose | Typical use |
 |---|---|---|
 | `camera_discovery_harvest_hls_only_test.ipynb` | Harvest `.m3u8` HLS URLs only. | Fastest way to test HLS extraction, source-row diagnostics, and harvest summaries. |
+| `camera_discovery_harvest_first_hls_balanced_validation_test.ipynb` | Run the new one-command `run --harvest-first --harvest-media .m3u8` orchestration through balanced validation. | Test combined harvest/run artifact layout, handoff schema, source-policy flags, and validation outputs. |
 | `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | Harvest HLS URLs and feed `harvest_handoff.json` into visible `camera-discovery run --profile balanced --http-timeout 10 --harvest-input-mode handoff-only`. | End-to-end HLS harvest-to-validation workflow. |
 | `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | Harvest all supported media types and feed the handoff into full pipeline validation with `--harvest-input-mode handoff-only`. | Inspect how broader media types are represented and handled downstream. |
 | `camera_discovery_pipeline_only_profiles_test.ipynb` | Run `camera-discovery run` without harvest input for `fast`, `balanced`, and `full` profiles. | Compare normal pipeline behavior across profiles. |
@@ -50,3 +51,4 @@ Notebook run-inspection cells should print `media_validation_dashboard.json` whe
 The notebooks include a passive intelligence summary cell that reads source-code-generated artifacts after a run completes. The cell shows evidence-band counts, protocol-label counts, signature-family counts, and top evidence reasons. It does not patch source code or move notebook helpers into `src/`.
 
 - `camera_discovery_harvest_all_media_handoff_balanced_validation_test.ipynb` — all-media harvest handoff into balanced validation.
+- `camera_discovery_harvest_first_hls_balanced_validation_test.ipynb` — one-command harvest-first HLS orchestration into balanced validation.

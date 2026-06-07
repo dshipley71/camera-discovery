@@ -267,6 +267,7 @@ End-to-end Colab notebooks live under `notebooks/`:
 | Notebook | Purpose |
 |---|---|
 | `camera_discovery_harvest_hls_only_test.ipynb` | HLS-only harvest workflow using routine `.m3u8` extraction settings. |
+| `camera_discovery_harvest_first_hls_balanced_validation_test.ipynb` | One-command `run --harvest-first --harvest-media .m3u8` workflow through balanced validation, with separate `harvest/` and `run/` artifacts. |
 | `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | HLS harvest followed by visible `run --profile balanced --http-timeout 10 --harvest-input --harvest-input-mode handoff-only ...` for practical interactive validation. |
 | `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | All-media harvest followed by visible bounded handoff validation/review with `--http-timeout 10`. |
 | `camera_discovery_pipeline_only_profiles_test.ipynb` | Pipeline-only comparison for `fast`, `balanced`, and `full` profiles. |
