@@ -182,7 +182,7 @@ class ReviewAndValidationPipeline:
         result_metadata = {
             key: value
             for key, value in (candidate.source_metadata or {}).items()
-            if key in {"media_type", "normalized_media_type", "validator_name", "validation_status", "validation_reason", "validation_error", "validation_elapsed_ms", "validation_full_mode", "ffprobe_enabled", "ffprobe_available"}
+            if key in {"media_type", "normalized_media_type", "validator_name", "validation_status", "validation_reason", "validation_error", "validation_elapsed_ms", "validation_full_mode", "liveness_status", "ffprobe_enabled", "ffprobe_available"}
         }
         result_metadata.setdefault("validation_status", status)
         with self._validation_result_cache_lock:
@@ -281,6 +281,8 @@ class ReviewAndValidationPipeline:
         except Exception as exc:
             status = "dead"
             metadata["validation_error"] = repr(exc)[:300]
+        if normalized_media_type == "video_file" and status == "video_file_reachable":
+            metadata["liveness_status"] = "not_live_verified"
         metadata["validation_status"] = status
         metadata["validation_elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
         metadata.setdefault("validation_reason", _default_validation_reason(status, normalized_media_type))
@@ -523,7 +525,8 @@ class ReviewAndValidationPipeline:
             if head.status_code in {401, 403}:
                 return "restricted"
             if 200 <= head.status_code < 300 and _headers_or_url_indicate_video_file(url, head.headers):
-                return "video_file_reachable_unknown_live"
+                _mark_video_file_reachable(candidate)
+                return "video_file_reachable"
             response, sample = _bounded_get_bytes(client, url, max_bytes=4096)
             self._attach_validation_http_metadata(url, response, text=None, started_at=None, candidate=candidate)
             if response.status_code in {401, 403}:
@@ -531,7 +534,8 @@ class ReviewAndValidationPipeline:
             if response.status_code >= 400:
                 return "dead"
             if _headers_indicate_video_file(response.headers) or _bytes_look_like_video_file(sample):
-                return "video_file_reachable_unknown_live"
+                _mark_video_file_reachable(candidate)
+                return "video_file_reachable"
             return "invalid_video_file"
         except Exception:
             return "dead"
@@ -836,6 +840,7 @@ class ReviewAndValidationPipeline:
             "validation_error",
             "validation_elapsed_ms",
             "validation_full_mode",
+            "liveness_status",
             "source_metadata_json",
             "protocol_label",
             "media_family",
@@ -902,6 +907,7 @@ class ReviewAndValidationPipeline:
                         "validation_error": metadata.get("validation_error"),
                         "validation_elapsed_ms": metadata.get("validation_elapsed_ms"),
                         "validation_full_mode": metadata.get("validation_full_mode"),
+                        "liveness_status": metadata.get("liveness_status"),
                         "source_metadata_json": json.dumps(metadata, sort_keys=True, default=str),
                         "protocol_label": metadata.get("protocol_label"),
                         "media_family": metadata.get("media_family"),
@@ -969,6 +975,7 @@ class ReviewAndValidationPipeline:
                     "validation_error": metadata.get("validation_error"),
                     "validation_elapsed_ms": metadata.get("validation_elapsed_ms"),
                     "validation_full_mode": metadata.get("validation_full_mode"),
+                    "liveness_status": metadata.get("liveness_status"),
                     "protocol_label": metadata.get("protocol_label"),
                     "media_family": metadata.get("media_family"),
                     "protocol_confidence": metadata.get("protocol_confidence"),
@@ -1168,6 +1175,13 @@ def _bbox_polygon_geometry(bbox: dict[str, Any] | None) -> dict[str, Any] | None
             [min_lon, min_lat],
         ]],
     }
+
+
+def _mark_video_file_reachable(candidate: CameraCandidate | None) -> None:
+    if candidate is None:
+        return
+    candidate.source_metadata["liveness_status"] = "not_live_verified"
+    candidate.source_metadata.setdefault("validation_reason", "video-file validator confirmed reachable video media; live/updating behavior was not proven")
 
 def _validation_status_category(status: str) -> str:
     if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing", "active_rtsp_verified", "active_mjpeg_verified"}:

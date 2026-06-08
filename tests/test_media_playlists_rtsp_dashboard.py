@@ -378,7 +378,7 @@ def test_media_validation_dispatcher_routes_each_media_type(tmp_path, monkeypatc
     monkeypatch.setattr(pipeline, "_validate_image_snapshot", mark("image_snapshot", "active_image_snapshot_static_unverified"))
     monkeypatch.setattr(pipeline, "_validate_rtsp", mark("rtsp", "rtsp_validation_unavailable"))
     monkeypatch.setattr(pipeline, "_validate_mjpeg", mark("mjpeg", "active_mjpeg_verified"))
-    monkeypatch.setattr(pipeline, "_validate_video_file", mark("video_file", "video_file_reachable_unknown_live"))
+    monkeypatch.setattr(pipeline, "_validate_video_file", mark("video_file", "video_file_reachable"))
     monkeypatch.setattr(pipeline, "_validate_unknown_media", mark("unknown_media", "unknown_media_unclassified"))
 
     cases = [
@@ -433,10 +433,12 @@ def test_mp4_and_mjpeg_do_not_fall_through_to_hls(tmp_path, monkeypatch):
     pipeline = ReviewAndValidationPipeline(_cfg(tmp_path, profile=RuntimeProfile.FULL))
     monkeypatch.setattr(pipeline, "_validate_hls", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("non-HLS routed to HLS")))
     monkeypatch.setattr(pipeline, "_validate_mjpeg", lambda *_a, **_k: "active_mjpeg_verified")
-    monkeypatch.setattr(pipeline, "_validate_video_file", lambda *_a, **_k: "video_file_reachable_unknown_live")
+    monkeypatch.setattr(pipeline, "_validate_video_file", lambda *_a, **_k: "video_file_reachable")
 
     assert pipeline._validate_candidate(CameraCandidate("https://media.example/cam.mjpg", source_metadata={"media_type": "mjpeg"})) == "active_mjpeg_verified"
-    assert pipeline._validate_candidate(CameraCandidate("https://media.example/cam.mp4", source_metadata={"media_type": "video_file"})) == "video_file_reachable_unknown_live"
+    video_candidate = CameraCandidate("https://media.example/cam.mp4", source_metadata={"media_type": "video_file"})
+    assert pipeline._validate_candidate(video_candidate) == "video_file_reachable"
+    assert video_candidate.source_metadata["liveness_status"] == "not_live_verified"
 
 
 def test_unknown_media_delegates_to_hls_or_returns_unclassified(tmp_path):
@@ -536,7 +538,9 @@ def test_mjpeg_and_video_file_validators_with_local_fixtures(tmp_path):
         pipeline = ReviewAndValidationPipeline(_cfg(tmp_path, profile=RuntimeProfile.FULL))
         assert pipeline._validate_mjpeg(f"{base}/stream.mjpg") == "active_mjpeg_verified"
         assert pipeline._validate_mjpeg(f"{base}/bad.mjpg") == "invalid_mjpeg"
-        assert pipeline._validate_video_file(f"{base}/video.mp4") == "video_file_reachable_unknown_live"
+        video_candidate = CameraCandidate(f"{base}/video.mp4", source_metadata={"media_type": "video_file"})
+        assert pipeline._validate_video_file(video_candidate.stream_url, candidate=video_candidate) == "video_file_reachable"
+        assert video_candidate.source_metadata["liveness_status"] == "not_live_verified"
         assert pipeline._validate_video_file(f"{base}/bad.mp4") == "invalid_video_file"
         assert pipeline._validate_video_file(f"{base}/restricted.mp4") == "restricted"
     finally:
@@ -562,7 +566,10 @@ def test_dashboard_csv_and_playlists_handle_non_hls_validators(tmp_path, monkeyp
             return "active_live_verified"
         if media == "mjpeg":
             return "active_mjpeg_verified"
-        return "video_file_reachable_unknown_live"
+        if media == "video_file":
+            candidate.source_metadata["liveness_status"] = "not_live_verified"
+            return "video_file_reachable"
+        raise AssertionError(f"unexpected media type {media}")
 
     monkeypatch.setattr(ReviewAndValidationPipeline, "_validate_candidate", lambda self, candidate: fake_validate(candidate))
     _, outputs = ReviewAndValidationPipeline(_cfg(tmp_path, profile=RuntimeProfile.FULL)).run([target], CandidateSet(unique=rows, review=rows, in_scope=rows))
@@ -570,9 +577,20 @@ def test_dashboard_csv_and_playlists_handle_non_hls_validators(tmp_path, monkeyp
     dashboard = json.loads((tmp_path / "media_validation_dashboard.json").read_text(encoding="utf-8"))
     assert dashboard["by_validator_name"] == {"hls": 1, "mjpeg": 1, "video_file": 1}
     assert dashboard["by_media_type"] == {"hls": 1, "mjpeg": 1, "video_file": 1}
+    assert dashboard["by_validation_status"]["video_file_reachable"] == 1
+    assert "video_file_reachable_unknown_live" not in json.dumps(dashboard)
     table_rows = list(csv.DictReader((tmp_path / "camera_candidates_table.csv").open(encoding="utf-8", newline="")))
     assert {row["normalized_media_type"] for row in table_rows} == {"hls", "mjpeg", "video_file"}
     assert {row["validator_name"] for row in table_rows} == {"hls", "mjpeg", "video_file"}
+    video_row = next(row for row in table_rows if row["normalized_media_type"] == "video_file")
+    assert video_row["validation_status"] == "video_file_reachable"
+    assert video_row["liveness_status"] == "not_live_verified"
+    assert "video_file_reachable_unknown_live" not in (tmp_path / "camera_candidates_table.csv").read_text(encoding="utf-8")
+    trusted_geojson_text = (tmp_path / "camera.geojson").read_text(encoding="utf-8")
+    review_geojson_text = (tmp_path / "untrusted_camera_candidates.geojson").read_text(encoding="utf-8")
+    assert "not_live_verified" in review_geojson_text
+    assert "video_file_reachable" in review_geojson_text
+    assert "video_file_reachable_unknown_live" not in trusted_geojson_text + review_geojson_text
     hls_playlist = (tmp_path / "playlists" / "hls_candidates.txt").read_text(encoding="utf-8")
     assert "live.m3u8" in hls_playlist
     assert "stream.mjpg" not in hls_playlist
