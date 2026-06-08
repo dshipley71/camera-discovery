@@ -368,6 +368,7 @@ def test_notebook_smoke_imports_pin_repo_src_for_running_kernel():
         Path("notebooks/camera_discovery_harvest_urls_test.ipynb"),
         Path("notebooks/camera_discovery_live_test.ipynb"),
         Path("notebooks/camera_discovery_harvest_hls_only_test.ipynb"),
+        Path("notebooks/camera_discovery_harvest_first_hls_balanced_validation_test.ipynb"),
         Path("notebooks/camera_discovery_harvest_hls_handoff_full_validation_test.ipynb"),
         Path("notebooks/camera_discovery_harvest_all_media_handoff_balanced_validation_test.ipynb"),
         Path("notebooks/camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb"),

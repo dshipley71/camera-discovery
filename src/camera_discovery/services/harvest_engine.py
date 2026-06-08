@@ -44,7 +44,7 @@ from camera_discovery.extraction.pagination import _pagination_rows
 from camera_discovery.extraction.search import parse_ddg_result_rows
 from camera_discovery.discovery.search.dispatcher import SearchDispatcher
 from camera_discovery.discovery.search_dispatch import _is_google_dork_query as _is_harvest_dork_query
-from camera_discovery.extraction.browser import browser_backend_preflight
+from camera_discovery.evidence.browser_capture import browser_backend_preflight
 from camera_discovery.harvest.json_records import (
     count_json_records,
     extract_json_blobs,
@@ -83,7 +83,6 @@ from camera_discovery.harvest.records import (
     record_from_candidate,
     record_from_media_asset,
     record_from_url,
-    row_from_source_entry,
 )
 from camera_discovery.services.discovery_engine import CandidateDiscoveryEngine
 from camera_discovery.services.structured_camera_records import (
@@ -93,6 +92,12 @@ from camera_discovery.services.structured_camera_records import (
     url_record_to_inventory,
 )
 from camera_discovery.sources import load_source_policy
+from camera_discovery.evidence.source_rows import (
+    direct_rows_requested,
+    query_direct_rows,
+    query_directory_rows,
+    select_source_rows,
+)
 from camera_discovery.utils.io import write_json, write_jsonl
 from camera_discovery.utils.playlists import export_harvest_playlists
 
@@ -275,7 +280,7 @@ class CameraUrlHarvestEngine:
             directory_rows = self._directory_rows()
         if self.config.discovery_mode in {DiscoveryMode.BLIND, DiscoveryMode.BOTH}:
             blind_rows = self._blind_rows()
-        if self.config.discovery_mode in {DiscoveryMode.DIRECT, DiscoveryMode.BOTH, DiscoveryMode.BLIND, DiscoveryMode.DIRECTORY}:
+        if direct_rows_requested(self.config.discovery_mode):
             direct_rows = self._direct_seed_rows()
         rows = [*directory_rows, *blind_rows, *direct_rows]
         selected_before_budget = self._select_rows(rows)
@@ -299,12 +304,7 @@ class CameraUrlHarvestEngine:
         return selected
 
     def _directory_rows(self) -> list[dict[str, str]]:
-        out: list[dict[str, str]] = []
-        for entry in self.source_policy.enabled_allowed_sources():
-            if self.source_policy.is_blocked(entry.url):
-                continue
-            out.append(row_from_source_entry(entry, self.config.query, provider="directory"))
-        return out
+        return query_directory_rows(self.source_policy, self.config.query)
 
     def _direct_seed_rows(self) -> list[dict[str, str]]:
         urls = list(self.config.seed_urls)
@@ -313,22 +313,7 @@ class CameraUrlHarvestEngine:
                 urls.extend(line.strip() for line in self.config.seed_file.read_text(encoding="utf-8").splitlines() if line.strip() and not line.lstrip().startswith("#"))
             except Exception as exc:
                 self._warnings.append(f"Could not read seed file {self.config.seed_file}: {exc!r}")
-        out: list[dict[str, str]] = []
-        for url in urls:
-            if self.source_policy.is_blocked(url):
-                continue
-            media_type = classify_media_url(url)
-            out.append(
-                {
-                    "query": self.config.query,
-                    "title": url,
-                    "url": url,
-                    "source_provider": "direct",
-                    "source_kind": "direct_media" if media_type else "page",
-                    "source_name": url,
-                }
-            )
-        return out
+        return query_direct_rows(urls, self.source_policy, self.config.query)
 
     def _blind_rows(self) -> list[dict[str, str]]:
         queries = harvest_search_queries(self.config.query, self.config.max_search_queries)
@@ -365,30 +350,12 @@ class CameraUrlHarvestEngine:
         )
 
     def _select_rows(self, rows: list[dict[str, str]]) -> list[dict[str, str]]:
-        selected: list[dict[str, str]] = []
-        blocked: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for row in rows:
-            url = (row.get("url") or "").split("#", 1)[0]
-            if not url.startswith(("http://", "https://", "rtsp://", "rtsps://")):
-                continue
-            reason = self.source_policy.block_reason(url)
-            if reason:
-                blocked.append({**row, "blocked_reason": reason})
-                continue
-            if url in seen:
-                continue
-            seen.add(url)
-            base_row = {**row, "url": url, "original_query": row.get("query") or self.config.query}
-            selected.append(base_row)
-            if url.startswith(("rtsp://", "rtsps://")):
-                continue
-            max_pages = max(1, self.config.max_pages_per_source)
-            for page_row in _pagination_rows(base_row, max_pages):
-                page_url = (page_row.get("url") or "").split("#", 1)[0]
-                if page_url and page_url not in seen and not self.source_policy.block_reason(page_url):
-                    seen.add(page_url)
-                    selected.append(page_row)
+        selected, blocked = select_source_rows(
+            rows,
+            source_policy=self.source_policy,
+            max_pages_per_source=self.config.max_pages_per_source,
+        )
+        selected = [{**row, "original_query": row.get("original_query") or row.get("query") or self.config.query} for row in selected]
         self._blocked_source_rows = blocked
         write_jsonl(self.logs_dir / "harvest_blocked_source_rows.jsonl", blocked)
         return selected
@@ -920,9 +887,9 @@ class CameraUrlHarvestEngine:
         media_assets = [asset for asset in self._media_assets.values() if not self.source_policy.is_blocked(asset.url)]
         endpoints = [endpoint for endpoint in self._discovered_endpoints.values() if not self.source_policy.is_blocked(endpoint.endpoint_url)]
 
-        camera_record_dicts = [asdict(record) for record in camera_records]
-        media_asset_dicts = [asdict(asset) for asset in media_assets]
-        endpoint_dicts = [asdict(endpoint) for endpoint in endpoints]
+        camera_record_dicts = [_source_policy_checked_dict(asdict(record)) for record in camera_records]
+        media_asset_dicts = [_source_policy_checked_dict(asdict(asset)) for asset in media_assets]
+        endpoint_dicts = [_source_policy_checked_dict(asdict(endpoint)) for endpoint in endpoints]
         write_jsonl(self.output_dir / "camera_records.jsonl", camera_record_dicts)
         outputs["camera_records_jsonl"] = str(self.output_dir / "camera_records.jsonl")
         write_jsonl(self.output_dir / "camera_media_assets.jsonl", media_asset_dicts)
@@ -941,6 +908,7 @@ class CameraUrlHarvestEngine:
 
         handoff = {
             "schema_version": "harvest-handoff/v2",
+            "evidence_schema_version": "extracted-evidence/v1",
             "query": self.config.query,
             "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "mode": "harvest",
@@ -1096,3 +1064,10 @@ class CameraUrlHarvestEngine:
         )
         return outputs
 
+
+
+def _source_policy_checked_dict(data: dict[str, Any]) -> dict[str, Any]:
+    data.setdefault("source_policy_checked", True)
+    if not data.get("blocked_reason"):
+        data.pop("blocked_reason", None)
+    return data

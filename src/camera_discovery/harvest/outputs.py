@@ -79,6 +79,9 @@ def count_rows_by_key(rows: Iterable[dict[str, Any]], key: str) -> dict[str, int
 def record_to_dict(record: HarvestedUrlRecord) -> dict[str, Any]:
     data = asdict(record)
     data.setdefault("media_url", data.get("url"))
+    data.setdefault("source_policy_checked", True)
+    if not data.get("blocked_reason"):
+        data.pop("blocked_reason", None)
     return data
 
 def write_plain_urls(path: Path, records: list[HarvestedUrlRecord]) -> None:
