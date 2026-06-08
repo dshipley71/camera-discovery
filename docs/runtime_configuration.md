@@ -222,7 +222,7 @@ camera-discovery harvest-urls "Example City cameras" --media rtsp,hls
 camera-discovery harvest-urls "Example City cameras" --media stream
 ```
 
-The `stream` category includes generic streams and RTSP records. RTSP validation uses `ffprobe` when available. If `ffprobe` is unavailable, the candidate receives `rtsp_validation_unavailable` and remains review/unknown rather than trusted.
+The `stream` category includes generic streams and RTSP records. RTSP validation uses bounded `ffprobe` only when the effective profile/config enables ffprobe validation (currently the `full` profile) and the binary is available. If ffprobe is disabled by profile/config, the candidate receives `rtsp_validation_disabled`; if ffprobe is enabled but unavailable, it receives `rtsp_validation_unavailable`. Both cases remain review/unknown rather than trusted, and RTSP validation never probes beyond the discovered URL.
 
 Playlist export and `media_validation_dashboard.json` are normal output artifacts and do not require a separate CLI flag. They inherit the active source policy and block/private-network checks.
 
@@ -273,6 +273,6 @@ The existing runtime profile controls media-validation depth. `--profile balance
 
 The validation dispatcher chooses among HLS, image snapshot, RTSP, MJPEG, video-file, and unknown-media validators using URL scheme, extension, declared media type, response headers, and bounded content sniffing. It does not use camera category (`traffic`, `weather`, `beach`, etc.) as the media type.
 
-When `ffprobe` is unavailable, RTSP validation reports `rtsp_validation_unavailable` rather than success. HLS, MJPEG, image snapshot, video-file, and unknown-media HTTP validators continue to run with configured HTTP timeouts and safe bounded reads. Validation summaries and run explanations include the media validation mode, full-segment setting, HTTP fallback availability, enabled validators, worker count, and timeout.
+When RTSP ffprobe validation is disabled by profile/config, RTSP validation reports `rtsp_validation_disabled` without checking for or invoking `ffprobe`. When ffprobe validation is enabled but the binary is unavailable, RTSP validation reports `rtsp_validation_unavailable` rather than success. HLS, MJPEG, image snapshot, video-file, and unknown-media HTTP validators continue to run with configured HTTP timeouts and safe bounded reads. Validation summaries and run explanations include the media validation mode, full-segment setting, HTTP fallback availability, enabled validators, worker count, and timeout.
 
 Full-validation notebooks are expected to set `RUN_PROFILE = "full"`, print `Effective RUN_PROFILE: full`, and pass the CLI profile through visibly rather than hiding a balanced profile in shell arguments.

@@ -169,8 +169,67 @@ def test_run_start_initializes_expected_empty_media_outputs(tmp_path):
     assert dorking["queries_generated"] == 0
 
 
+def test_rtsp_validation_honors_ffprobe_disabled_policy(tmp_path, monkeypatch):
+    pipeline = ReviewAndValidationPipeline(_cfg(tmp_path, profile=RuntimeProfile.BALANCED))
+    candidate = CameraCandidate("rtsp://public.example/live", source_metadata={"media_type": "rtsp"})
+
+    def fail_which(name):
+        raise AssertionError("shutil.which must not be called when ffprobe validation is disabled")
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("ffprobe subprocess must not run when ffprobe validation is disabled")
+
+    monkeypatch.setattr("camera_discovery.services.review_validation_pipeline.shutil.which", fail_which)
+    monkeypatch.setattr("camera_discovery.services.review_validation_pipeline.subprocess.run", fail_run)
+
+    status = pipeline._validate_rtsp(candidate.stream_url, candidate=candidate)
+
+    assert status == "rtsp_validation_disabled"
+    assert candidate.source_metadata["ffprobe_enabled"] is False
+    assert candidate.source_metadata["ffprobe_available"] is None
+    assert "disabled by configuration/profile" in candidate.source_metadata["validation_reason"]
+
+
+def test_rtsp_validation_reports_unavailable_when_enabled_but_ffprobe_missing(tmp_path, monkeypatch):
+    pipeline = ReviewAndValidationPipeline(_cfg(tmp_path, profile=RuntimeProfile.FULL))
+    candidate = CameraCandidate("rtsp://public.example/live", source_metadata={"media_type": "rtsp"})
+
+    monkeypatch.setattr("camera_discovery.services.review_validation_pipeline.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "camera_discovery.services.review_validation_pipeline.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ffprobe subprocess must not run when ffprobe is unavailable")),
+    )
+
+    status = pipeline._validate_rtsp(candidate.stream_url, candidate=candidate)
+
+    assert status == "rtsp_validation_unavailable"
+    assert candidate.source_metadata["ffprobe_enabled"] is True
+    assert candidate.source_metadata["ffprobe_available"] is False
+    assert "ffprobe is unavailable" in candidate.source_metadata["validation_reason"]
+
+
+def test_rtsp_validation_uses_ffprobe_once_when_enabled_and_available(tmp_path, monkeypatch):
+    pipeline = ReviewAndValidationPipeline(_cfg(tmp_path, profile=RuntimeProfile.FULL))
+    candidate = CameraCandidate("rtsp://public.example/live", source_metadata={"media_type": "rtsp"})
+    calls = []
+
+    monkeypatch.setattr("camera_discovery.services.review_validation_pipeline.shutil.which", lambda name: "/usr/bin/ffprobe")
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"streams":[{"codec_type":"video"}]}', stderr="")
+
+    monkeypatch.setattr("camera_discovery.services.review_validation_pipeline.subprocess.run", fake_run)
+
+    assert pipeline._validate_rtsp(candidate.stream_url, candidate=candidate) == "active_rtsp_verified"
+    assert len(calls) == 1
+    assert calls[0][0] == "/usr/bin/ffprobe"
+    assert candidate.source_metadata["ffprobe_enabled"] is True
+    assert candidate.source_metadata["ffprobe_available"] is True
+
+
 def test_rtsp_validation_statuses_are_safe_and_bounded(tmp_path, monkeypatch):
-    pipeline = ReviewAndValidationPipeline(_cfg(tmp_path))
+    pipeline = ReviewAndValidationPipeline(_cfg(tmp_path, profile=RuntimeProfile.FULL))
     calls = []
 
     monkeypatch.setattr("camera_discovery.services.review_validation_pipeline.shutil.which", lambda name: "/usr/bin/ffprobe")
@@ -338,6 +397,36 @@ def test_media_validation_dispatcher_routes_each_media_type(tmp_path, monkeypatc
         assert candidate.source_metadata["validator_name"] == expected_call
 
     assert "hls" not in calls or calls == ["unknown_media"]
+
+
+def test_rtsp_dispatcher_uses_profile_ffprobe_policy(tmp_path, monkeypatch):
+    balanced = ReviewAndValidationPipeline(_cfg(tmp_path / "balanced", profile=RuntimeProfile.BALANCED))
+    candidate = CameraCandidate("rtsp://public.example/live", source_metadata={"media_type": "rtsp"})
+
+    monkeypatch.setattr(
+        "camera_discovery.services.review_validation_pipeline.shutil.which",
+        lambda name: (_ for _ in ()).throw(AssertionError("balanced profile must not check ffprobe availability")),
+    )
+    assert balanced._validate_candidate(candidate) == "rtsp_validation_disabled"
+    assert candidate.source_metadata["validator_name"] == "rtsp"
+    assert candidate.source_metadata["normalized_media_type"] == "rtsp"
+    assert candidate.source_metadata["ffprobe_enabled"] is False
+    assert "disabled by configuration/profile" in candidate.source_metadata["validation_reason"]
+
+    full = ReviewAndValidationPipeline(_cfg(tmp_path / "full", profile=RuntimeProfile.FULL))
+    full_candidate = CameraCandidate("rtsp://public.example/live", source_metadata={"media_type": "rtsp"})
+    calls = []
+    monkeypatch.setattr("camera_discovery.services.review_validation_pipeline.shutil.which", lambda name: "/usr/bin/ffprobe")
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"streams":[{"codec_type":"video"}]}', stderr="")
+
+    monkeypatch.setattr("camera_discovery.services.review_validation_pipeline.subprocess.run", fake_run)
+    assert full._validate_candidate(full_candidate) == "active_rtsp_verified"
+    assert len(calls) == 1
+    assert full_candidate.source_metadata["ffprobe_enabled"] is True
+    assert full_candidate.source_metadata["ffprobe_available"] is True
 
 
 def test_mp4_and_mjpeg_do_not_fall_through_to_hls(tmp_path, monkeypatch):

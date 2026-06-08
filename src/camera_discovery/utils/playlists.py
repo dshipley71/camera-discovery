@@ -11,7 +11,7 @@ from camera_discovery.passive_intelligence import passive_intelligence_summary
 LIVE_STATUSES = {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing", "active_rtsp_verified", "active_mjpeg_verified"}
 RESTRICTED_STATUS_FRAGMENTS = ("restricted", "auth_required", "private_network", "not_allowed", "forbidden", "401", "403")
 DEAD_STATUS_FRAGMENTS = ("dead", "offline", "invalid", "decode_failed", "static_image_asset", "not_image", "dead_segments", "not_live")
-NOT_VALIDATED_STATUSES = {"not_validated", "validation_disabled", "not_validated_media_type", "rtsp_validation_unavailable", "unsupported_media_type", "unknown_media_unclassified"}
+NOT_VALIDATED_STATUSES = {"not_validated", "validation_disabled", "not_validated_media_type", "rtsp_validation_disabled", "rtsp_validation_unavailable", "unsupported_media_type", "unknown_media_unclassified"}
 
 
 def media_type_for_row(row: Any) -> str:

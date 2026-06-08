@@ -182,7 +182,7 @@ class ReviewAndValidationPipeline:
         result_metadata = {
             key: value
             for key, value in (candidate.source_metadata or {}).items()
-            if key in {"media_type", "normalized_media_type", "validator_name", "validation_status", "validation_reason", "validation_error", "validation_elapsed_ms", "validation_full_mode"}
+            if key in {"media_type", "normalized_media_type", "validator_name", "validation_status", "validation_reason", "validation_error", "validation_elapsed_ms", "validation_full_mode", "ffprobe_enabled", "ffprobe_available"}
         }
         result_metadata.setdefault("validation_status", status)
         with self._validation_result_cache_lock:
@@ -268,7 +268,7 @@ class ReviewAndValidationPipeline:
             elif normalized_media_type == "image_snapshot":
                 status = self._validate_image_snapshot(candidate.stream_url, metadata, candidate=candidate)
             elif normalized_media_type == "rtsp":
-                status = self._validate_rtsp(candidate.stream_url)
+                status = self._validate_rtsp(candidate.stream_url, candidate=candidate)
             elif normalized_media_type == "mjpeg":
                 status = self._validate_mjpeg(candidate.stream_url, candidate=candidate)
             elif normalized_media_type == "video_file":
@@ -287,19 +287,38 @@ class ReviewAndValidationPipeline:
         return status
 
 
-    def _validate_rtsp(self, url: str) -> str:
+    def _validate_rtsp(self, url: str, *, candidate: CameraCandidate | None = None) -> str:
+        metadata = candidate.source_metadata if candidate is not None else None
+        if metadata is not None:
+            metadata["ffprobe_enabled"] = bool(self.config.ffprobe_enabled)
+            metadata["ffprobe_available"] = None
         if is_private_or_local_media_url(url):
+            if metadata is not None:
+                metadata["validation_reason"] = "RTSP URL is private or local and cannot be validated"
             return "restricted_rtsp"
+        if not self.config.ffprobe_enabled:
+            if metadata is not None:
+                metadata["validation_reason"] = "RTSP ffprobe validation disabled by configuration/profile"
+            return "rtsp_validation_disabled"
         ffprobe = shutil.which("ffprobe")
         if not ffprobe:
+            if metadata is not None:
+                metadata["ffprobe_available"] = False
+                metadata["validation_reason"] = "RTSP ffprobe validation enabled but ffprobe is unavailable"
             return "rtsp_validation_unavailable"
+        if metadata is not None:
+            metadata["ffprobe_available"] = True
         timeout = max(1.0, min(float(self.config.http_timeout or 5.0), 10.0))
         cmd = [ffprobe, "-v", "error", "-show_entries", "stream=codec_type", "-of", "json", url]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
         except subprocess.TimeoutExpired:
+            if metadata is not None:
+                metadata["validation_reason"] = "ffprobe timed out while validating discovered RTSP URL"
             return "offline_rtsp"
-        except Exception:
+        except Exception as exc:
+            if metadata is not None:
+                metadata["validation_error"] = repr(exc)[:300]
             return "dead_rtsp"
         stdout = (result.stdout or "")[:4096]
         stderr = redact_url_userinfo((result.stderr or "")[:4096])
@@ -1169,6 +1188,8 @@ def _validation_status_category(status: str) -> str:
         return "dead"
     if status in {"restricted", "restricted_http", "restricted_rtsp", "auth_required_rtsp"}:
         return "unknown"
+    if status in {"rtsp_validation_disabled", "rtsp_validation_unavailable", "not_validated", "unsupported_media_type", "unknown_media_unclassified"}:
+        return "unknown"
     return "unknown"
 
 
@@ -1296,6 +1317,10 @@ def _enabled_validator_names() -> list[str]:
 
 
 def _default_validation_reason(status: str, media_type: str) -> str:
+    if status == "rtsp_validation_disabled":
+        return "RTSP ffprobe validation disabled by configuration/profile"
+    if status == "rtsp_validation_unavailable":
+        return "RTSP ffprobe validation enabled but ffprobe is unavailable"
     return f"{_validator_name_for_media_type(media_type)} validator returned {status}"
 
 
@@ -1309,7 +1334,7 @@ def _candidate_disposition(candidate: CameraCandidate) -> str:
         return "restricted"
     if status in {"dead", "offline_http", "dead_link", "decode_failed", "active_playlist_dead_segments"} or status.startswith(("dead", "offline")):
         return "dead"
-    if status == "not_validated" or not candidate.validation_status:
+    if status in {"not_validated", "rtsp_validation_disabled", "rtsp_validation_unavailable"} or not candidate.validation_status:
         return "not_validated"
     if candidate.scope_status == "unknown" or not candidate.has_coordinates:
         return "unknown_location"
