@@ -12,7 +12,7 @@ camera.geojson                         # trusted output; only when trusted recor
 camera_inventory.jsonl                  # trusted inventory; only when trusted records exist
 cameras.md                              # trusted markdown inventory; only when trusted records exist
 untrusted_camera_candidates.geojson     # review/audit map output when review candidates exist
-camera_candidates_table.csv             # non-rejected candidate table
+camera_candidates_table.csv             # all unique candidates table
 map.html                                # embedded Leaflet review/trusted map
 target_geometry.geojson                 # portable resolved target boundary/search geometry
 review_artifacts.zip                    # package of review artifacts
@@ -267,3 +267,19 @@ Use `--profile full` to enable full HLS segment/variant checks. `--profile balan
 `run/logs/run_summary.json` is summary-only. Candidate-level details remain in `camera_candidates_table.csv`, `logs/validation_results.jsonl`, `logs/candidate_evidence_summary.jsonl`, per-target candidate JSONL files, and source-row JSONL files.
 
 Harvest runs write `harvest/logs/search_service_summary.json`. It always contains `ddg`, `bing`, `searxng`, and `google_dork` entries with configured/attempted/status/query/result/selected/blocked/duplicate/error/skip fields, even when a service is skipped or returns zero rows. `harvest/logs/search_engine_diagnostics.jsonl` remains the detailed per-query diagnostic stream.
+
+
+## Media validation dispatcher
+
+Validation dispatch is based on media/protocol evidence, not semantic camera category. For example, traffic, beach, and weather cameras that point to `.m3u8` URLs all use the HLS validator; camera category never routes validation. The dispatcher normalizes each candidate to one primary media validator and records `media_type`, `normalized_media_type`, `validator_name`, `validation_status`, `validation_reason`, `validation_error` when present, `validation_elapsed_ms`, and whether full validation was enabled. These fields are available in candidate CSV rows and candidate metadata JSONL/GeoJSON properties.
+
+Supported validators and status semantics:
+
+- HLS (`hls`) fetches a playlist and verifies `#EXTM3U`. In `full` profile it follows bounded variant/media playlists and checks at least one resolved segment or nested media URL before returning `active_live_verified`. Lightweight/balanced validation returns `active_live_unknown` for reachable playlists whose segment/live status was not proven. Other HLS statuses include `active_playlist_dead_segments`, `invalid_hls`, `dead`, `restricted`, and `not_validated`.
+- Image snapshot (`image_snapshot`) preserves the existing bounded image validation: it fetches with cache-busting, checks HTTP status and image content, rejects static assets/icons/placeholders when detected, and may return `active_image_snapshot_refreshing`, `active_image_snapshot_static_unverified`, `image_snapshot_not_image`, `static_image_asset`, `dead`, `restricted`, or `not_validated`.
+- RTSP (`rtsp`) validates only discovered RTSP/RSTS URLs or explicit RTSP-classified candidates. It uses bounded `ffprobe` when available and returns `active_rtsp_verified`, `auth_required_rtsp`, `offline_rtsp`, `dead_rtsp`, or `rtsp_validation_unavailable`; it never guesses paths, ports, credentials, or undiscovered URLs.
+- MJPEG (`mjpeg`) performs a bounded HTTP stream read and checks for `multipart/x-mixed-replace`, MJPEG content types, boundaries, and JPEG frame markers. It can return `active_mjpeg_verified`, `active_mjpeg_unknown`, `invalid_mjpeg`, `dead`, `restricted`, or `not_validated`.
+- Video file (`video_file`, including MP4/MOV/WEBM/M4V) uses bounded `HEAD` and ranged `GET` checks for video content. Reachable direct video files return `video_file_reachable_unknown_live`; they are not automatically treated as live camera streams and do not produce `active_live_verified` without a live/segment/stream proof. Invalid, dead, restricted, and not-validated outcomes remain distinct.
+- Unknown media (`unknown_media`) performs a bounded classification pass from URL, headers, and a small content sample. If evidence proves a supported media type, it delegates once to the matching validator. If not, it returns `unknown_media_unclassified` or `unsupported_media_type` and does not pretend validation succeeded.
+
+`media_validation_dashboard.json` preserves top-level `total_candidates`, `validated`, `trusted`, `untrusted_review`, `dead`, `restricted`, and `not_validated` fields and now includes `by_validator_name` alongside `by_media_type` and `by_validation_status`. HLS playlist exports remain HLS-only; RTSP/MJPEG/video-file candidates are not inserted into HLS playlist artifacts.

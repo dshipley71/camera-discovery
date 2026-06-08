@@ -265,3 +265,14 @@ camera-discovery run "California traffic cameras" \
 This preset harvests HLS media evidence first, feeds only the generated handoff into the normal target-aware run, scope-gates before expensive validation, and validates each normalized stream URL once with result reuse for duplicate candidate rows. It does not bypass source policy, target resolution, deterministic scope checks, media validation, or trust gates.
 
 Search-service diagnostics for harvest mode are summarized in `logs/search_service_summary.json` with rows for DDG, Bing, SearXNG, and guarded Google dork search. Missing SearXNG configuration appears as `not_configured`; zero-result services remain visible instead of being hidden.
+
+
+## Media validation modes and ffprobe availability
+
+The existing runtime profile controls media-validation depth. `--profile balanced` performs lightweight validation: HLS playlist reachability/structure, image snapshot checks, and bounded media-specific checks that do not require proving live segments. `--profile full` enables full media validation behavior, including HLS segment/variant checks and full MJPEG/video-file validators. No extra CLI flag is required.
+
+The validation dispatcher chooses among HLS, image snapshot, RTSP, MJPEG, video-file, and unknown-media validators using URL scheme, extension, declared media type, response headers, and bounded content sniffing. It does not use camera category (`traffic`, `weather`, `beach`, etc.) as the media type.
+
+When `ffprobe` is unavailable, RTSP validation reports `rtsp_validation_unavailable` rather than success. HLS, MJPEG, image snapshot, video-file, and unknown-media HTTP validators continue to run with configured HTTP timeouts and safe bounded reads. Validation summaries and run explanations include the media validation mode, full-segment setting, HTTP fallback availability, enabled validators, worker count, and timeout.
+
+Full-validation notebooks are expected to set `RUN_PROFILE = "full"`, print `Effective RUN_PROFILE: full`, and pass the CLI profile through visibly rather than hiding a balanced profile in shell arguments.

@@ -268,7 +268,7 @@ End-to-end Colab notebooks live under `notebooks/`:
 |---|---|
 | `camera_discovery_harvest_hls_only_test.ipynb` | HLS-only harvest workflow using routine `.m3u8` extraction settings. |
 | `camera_discovery_harvest_first_hls_balanced_validation_test.ipynb` | One-command `run --harvest-first --harvest-media .m3u8` workflow through balanced validation, with separate `harvest/` and `run/` artifacts. |
-| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | HLS harvest followed by visible `run --profile balanced --http-timeout 10 --harvest-input --harvest-input-mode handoff-only ...` for practical interactive validation. |
+| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | HLS harvest followed by visible `run --profile full --http-timeout 10 --harvest-input --harvest-input-mode handoff-only ...` for full media validation. |
 | `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | All-media harvest followed by visible bounded handoff validation/review with `--http-timeout 10`. |
 | `camera_discovery_pipeline_only_profiles_test.ipynb` | Pipeline-only comparison for `fast`, `balanced`, and `full` profiles. |
 
@@ -314,3 +314,8 @@ camera-discovery now includes country/language-aware official-source query expan
 Harvest mode writes `harvest/logs/search_service_summary.json` with DDG, Bing, SearXNG, and guarded Google dork search rows every run. Skipped or zero-result services remain visible with status and skip/error reason fields.
 
 For efficient harvest-first HLS full validation, run `camera-discovery run --harvest-first --harvest-media .m3u8 --harvest-input-mode handoff-only --profile full --http-timeout 10` and keep browser capture disabled unless dynamic extraction is required.
+
+
+### Media validation dispatcher
+
+The run pipeline dispatches validation by normalized media/protocol evidence, not camera category. HLS, image snapshots, RTSP, MJPEG, direct video files, and unknown media each have explicit validator paths. Unknown media performs bounded classification and delegates once only when URL/header/content evidence proves a supported type. Direct MP4/MOV/WEBM/M4V files are reported as reachable video files, not automatically as live streams; `active_live_verified` is reserved for validators that prove live/segment/stream evidence.

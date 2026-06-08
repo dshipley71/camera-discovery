@@ -64,7 +64,7 @@ class ReviewAndValidationPipeline:
         self._thread_local = threading.local()
         self._validation_clients: list[httpx.Client] = []
         self._validation_clients_lock = threading.Lock()
-        self._validation_result_cache: dict[str, str] = {}
+        self._validation_result_cache: dict[str, dict[str, Any]] = {}
         self._validation_result_cache_lock = threading.Lock()
         self.source_policy = load_source_policy(config.sources_file, config.block_patterns)
 
@@ -171,14 +171,22 @@ class ReviewAndValidationPipeline:
         with self._validation_result_cache_lock:
             cached = self._validation_result_cache.get(key)
         if cached is not None:
+            candidate.source_metadata.update(cached)
             candidate.source_metadata["validation_result_reused"] = True
-            return cached
+            return str(cached.get("validation_status") or "unknown_media_unclassified")
         try:
             status = self._validate_candidate(candidate)
-        except Exception:
+        except Exception as exc:
             status = "dead"
+            candidate.source_metadata.setdefault("validation_error", repr(exc)[:300])
+        result_metadata = {
+            key: value
+            for key, value in (candidate.source_metadata or {}).items()
+            if key in {"media_type", "normalized_media_type", "validator_name", "validation_status", "validation_reason", "validation_error", "validation_elapsed_ms", "validation_full_mode"}
+        }
+        result_metadata.setdefault("validation_status", status)
         with self._validation_result_cache_lock:
-            self._validation_result_cache.setdefault(key, status)
+            self._validation_result_cache.setdefault(key, result_metadata)
         return status
 
     def _record_validation_progress(
@@ -241,14 +249,42 @@ class ReviewAndValidationPipeline:
             candidate.trust_level = "untrusted"
 
     def _validate_candidate(self, candidate: CameraCandidate) -> str:
-        media_type = media_type_for_row(candidate)
-        if media_type == "rtsp":
-            return self._validate_rtsp(candidate.stream_url)
-        if media_type == "image_snapshot":
-            return self._validate_image_snapshot(candidate.stream_url, candidate.source_metadata or {}, candidate=candidate)
-        if media_type and media_type not in {"hls", "hls_stream", "video", "unknown", "unknown_media"} and ".m3u8" not in candidate.stream_url.casefold():
-            return "not_validated_media_type"
-        return self._validate_hls(candidate.stream_url, candidate=candidate)
+        return self._validate_candidate_with_dispatcher(candidate)
+
+    def _validate_candidate_with_dispatcher(self, candidate: CameraCandidate, *, allow_unknown_delegate: bool = True) -> str:
+        started_at = time.monotonic()
+        metadata = candidate.source_metadata or {}
+        candidate.source_metadata = metadata
+        original_media_type = str(metadata.get("media_type") or "")
+        normalized_media_type = _normalized_media_type_for_candidate(candidate)
+        metadata["media_type"] = original_media_type or normalized_media_type
+        metadata["normalized_media_type"] = normalized_media_type
+        metadata["validation_full_mode"] = bool(self.config.full_segment_validation_enabled)
+        validator_name = _validator_name_for_media_type(normalized_media_type)
+        metadata["validator_name"] = validator_name
+        try:
+            if normalized_media_type == "hls":
+                status = self._validate_hls(candidate.stream_url, candidate=candidate)
+            elif normalized_media_type == "image_snapshot":
+                status = self._validate_image_snapshot(candidate.stream_url, metadata, candidate=candidate)
+            elif normalized_media_type == "rtsp":
+                status = self._validate_rtsp(candidate.stream_url)
+            elif normalized_media_type == "mjpeg":
+                status = self._validate_mjpeg(candidate.stream_url, candidate=candidate)
+            elif normalized_media_type == "video_file":
+                status = self._validate_video_file(candidate.stream_url, candidate=candidate)
+            elif normalized_media_type == "unknown_media":
+                status = self._validate_unknown_media(candidate, allow_delegate=allow_unknown_delegate)
+            else:
+                status = "unsupported_media_type"
+                metadata["validation_reason"] = f"unsupported normalized media type: {normalized_media_type}"
+        except Exception as exc:
+            status = "dead"
+            metadata["validation_error"] = repr(exc)[:300]
+        metadata["validation_status"] = status
+        metadata["validation_elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
+        metadata.setdefault("validation_reason", _default_validation_reason(status, normalized_media_type))
+        return status
 
 
     def _validate_rtsp(self, url: str) -> str:
@@ -324,7 +360,7 @@ class ReviewAndValidationPipeline:
             if r.status_code >= 400:
                 return "dead"
             if "#EXTM3U" not in r.text[:4096]:
-                return "dead"
+                return "invalid_hls"
             if not self.config.full_segment_validation_enabled:
                 return "active_live_unknown"
             segment_url = self._first_playlist_segment_url(url, r.text, client=client)
@@ -421,6 +457,98 @@ class ReviewAndValidationPipeline:
             return "dead_link"
 
 
+    def _validate_mjpeg(self, url: str, *, candidate: CameraCandidate | None = None) -> str:
+        try:
+            client = self._get_thread_validation_client(create=False)
+            if client is not None:
+                return self._validate_mjpeg_with_client(url, client, candidate=candidate)
+            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as fallback_client:
+                return self._validate_mjpeg_with_client(url, fallback_client, candidate=candidate)
+        except Exception:
+            return "dead"
+
+    def _validate_mjpeg_with_client(self, url: str, client: httpx.Client, *, candidate: CameraCandidate | None = None) -> str:
+        started_at = time.monotonic()
+        try:
+            response, sample = _bounded_get_bytes(client, url, max_bytes=32768)
+            text_sample = sample[:4096].decode("latin-1", errors="ignore") if sample else None
+            self._attach_validation_http_metadata(url, response, text=text_sample, started_at=started_at, candidate=candidate)
+            if response.status_code in {401, 403}:
+                return "restricted"
+            if response.status_code >= 400:
+                return "dead"
+            content_type = response.headers.get("content-type", "").casefold()
+            if "multipart/x-mixed-replace" in content_type or "mjpeg" in content_type or _bytes_look_like_mjpeg(sample):
+                return "active_mjpeg_verified"
+            if content_type.startswith(("text/html", "application/json", "text/plain")):
+                return "invalid_mjpeg"
+            return "active_mjpeg_unknown" if not self.config.full_segment_validation_enabled else "invalid_mjpeg"
+        except Exception:
+            return "dead"
+
+    def _validate_video_file(self, url: str, *, candidate: CameraCandidate | None = None) -> str:
+        try:
+            client = self._get_thread_validation_client(create=False)
+            if client is not None:
+                return self._validate_video_file_with_client(url, client, candidate=candidate)
+            with httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True) as fallback_client:
+                return self._validate_video_file_with_client(url, fallback_client, candidate=candidate)
+        except Exception:
+            return "dead"
+
+    def _validate_video_file_with_client(self, url: str, client: httpx.Client, *, candidate: CameraCandidate | None = None) -> str:
+        try:
+            started_at = time.monotonic()
+            head = client.head(url)
+            self._attach_validation_http_metadata(url, head, text=None, started_at=started_at, candidate=candidate)
+            if head.status_code in {401, 403}:
+                return "restricted"
+            if 200 <= head.status_code < 300 and _headers_or_url_indicate_video_file(url, head.headers):
+                return "video_file_reachable_unknown_live"
+            response, sample = _bounded_get_bytes(client, url, max_bytes=4096)
+            self._attach_validation_http_metadata(url, response, text=None, started_at=None, candidate=candidate)
+            if response.status_code in {401, 403}:
+                return "restricted"
+            if response.status_code >= 400:
+                return "dead"
+            if _headers_indicate_video_file(response.headers) or _bytes_look_like_video_file(sample):
+                return "video_file_reachable_unknown_live"
+            return "invalid_video_file"
+        except Exception:
+            return "dead"
+
+    def _validate_unknown_media(self, candidate: CameraCandidate, *, allow_delegate: bool = True) -> str:
+        if not allow_delegate:
+            candidate.source_metadata["validation_reason"] = "unknown media delegate recursion prevented"
+            return "unknown_media_unclassified"
+        try:
+            client = self._get_thread_validation_client(create=False)
+            owns_client = client is None
+            if client is None:
+                client = httpx.Client(timeout=self.config.http_timeout, headers={"User-Agent": self.config.user_agent}, follow_redirects=True)
+            try:
+                response, sample = _bounded_get_bytes(client, candidate.stream_url, max_bytes=8192)
+                self._attach_validation_http_metadata(candidate.stream_url, response, text=sample[:4096].decode("latin-1", errors="ignore"), started_at=None, candidate=candidate)
+            finally:
+                if owns_client:
+                    client.close()
+            if response.status_code in {401, 403}:
+                return "restricted"
+            if response.status_code >= 400:
+                return "dead"
+            classified = _classify_unknown_media_response(candidate.stream_url, response.headers, sample)
+            if not classified:
+                candidate.source_metadata["validation_reason"] = "unknown media could not be classified from URL, headers, or bounded content sample"
+                return "unknown_media_unclassified"
+            candidate.source_metadata["unknown_media_classified_as"] = classified
+            candidate.source_metadata["normalized_media_type"] = classified
+            candidate.source_metadata["validator_name"] = _validator_name_for_media_type(classified)
+            return self._validate_candidate_with_dispatcher(candidate, allow_unknown_delegate=False)
+        except Exception as exc:
+            candidate.source_metadata["validation_error"] = repr(exc)[:300]
+            return "unknown_media_unclassified"
+
+
     def _attach_validation_http_metadata(self, url: str, response: httpx.Response, *, text: str | None = None, started_at: float | None = None, candidate: CameraCandidate | None = None) -> None:
         """Cache passive HTTP metadata from validation requests already in progress."""
         try:
@@ -497,7 +625,7 @@ class ReviewAndValidationPipeline:
             self.logs_dir / "candidate_priority_summary.json",
             _candidate_priority_summary(prioritized_unique),
         )
-        write_json(self.logs_dir / "validation_summary.json", {**asdict(v), "full_segment_validation_enabled": self.config.full_segment_validation_enabled, "http_segment_fallback_enabled": True, "validation_result_cache_entries": len(self._validation_result_cache)})
+        write_json(self.logs_dir / "validation_summary.json", {**asdict(v), "media_validation_mode": "full" if self.config.full_segment_validation_enabled else "lightweight", "full_segment_validation_enabled": self.config.full_segment_validation_enabled, "http_segment_fallback_enabled": True, "enabled_validators": _enabled_validator_names(), "validation_result_cache_entries": len(self._validation_result_cache)})
         playlist_summary = export_candidate_playlists(
             self.config.output_dir,
             prioritized_unique,
@@ -581,7 +709,7 @@ class ReviewAndValidationPipeline:
                 "coordinate_bearing_geojson_features_written": out.coordinate_bearing_geojson_features_written,
                 "coordinate_bearing_without_geojson": out.coordinate_bearing_without_geojson,
             },
-            "validation": {**asdict(v), "full_segment_validation_enabled": self.config.full_segment_validation_enabled, "http_segment_fallback_enabled": True},
+            "validation": {**asdict(v), "media_validation_mode": "full" if self.config.full_segment_validation_enabled else "lightweight", "full_segment_validation_enabled": self.config.full_segment_validation_enabled, "http_segment_fallback_enabled": True, "enabled_validators": _enabled_validator_names()},
             "media_validation_dashboard": media_dashboard or {},
             "passive_intelligence": passive_summary,
             "playlist_exports": playlist_summary or {},
@@ -683,6 +811,12 @@ class ReviewAndValidationPipeline:
             "camera_refresh_rate",
             "map_refresh_rate_seconds",
             "media_type",
+            "normalized_media_type",
+            "validator_name",
+            "validation_reason",
+            "validation_error",
+            "validation_elapsed_ms",
+            "validation_full_mode",
             "source_metadata_json",
             "protocol_label",
             "media_family",
@@ -743,6 +877,12 @@ class ReviewAndValidationPipeline:
                         "camera_refresh_rate": _camera_refresh_rate(metadata),
                         "map_refresh_rate_seconds": _camera_map_refresh_rate_seconds(metadata, self.config.image_snapshot_refresh_delay_seconds) if media_type == "image_snapshot" else None,
                         "media_type": media_type,
+                        "normalized_media_type": metadata.get("normalized_media_type") or media_type_for_row(row),
+                        "validator_name": metadata.get("validator_name"),
+                        "validation_reason": metadata.get("validation_reason"),
+                        "validation_error": metadata.get("validation_error"),
+                        "validation_elapsed_ms": metadata.get("validation_elapsed_ms"),
+                        "validation_full_mode": metadata.get("validation_full_mode"),
                         "source_metadata_json": json.dumps(metadata, sort_keys=True, default=str),
                         "protocol_label": metadata.get("protocol_label"),
                         "media_family": metadata.get("media_family"),
@@ -804,6 +944,12 @@ class ReviewAndValidationPipeline:
                     "json_record_path": metadata.get("json_record_path"),
                     "json_record_schema_hint": metadata.get("json_record_schema_hint"),
                     "media_type": media_type,
+                    "normalized_media_type": metadata.get("normalized_media_type") or media_type_for_row(c),
+                    "validator_name": metadata.get("validator_name"),
+                    "validation_reason": metadata.get("validation_reason"),
+                    "validation_error": metadata.get("validation_error"),
+                    "validation_elapsed_ms": metadata.get("validation_elapsed_ms"),
+                    "validation_full_mode": metadata.get("validation_full_mode"),
                     "protocol_label": metadata.get("protocol_label"),
                     "media_family": metadata.get("media_family"),
                     "protocol_confidence": metadata.get("protocol_confidence"),
@@ -1005,7 +1151,7 @@ def _bbox_polygon_geometry(bbox: dict[str, Any] | None) -> dict[str, Any] | None
     }
 
 def _validation_status_category(status: str) -> str:
-    if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing", "active_rtsp_verified"}:
+    if status in {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing", "active_rtsp_verified", "active_mjpeg_verified"}:
         return "live"
     if status in {
         "dead_link",
@@ -1016,6 +1162,9 @@ def _validation_status_category(status: str) -> str:
         "dead_rtsp",
         "offline_rtsp",
         "dead",
+        "invalid_hls",
+        "invalid_mjpeg",
+        "invalid_video_file",
     }:
         return "dead"
     if status in {"restricted", "restricted_http", "restricted_rtsp", "auth_required_rtsp"}:
@@ -1090,6 +1239,64 @@ def _camera_location_display(candidate: CameraCandidate, target: TargetContext |
 
 def _normalized_validation_url(url: str) -> str:
     return str(url or "").split("#", 1)[0]
+
+
+def _normalized_media_type_for_candidate(candidate: CameraCandidate) -> str:
+    metadata = candidate.source_metadata or {}
+    explicit = str(metadata.get("normalized_media_type") or metadata.get("media_type") or "").strip().casefold()
+    url = str(candidate.stream_url or "")
+    url_classified = _classify_media_url_for_validation(url, content_type=str(metadata.get("content_type") or metadata.get("http_content_type") or ""))
+    if explicit in {"hls", "hls_stream"}:
+        return "hls"
+    if explicit in {"rtsp", "rtsps", "rtsp_stream"}:
+        return "rtsp"
+    if explicit in {"mjpeg", "mjpg"}:
+        return "mjpeg"
+    if explicit in {"mp4", "video", "video_file", "mov", "webm", "m4v"}:
+        return "video_file"
+    if explicit in {"image", "snapshot", "image_snapshot"}:
+        return "image_snapshot"
+    if explicit in {"unknown", "unknown_media", "stream", "unknown_media"}:
+        return url_classified or "unknown_media"
+    if explicit:
+        return url_classified or explicit
+    return url_classified or media_type_for_row(candidate) or "unknown_media"
+
+
+def _classify_media_url_for_validation(url: str, *, content_type: str = "") -> str | None:
+    lowered = str(url or "").casefold()
+    ctype = str(content_type or "").casefold()
+    path = urlparse(lowered).path
+    if lowered.startswith(("rtsp://", "rtsps://")):
+        return "rtsp"
+    if path.endswith(".m3u8") or ".m3u8" in lowered or "mpegurl" in ctype:
+        return "hls"
+    if path.endswith((".mjpg", ".mjpeg")) or "multipart/x-mixed-replace" in ctype or "mjpeg" in ctype:
+        return "mjpeg"
+    if path.endswith((".mp4", ".webm", ".mov", ".m4v")) or ctype.startswith("video/"):
+        return "video_file"
+    if path.endswith((".jpg", ".jpeg", ".png", ".webp")) or ctype.startswith("image/"):
+        return "image_snapshot"
+    return None
+
+
+def _validator_name_for_media_type(media_type: str) -> str:
+    return {
+        "hls": "hls",
+        "image_snapshot": "image_snapshot",
+        "rtsp": "rtsp",
+        "mjpeg": "mjpeg",
+        "video_file": "video_file",
+        "unknown_media": "unknown_media",
+    }.get(media_type, "unsupported_media")
+
+
+def _enabled_validator_names() -> list[str]:
+    return ["hls", "image_snapshot", "rtsp", "mjpeg", "video_file", "unknown_media"]
+
+
+def _default_validation_reason(status: str, media_type: str) -> str:
+    return f"{_validator_name_for_media_type(media_type)} validator returned {status}"
 
 
 def _candidate_disposition(candidate: CameraCandidate) -> str:
@@ -1231,6 +1438,62 @@ def _cache_busted_url(url: str) -> str:
     query = parse_qsl(parsed.query, keep_blank_values=True)
     query.append(("_camera_discovery_refresh", str(time.time_ns())))
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(query), parsed.fragment))
+
+
+def _bounded_get_bytes(client: httpx.Client, url: str, *, max_bytes: int) -> tuple[httpx.Response, bytes]:
+    chunks: list[bytes] = []
+    total = 0
+    with client.stream("GET", url, headers={"Range": f"bytes=0-{max(0, max_bytes - 1)}"}) as response:
+        for chunk in response.iter_bytes():
+            if not chunk:
+                continue
+            remaining = max_bytes - total
+            if remaining <= 0:
+                break
+            chunks.append(chunk[:remaining])
+            total += min(len(chunk), remaining)
+            if total >= max_bytes:
+                break
+        return response, b"".join(chunks)
+
+
+def _bytes_look_like_mjpeg(sample: bytes) -> bool:
+    lowered = sample[:4096].lower()
+    if b"multipart/x-mixed-replace" in lowered:
+        return True
+    return b"--" in sample[:2048] and b"\xff\xd8" in sample and b"\xff\xd9" in sample
+
+
+def _headers_or_url_indicate_video_file(url: str, headers: httpx.Headers) -> bool:
+    content_type = headers.get("content-type", "").casefold()
+    path = urlparse(url).path.casefold()
+    return content_type.startswith("video/") or path.endswith((".mp4", ".webm", ".mov", ".m4v"))
+
+
+def _headers_indicate_video_file(headers: httpx.Headers) -> bool:
+    return headers.get("content-type", "").casefold().startswith("video/")
+
+
+def _bytes_look_like_video_file(sample: bytes) -> bool:
+    if len(sample) >= 12 and sample[4:8] == b"ftyp":
+        return True
+    return sample.startswith(b"\x1a\x45\xdf\xa3")
+
+
+def _classify_unknown_media_response(url: str, headers: httpx.Headers, sample: bytes) -> str | None:
+    by_url = _classify_media_url_for_validation(url, content_type=headers.get("content-type", ""))
+    if by_url:
+        return by_url
+    prefix = sample[:4096]
+    if b"#EXTM3U" in prefix:
+        return "hls"
+    if _bytes_look_like_mjpeg(prefix):
+        return "mjpeg"
+    if _bytes_look_like_image(sample):
+        return "image_snapshot"
+    if _bytes_look_like_video_file(sample):
+        return "video_file"
+    return None
 
 
 def _snapshot_http_status(response: httpx.Response) -> str | None:
