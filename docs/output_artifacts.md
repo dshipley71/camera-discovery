@@ -246,3 +246,24 @@ logs/playlist_export_summary.json
 ## Passive intelligence artifacts
 
 Normal discovery runs can write passive intelligence artifacts under `logs/`: `passive_intelligence_summary.json`, `source_row_evidence_summary.jsonl`, `candidate_evidence_summary.jsonl`, and `candidate_priority_explanation.jsonl`. `media_validation_dashboard.json` includes a `passive_intelligence` section with evidence bands, protocol label counts, signature family counts, and top evidence reasons. Candidate CSV and GeoJSON properties include compact evidence score, band, protocol, HTTP status/content type/final URL, and why-candidate-mattered fields.
+
+## Candidate CSV, full HLS validation, and search-service diagnostics
+
+`camera_candidates_table.csv` is now the complete tabular candidate artifact for a normal run. It includes every unique candidate considered by the output stage, including trusted inventory rows, untrusted review rows, dead/offline rows, restricted rows, out-of-scope rows, unknown-location rows that cannot be represented in GeoJSON, and not-validated rows. The table includes `candidate_disposition`, `validation_status`, `trust_level`, `scope_status`, normalized `camera_type`, source-only `raw_camera_type`, stream/source/provider fields, coordinates when available, display image fields, and `source_metadata_json`. Its row count is reported in `media_validation_dashboard.json -> outputs -> candidate_table_rows` and in `logs/camera_candidates_table_status.json`; the dedupe key is `stream_url` without fragment plus `target_id`.
+
+Trusted `camera.geojson` remains limited to trusted, validated, in-scope, coordinate-bearing records. `untrusted_camera_candidates.geojson` remains coordinate-only, so candidates without geometry may appear only in the CSV/JSONL artifacts.
+
+HLS validation statuses are:
+
+- `active_live_verified` — playlist reachable and a bounded real media segment or nested variant/media playlist check succeeded.
+- `active_live_unknown` — playlist reachable, but full segment/live verification was not requested or was inconclusive.
+- `active_playlist_dead_segments` — playlist reachable, but the selected segment/variant/media check failed.
+- `dead` — playlist unreachable or not a valid HLS playlist.
+- `restricted` — HTTP access was forbidden/restricted.
+- `not_validated` — validation was skipped by profile or never reached.
+
+Use `--profile full` to enable full HLS segment/variant checks. `--profile balanced` keeps lightweight playlist validation and may report `active_live_unknown`. The full path uses HTTP segment validation and does not require `ffprobe` for HLS segment success.
+
+`run/logs/run_summary.json` is summary-only. Candidate-level details remain in `camera_candidates_table.csv`, `logs/validation_results.jsonl`, `logs/candidate_evidence_summary.jsonl`, per-target candidate JSONL files, and source-row JSONL files.
+
+Harvest runs write `harvest/logs/search_service_summary.json`. It always contains `ddg`, `bing`, `searxng`, and `google_dork` entries with configured/attempted/status/query/result/selected/blocked/duplicate/error/skip fields, even when a service is skipped or returns zero rows. `harvest/logs/search_engine_diagnostics.jsonl` remains the detailed per-query diagnostic stream.

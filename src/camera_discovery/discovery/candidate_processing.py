@@ -121,7 +121,8 @@ class CandidateProcessingMixin:
             c.target_id = target.target_id
             c.target_index = target.target_index
             c.target_label = target.target_label or target.canonical_target
-            c.source_metadata.setdefault("camera_type", target.intent.camera_type_intent or "camera")
+            if not c.source_metadata.get("camera_type") and target.intent.camera_type_intent and target.intent.camera_type_intent != "public_live":
+                c.source_metadata["camera_type"] = target.intent.camera_type_intent
             if _looks_like_hls(c.stream_url):
                 c.source_metadata.setdefault("media_type", "hls")
             if "camera_id" not in c.source_metadata:

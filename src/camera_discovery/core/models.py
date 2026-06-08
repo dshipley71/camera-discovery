@@ -133,6 +133,11 @@ class RunConfig:
     def ffprobe_enabled(self) -> bool:
         return self.profile == RuntimeProfile.FULL
 
+    @property
+    def full_segment_validation_enabled(self) -> bool:
+        """Whether HLS validation should perform bounded variant/segment checks."""
+        return self.profile == RuntimeProfile.FULL
+
 
 @dataclass
 class TargetIntent:
@@ -563,6 +568,13 @@ class RunState:
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a summary-only run state for run/logs/run_summary.json.
+
+        Candidate-level payloads are intentionally not embedded here; they live
+        in camera_candidates_table.csv, validation_results.jsonl,
+        candidate_evidence_summary.jsonl, and per-target candidate JSONL files.
+        """
+
         def conv(obj):
             if isinstance(obj, Path):
                 return str(obj)
@@ -576,4 +588,62 @@ class RunState:
                 return {k: conv(v) for k, v in obj.items()}
             return obj
 
-        return conv(self)
+        target_summaries = [
+            {
+                "target_id": t.target_id,
+                "target_index": t.target_index,
+                "target_label": t.target_label,
+                "canonical_target": t.canonical_target,
+                "scope_type": t.scope_type,
+                "bbox_verified": t.bbox_verified,
+                "trust_policy": conv(t.trust_policy),
+                "camera_type_intent": t.intent.camera_type_intent if t.intent else None,
+            }
+            for t in self.targets
+        ]
+        candidate_counts = {
+            "raw": len(self.candidates.raw),
+            "unique": len(self.candidates.unique),
+            "coordinate_bearing": len(self.candidates.coordinate_bearing),
+            "in_scope": len(self.candidates.in_scope),
+            "review": len(self.candidates.review),
+            "rejected": len(self.candidates.rejected),
+            "by_target": {
+                key: {
+                    "raw": len(value.raw),
+                    "unique": len(value.unique),
+                    "coordinate_bearing": len(value.coordinate_bearing),
+                    "in_scope": len(value.in_scope),
+                    "review": len(value.review),
+                    "rejected": len(value.rejected),
+                }
+                for key, value in self.candidate_sets_by_target.items()
+            },
+        }
+        return {
+            "schema_version": "run-summary/v2",
+            "summary_only": True,
+            "config": conv(self.config),
+            "targets": target_summaries,
+            "target_count": len(target_summaries),
+            "candidate_counts": candidate_counts,
+            "validation": conv(self.validation),
+            "outputs": conv(self.outputs),
+            "warnings": conv(self.warnings),
+            "artifact_references": {
+                "candidate_table_csv": self.outputs.camera_candidates_table_csv,
+                "trusted_geojson": str(self.config.output_dir / "camera.geojson"),
+                "untrusted_geojson": str(self.config.output_dir / "untrusted_camera_candidates.geojson"),
+                "validation_results_jsonl": str(self.config.output_dir / "logs" / "validation_results.jsonl"),
+                "candidate_evidence_summary_jsonl": str(self.config.output_dir / "logs" / "candidate_evidence_summary.jsonl"),
+                "run_explanation_json": str(self.config.output_dir / "logs" / "run_explanation.json"),
+                "media_validation_dashboard_json": self.outputs.media_validation_dashboard,
+            },
+            "omitted_detail_files": [
+                "camera_candidates_table.csv",
+                "logs/validation_results.jsonl",
+                "logs/candidate_evidence_summary.jsonl",
+                "candidates/**/*.jsonl",
+                "logs/source_row_evidence_summary.jsonl",
+            ],
+        }

@@ -249,6 +249,9 @@ def execute_discovery_run(cfg: RunConfig, *, console: Console, progress_mode: st
                     target_label=target.target_label or target.canonical_target,
                     source_policy=source_policy,
                 )
+                for handoff_candidate in handoff_candidates:
+                    if not handoff_candidate.source_metadata.get("camera_type") and target.intent.camera_type_intent and target.intent.camera_type_intent != "public_live":
+                        handoff_candidate.source_metadata["camera_type"] = target.intent.camera_type_intent
                 _scope_harvest_input_candidates(handoff_candidates, target)
                 total_handoff_candidates += len(handoff_candidates)
                 harvest_media_counter.update(str((c.source_metadata or {}).get("media_type") or "unknown") for c in handoff_candidates)

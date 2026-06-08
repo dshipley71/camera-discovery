@@ -76,3 +76,53 @@ def test_xhr_fetch_endpoint_extraction_covers_common_javascript_forms():
     assert "https://agency.example.gov/arcgis/rest/services/CCTV/FeatureServer/0/query?f=json" in urls
     assert "https://agency.example.gov/data/cameras.geojson" in urls
     assert "https://agency.example.gov/layers/cameraLayer" in urls
+
+
+def test_search_service_summary_keeps_zero_and_skipped_services():
+    from camera_discovery.harvest.outputs import build_search_service_summary, build_source_rows_summary
+    from camera_discovery.core.models import DiscoveryMode, HarvestConfig
+
+    diagnostics = [
+        {"query": "q", "engine": "ddg", "parsed_rows": 2},
+        {"query": "q", "engine": "bing", "parsed_rows": 0},
+        {"query": "q", "engine": "searxng", "skipped": True, "reason": "searxng_base_url_not_configured"},
+        {"query": "site:.gov q", "engine": "ddg", "parsed_rows": 0},
+    ]
+    selected = [{"url": "https://example.gov/cameras", "source_provider": "blind:ddg", "search_engine": "ddg"}]
+    summary = build_search_service_summary(diagnostics, selected, [])
+    assert set(summary) == {"ddg", "bing", "searxng", "google_dork"}
+    assert summary["ddg"]["selected_rows"] == 1
+    assert summary["bing"]["attempted"] is True
+    assert summary["bing"]["parsed_rows"] == 0
+    assert summary["searxng"]["status"] == "not_configured"
+    assert summary["google_dork"]["attempted"] is True
+    assert summary["google_dork"]["parsed_rows"] == 0
+
+    cfg = HarvestConfig(query="q", output_dir=Path("/tmp/out"), discovery_mode=DiscoveryMode.BOTH)
+    source_summary = build_source_rows_summary(
+        config=cfg,
+        source_policy=load_source_policy(None, []),
+        directory_rows=[],
+        blind_rows=selected,
+        direct_rows=[],
+        selected_before_budget=selected,
+        selected=selected,
+        blocked_rows=[],
+        max_source_rows_applied=False,
+        blind_search_diagnostics=diagnostics,
+    )
+    assert source_summary["selected_blind_rows"] == 1
+    assert source_summary["selected_by_provider"]["blind:ddg"] == 1
+
+
+def test_endpoint_noise_filter_keeps_camera_json_and_drops_analytics():
+    from camera_discovery.extraction.endpoints import extract_endpoint_urls_from_text, linked_script_urls_from_html
+
+    html = '<script src="https://www.googletagmanager.com/gtm.js?id=GTM-1"></script><script src="/static/app.js"></script>'
+    scripts = linked_script_urls_from_html(html, "https://agency.example.gov/map")
+    assert "https://www.googletagmanager.com/gtm.js?id=GTM-1" not in scripts
+    assert "https://agency.example.gov/static/app.js" in scripts
+    js = "fetch('/api/cameras.json'); fetch('https://www.google-analytics.com/collect?f=json')"
+    urls = extract_endpoint_urls_from_text(js, "https://agency.example.gov/app.js")
+    assert "https://agency.example.gov/api/cameras.json" in urls
+    assert not any("google-analytics" in url for url in urls)

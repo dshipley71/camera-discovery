@@ -108,7 +108,7 @@ Profiles:
 |---|---|
 | `fast` | Resolves targets and writes review artifacts, but validation is disabled and trusted output is blocked. |
 | `balanced` | Enables deterministic validation of HLS playlists and image snapshots. Validation runs in a bounded worker pool and reuses HTTP clients. |
-| `full` | Balanced validation plus deeper HLS segment/variant checks through the current full-profile validation path. |
+| `full` | Balanced validation plus bounded HLS variant/media playlist and segment checks. Successful HTTP segment checks produce `active_live_verified`; reachable playlists without full/inconclusive segment checks remain `active_live_unknown`. |
 
 Trusted output requires verified target geometry, in-scope coordinates, successful validation, and target `trust_policy=trusted_allowed`. Review artifacts may contain untrusted, unknown, or out-of-scope candidates for audit.
 
@@ -305,3 +305,12 @@ The discovery and validation pipeline now includes a passive intelligence layer.
 
 camera-discovery now includes country/language-aware official-source query expansion for public camera source discovery. Mexico and Ukraine are covered by regression tests, and unknown countries use ISO alpha-2 ccTLD hints where available. Unsafe direct device-interface dorks are intentionally excluded. See `docs/international_official_source_discovery.md`.
 
+
+
+### Candidate table and diagnostics updates
+
+`camera_candidates_table.csv` contains all unique candidates considered by the run, not only trusted or non-rejected rows. Use `candidate_disposition`, `validation_status`, `trust_level`, and `scope_status` to distinguish trusted inventory, untrusted review, dead, restricted, out-of-scope, unknown-location, and not-validated candidates. `run/logs/run_summary.json` is summary-only; detailed candidate data lives in the candidate CSV, `logs/validation_results.jsonl`, `logs/candidate_evidence_summary.jsonl`, and per-target candidate JSONL files.
+
+Harvest mode writes `harvest/logs/search_service_summary.json` with DDG, Bing, SearXNG, and guarded Google dork search rows every run. Skipped or zero-result services remain visible with status and skip/error reason fields.
+
+For efficient harvest-first HLS full validation, run `camera-discovery run --harvest-first --harvest-media .m3u8 --harvest-input-mode handoff-only --profile full --http-timeout 10` and keep browser capture disabled unless dynamic extraction is required.

@@ -21,7 +21,7 @@ from camera_discovery.harvest.media_filter import (
 )
 from camera_discovery.extraction.media import _dedupe_strings
 from camera_discovery.extraction.search import clean_ddg_result_url
-from camera_discovery.discovery.official_source_queries import official_source_queries_for_intent
+from camera_discovery.discovery.official_source_queries import official_source_dork_queries_for_intent, official_source_queries_for_intent
 from camera_discovery.discovery.location_profiles import localized_camera_terms_for_intent
 
 
@@ -264,16 +264,18 @@ def harvest_search_queries(query: str, max_queries: int) -> list[str]:
     localized_terms = localized_camera_terms_for_intent(intent, query, include_generic=False)
     localized = [f"{query} {term}" for term in localized_terms]
     official_budget = min(10, max(2, max_queries // 3))
+    dork_budget = min(4, max(1, max_queries // 8))
     official = official_source_queries_for_intent(
         intent,
         query,
         max_queries=official_budget,
         safe_exclusions=True,
     )
+    dorks = official_source_dork_queries_for_intent(intent, query, max_queries=dork_budget)
     general_pool = _dedupe_strings([*localized, *general])
-    general_limit = max(0, max_queries - len(official))
+    general_limit = max(0, max_queries - len(official) - len(dorks))
     selected_general = general_pool[:general_limit]
-    return _dedupe_strings(selected_general + [q for q in official if q not in set(selected_general)])[:max_queries]
+    return _dedupe_strings(selected_general + [q for q in official if q not in set(selected_general)] + dorks)[:max_queries]
 
 
 def _infer_harvest_camera_intent(query: str) -> str:

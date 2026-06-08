@@ -245,3 +245,23 @@ Passive intelligence is part of the normal source/candidate processing flow and 
 ## Metadata-driven structured endpoint discovery
 
 `max_structured_endpoints_per_page` bounds the number of structured endpoints selected from each source page. Structured endpoints include explicit JSON/GeoJSON/API links, endpoint literals in page or script text, advertised ArcGIS REST layers/tables, OGC API Features links, and explicit WFS links. ArcGIS service roots are expanded from fetched public service metadata only; fixed layer-ID guessing is intentionally not used.
+
+## Efficient harvest-first HLS full-validation preset
+
+For harvest-first HLS validation runs, use harvest-first with an HLS media filter, handoff-only ingestion, browser capture disabled unless intentionally needed, bounded timeouts, and the `full` runtime profile:
+
+```bash
+CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE=false \
+camera-discovery run "California traffic cameras" \
+  --harvest-first \
+  --harvest-media .m3u8 \
+  --harvest-input-mode handoff-only \
+  --profile full \
+  --http-timeout 10 \
+  --discovery-mode both \
+  --progress-style plain
+```
+
+This preset harvests HLS media evidence first, feeds only the generated handoff into the normal target-aware run, scope-gates before expensive validation, and validates each normalized stream URL once with result reuse for duplicate candidate rows. It does not bypass source policy, target resolution, deterministic scope checks, media validation, or trust gates.
+
+Search-service diagnostics for harvest mode are summarized in `logs/search_service_summary.json` with rows for DDG, Bing, SearXNG, and guarded Google dork search. Missing SearXNG configuration appears as `not_configured`; zero-result services remain visible instead of being hidden.

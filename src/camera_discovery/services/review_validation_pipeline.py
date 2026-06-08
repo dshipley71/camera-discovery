@@ -64,6 +64,8 @@ class ReviewAndValidationPipeline:
         self._thread_local = threading.local()
         self._validation_clients: list[httpx.Client] = []
         self._validation_clients_lock = threading.Lock()
+        self._validation_result_cache: dict[str, str] = {}
+        self._validation_result_cache_lock = threading.Lock()
         self.source_policy = load_source_policy(config.sources_file, config.block_patterns)
 
     def run(self, target: TargetContext | list[TargetContext], candidates: CandidateSet, progress_callback: Callable[[str, dict[str, Any]], None] | None = None):
@@ -83,8 +85,10 @@ class ReviewAndValidationPipeline:
         else:
             v.skipped = len(candidates.unique)
             for c in candidates.review:
-                c.validation_status = "not_validated"
-                c.trust_level = "untrusted"
+                if not c.validation_status:
+                    c.validation_status = "not_validated"
+                if c.trust_level != "trusted":
+                    c.trust_level = c.trust_level or "untrusted"
         return v, self._write_outputs(targets, target_map, candidates, v)
 
     def _validate(self, candidates: CandidateSet, v: ValidationSummary) -> None:
@@ -163,10 +167,19 @@ class ReviewAndValidationPipeline:
         return index, self._safe_validate_candidate(candidate)
 
     def _safe_validate_candidate(self, candidate: CameraCandidate) -> str:
+        key = _normalized_validation_url(candidate.stream_url)
+        with self._validation_result_cache_lock:
+            cached = self._validation_result_cache.get(key)
+        if cached is not None:
+            candidate.source_metadata["validation_result_reused"] = True
+            return cached
         try:
-            return self._validate_candidate(candidate)
+            status = self._validate_candidate(candidate)
         except Exception:
-            return "dead_link"
+            status = "dead"
+        with self._validation_result_cache_lock:
+            self._validation_result_cache.setdefault(key, status)
+        return status
 
     def _record_validation_progress(
         self,
@@ -307,35 +320,59 @@ class ReviewAndValidationPipeline:
             # Metadata comes from a request already made for validation; it is not an extra probe.
             self._attach_validation_http_metadata(url, r, text=r.text[:4096], started_at=started_at, candidate=candidate)
             if r.status_code in {401, 403}:
-                return "restricted_http"
+                return "restricted"
             if r.status_code >= 400:
-                return "offline_http"
+                return "dead"
             if "#EXTM3U" not in r.text[:4096]:
-                return "decode_failed"
-            if not self.config.ffprobe_enabled:
+                return "dead"
+            if not self.config.full_segment_validation_enabled:
                 return "active_live_unknown"
-            segment_url = self._first_playlist_segment_url(url, r.text)
+            segment_url = self._first_playlist_segment_url(url, r.text, client=client)
             if not segment_url:
                 return "active_live_unknown"
             try:
                 segment = client.head(segment_url)
+                if segment.status_code in {401, 403}:
+                    return "restricted"
                 if 200 <= segment.status_code < 300:
+                    return "active_live_verified"
+                segment = client.get(segment_url, headers={"Range": "bytes=0-1"})
+                if segment.status_code in {401, 403}:
+                    return "restricted"
+                if 200 <= segment.status_code < 300 or segment.status_code == 206:
                     return "active_live_verified"
                 return "active_playlist_dead_segments"
             except Exception:
                 return "active_playlist_dead_segments"
         except Exception:
-            return "dead_link"
+            return "dead"
 
-    def _first_playlist_segment_url(self, playlist_url: str, playlist_body: str) -> str | None:
+    def _first_playlist_segment_url(self, playlist_url: str, playlist_body: str, *, client: httpx.Client | None = None, depth: int = 0) -> str | None:
+        if depth > 2:
+            return None
+        variant_urls: list[str] = []
         for line in playlist_body.splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
             clean = stripped.split("?", 1)[0].casefold()
-            if clean.endswith(".ts") or clean.endswith(".m3u8"):
-                return urljoin(playlist_url, stripped)
-        return None
+            absolute = urljoin(playlist_url, stripped)
+            if clean.endswith(".m3u8"):
+                variant_urls.append(absolute)
+                continue
+            if clean.endswith((".ts", ".m4s", ".mp4", ".aac", ".mp3", ".cmfv", ".cmfa")) or "#EXTINF" in playlist_body:
+                return absolute
+        if client is not None:
+            for variant_url in variant_urls[:3]:
+                try:
+                    variant = client.get(variant_url)
+                except Exception:
+                    continue
+                if variant.status_code < 400 and "#EXTM3U" in variant.text[:4096]:
+                    nested = self._first_playlist_segment_url(variant_url, variant.text, client=client, depth=depth + 1)
+                    if nested:
+                        return nested
+        return variant_urls[0] if variant_urls else None
 
     def _validate_image_snapshot(self, url: str, metadata: dict | None = None, *, candidate: CameraCandidate | None = None) -> str:
         """Validate that an image snapshot endpoint is a real image and appears refreshable.
@@ -415,7 +452,9 @@ class ReviewAndValidationPipeline:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.candidates_dir.mkdir(parents=True, exist_ok=True)
         self._apply_cached_validation_http_metadata(candidates.unique)
+        target_intents = {t.target_id: (t.intent.camera_type_intent if t.intent else None) for t in targets}
         for candidate in candidates.unique:
+            _normalize_candidate_display_metadata(candidate, target_intents.get(candidate.target_id or ""))
             enrich_candidate_with_passive_intelligence(candidate, self.source_policy)
         trusted_allowed = {t.target_id for t in targets if t.trust_policy == TrustPolicy.TRUSTED_ALLOWED and t.bbox_verified}
         prioritized_unique = prioritize_candidates(candidates.unique)
@@ -458,7 +497,7 @@ class ReviewAndValidationPipeline:
             self.logs_dir / "candidate_priority_summary.json",
             _candidate_priority_summary(prioritized_unique),
         )
-        write_json(self.logs_dir / "validation_summary.json", asdict(v))
+        write_json(self.logs_dir / "validation_summary.json", {**asdict(v), "full_segment_validation_enabled": self.config.full_segment_validation_enabled, "http_segment_fallback_enabled": True, "validation_result_cache_entries": len(self._validation_result_cache)})
         playlist_summary = export_candidate_playlists(
             self.config.output_dir,
             prioritized_unique,
@@ -513,6 +552,8 @@ class ReviewAndValidationPipeline:
             if not candidate.has_coordinates:
                 missing_coordinates += 1
         google_dorking_summary = _read_optional_json(self.logs_dir / "google_dorking_summary.json") or _google_dorking_default_summary(self.config)
+        harvest_search_service_summary_path = self.config.output_dir.parent / "harvest" / "logs" / "search_service_summary.json"
+        search_service_summary = _read_optional_json(harvest_search_service_summary_path)
         passive_summary = _read_optional_json(self.logs_dir / "passive_intelligence_summary.json") or passive_intelligence_summary(candidates.unique)
         write_json(self.logs_dir / "google_dorking_summary.json", google_dorking_summary)
         write_json(self.logs_dir / "passive_intelligence_summary.json", passive_summary)
@@ -540,16 +581,18 @@ class ReviewAndValidationPipeline:
                 "coordinate_bearing_geojson_features_written": out.coordinate_bearing_geojson_features_written,
                 "coordinate_bearing_without_geojson": out.coordinate_bearing_without_geojson,
             },
-            "validation": asdict(v),
+            "validation": {**asdict(v), "full_segment_validation_enabled": self.config.full_segment_validation_enabled, "http_segment_fallback_enabled": True},
             "media_validation_dashboard": media_dashboard or {},
             "passive_intelligence": passive_summary,
             "playlist_exports": playlist_summary or {},
             "google_dorking": google_dorking_summary,
+            "search_service_summary": search_service_summary,
+            "search_service_summary_path": str(harvest_search_service_summary_path) if harvest_search_service_summary_path.exists() else None,
             "outputs": asdict(out),
             "interpretation": {
                 "camera_geojson": "Trusted, validated, in-scope coordinate-bearing camera inventory. Not written when validation is disabled or no trusted records exist.",
                 "untrusted_camera_candidates_geojson": "Every coordinate-bearing candidate not written to trusted camera.geojson. These are not trusted inventory and may include rejected, out-of-scope, unknown, or review-only records for audit/map analysis.",
-                "camera_candidates_table_csv": "All non-rejected review candidates, including rows without coordinates that cannot be mapped yet.",
+                "camera_candidates_table_csv": "All unique candidates considered by the run, including trusted, untrusted review, dead/restricted, out-of-scope, unknown-location, and not-validated rows. Deduplication key: stream_url without fragment plus target_id.",
                 "map_html": "Interactive map for coordinate-bearing trusted/untrusted GeoJSON only. RTSP URLs are external-player links, not browser/hls.js playback.",
                 "playlist_exports": "Convenience M3U/TXT views over existing candidates and validation state; playlists do not promote trust.",
                 "media_validation_dashboard": "Top-level summary of candidate validation, trust, review, dead, restricted, not-validated counts, and passive intelligence evidence bands.",
@@ -583,6 +626,13 @@ class ReviewAndValidationPipeline:
         for key, value in (playlist_summary or {}).get("counts", {}).items():
             lines.append(f"- `{key}`: {value}")
         lines.append("")
+        search_services = explanation.get("search_service_summary") or {}
+        if search_services:
+            lines.append("## Search service summary")
+            for key in ("ddg", "bing", "searxng", "google_dork"):
+                item = search_services.get(key) or {}
+                lines.append(f"- `{key}`: status={item.get('status')} parsed={item.get('parsed_rows', 0)} selected={item.get('selected_rows', 0)} errors={item.get('error_count', 0)} skip={item.get('skip_reason', '')}")
+            lines.append("")
         dorking = explanation.get("google_dorking") or {}
         if dorking:
             lines.append("## Google dorking")
@@ -604,6 +654,7 @@ class ReviewAndValidationPipeline:
             "target_label",
             "location_text",
             "location_display",
+            "candidate_disposition",
             "camera_type",
             "raw_camera_type",
             "camera_id",
@@ -620,15 +671,19 @@ class ReviewAndValidationPipeline:
             "geocode_query_basis",
             "stream_url",
             "source_url",
+            "source_provider",
+            "source_engine",
             "latitude",
             "longitude",
             "coordinate_source",
             "geocoded_query",
             "geocoded_display_name",
             "thumbnail_url",
+            "snapshot_url",
             "camera_refresh_rate",
             "map_refresh_rate_seconds",
             "media_type",
+            "source_metadata_json",
             "protocol_label",
             "media_family",
             "protocol_confidence",
@@ -646,7 +701,7 @@ class ReviewAndValidationPipeline:
             "llm_semantic_reason",
             "reasons",
         ]
-        visible = [row for row in rows if row.trust_level != "rejected"]
+        visible = list(rows)
         with path.open("w", encoding="utf-8", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames)
             writer.writeheader()
@@ -659,6 +714,7 @@ class ReviewAndValidationPipeline:
                         "target_label": row.target_label,
                         "location_text": row.location_text,
                         "location_display": _camera_location_display(row, None),
+                        "candidate_disposition": _candidate_disposition(row),
                         "camera_type": metadata.get("camera_type"),
                         "raw_camera_type": metadata.get("raw_camera_type"),
                         "camera_id": metadata.get("camera_id") or metadata.get("id"),
@@ -675,15 +731,19 @@ class ReviewAndValidationPipeline:
                         "geocode_query_basis": "; ".join(metadata.get("geocode_query_basis") or []) if isinstance(metadata.get("geocode_query_basis"), list) else metadata.get("geocode_query_basis"),
                         "stream_url": row.stream_url,
                         "source_url": row.source_url,
+                        "source_provider": metadata.get("source_provider") or row.discovery_method,
+                        "source_engine": metadata.get("source_engine") or metadata.get("search_engine"),
                         "latitude": row.lat,
                         "longitude": row.lon,
                         "coordinate_source": row.coordinate_source,
                         "geocoded_query": row.geocoded_query,
                         "geocoded_display_name": row.geocoded_display_name,
-                        "thumbnail_url": metadata.get("snapshot_url") or metadata.get("thumbnail_url") or metadata.get("image_url"),
+                        "thumbnail_url": metadata.get("thumbnail_url") or metadata.get("snapshot_url"),
+                        "snapshot_url": metadata.get("snapshot_url") or metadata.get("thumbnail_url"),
                         "camera_refresh_rate": _camera_refresh_rate(metadata),
                         "map_refresh_rate_seconds": _camera_map_refresh_rate_seconds(metadata, self.config.image_snapshot_refresh_delay_seconds) if media_type == "image_snapshot" else None,
                         "media_type": media_type,
+                        "source_metadata_json": json.dumps(metadata, sort_keys=True, default=str),
                         "protocol_label": metadata.get("protocol_label"),
                         "media_family": metadata.get("media_family"),
                         "protocol_confidence": metadata.get("protocol_confidence"),
@@ -704,7 +764,7 @@ class ReviewAndValidationPipeline:
                 )
         write_json(
             self.logs_dir / "camera_candidates_table_status.json",
-            {"path": str(path), "rows": len(visible), "includes_rows_without_coordinates": True},
+            {"path": str(path), "rows": len(visible), "includes_rows_without_coordinates": True, "includes_rejected_candidates": True, "dedupe_key": "stream_url_without_fragment + target_id"},
         )
         return path
 
@@ -950,15 +1010,15 @@ def _validation_status_category(status: str) -> str:
     if status in {
         "dead_link",
         "offline_http",
-        "restricted_http",
         "active_playlist_dead_segments",
         "static_image_asset",
         "image_snapshot_not_image",
         "dead_rtsp",
         "offline_rtsp",
+        "dead",
     }:
         return "dead"
-    if status in {"restricted_rtsp", "auth_required_rtsp"}:
+    if status in {"restricted", "restricted_http", "restricted_rtsp", "auth_required_rtsp"}:
         return "unknown"
     return "unknown"
 
@@ -1026,6 +1086,66 @@ def _camera_location_display(candidate: CameraCandidate, target: TargetContext |
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return None
+
+
+def _normalized_validation_url(url: str) -> str:
+    return str(url or "").split("#", 1)[0]
+
+
+def _candidate_disposition(candidate: CameraCandidate) -> str:
+    status = (candidate.validation_status or "").casefold()
+    if candidate.trust_level == "trusted":
+        return "trusted"
+    if candidate.scope_status == "out_of_scope":
+        return "out_of_scope"
+    if status in {"restricted", "restricted_http"} or "restricted" in status or "forbidden" in status or "auth" in status:
+        return "restricted"
+    if status in {"dead", "offline_http", "dead_link", "decode_failed", "active_playlist_dead_segments"} or status.startswith(("dead", "offline")):
+        return "dead"
+    if status == "not_validated" or not candidate.validation_status:
+        return "not_validated"
+    if candidate.scope_status == "unknown" or not candidate.has_coordinates:
+        return "unknown_location"
+    return "untrusted_review"
+
+
+def _normalize_candidate_display_metadata(candidate: CameraCandidate, target_camera_type: str | None) -> None:
+    metadata = candidate.source_metadata or {}
+    candidate.source_metadata = metadata
+    if not metadata.get("camera_type"):
+        structured_type = metadata.get("category") or metadata.get("type") or metadata.get("device_type")
+        if isinstance(structured_type, str) and structured_type.strip():
+            metadata["camera_type"] = structured_type.strip().casefold().replace(" ", "_")
+        elif target_camera_type and target_camera_type != "public_live":
+            metadata["camera_type"] = target_camera_type
+    snapshot = _promoted_image_url(metadata, prefer=("snapshot_url", "currentImageURL", "currentimageurl", "current_image_url", "image_url", "camera_image_url", "preview_image_url"))
+    thumbnail = _promoted_image_url(metadata, prefer=("thumbnail_url", "thumb_url", "preview_image_url", "poster_url", "image_url"))
+    if snapshot and not metadata.get("snapshot_url"):
+        metadata["snapshot_url"] = snapshot
+    if thumbnail and not metadata.get("thumbnail_url"):
+        metadata["thumbnail_url"] = thumbnail
+    elif snapshot and not metadata.get("thumbnail_url"):
+        metadata["thumbnail_url"] = snapshot
+
+
+def _promoted_image_url(metadata: dict[str, Any], *, prefer: tuple[str, ...]) -> str | None:
+    for key in prefer:
+        value = metadata.get(key)
+        if isinstance(value, str) and _looks_like_direct_image_url(value):
+            return value
+    for key, value in metadata.items():
+        if isinstance(key, str) and "image" in key.casefold() and isinstance(value, str) and _looks_like_direct_image_url(value):
+            return value
+    return None
+
+
+def _looks_like_direct_image_url(value: str) -> bool:
+    parsed = urlparse(value)
+    if parsed.scheme == "data":
+        return value.startswith("data:image/")
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    return parsed.path.casefold().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"))
 
 
 def _camera_refresh_rate(metadata: dict) -> str | int | float | None:

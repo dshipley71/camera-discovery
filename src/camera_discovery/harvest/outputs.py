@@ -38,6 +38,15 @@ def build_source_rows_summary(
     selected_by_provider = count_rows_by_key(selected, "source_provider")
     generated_by_provider = count_rows_by_key([*directory_rows, *blind_rows, *direct_rows], "source_provider")
     blind_diagnostics = blind_search_diagnostics or []
+    selected_blind_rows = sum(1 for row in selected if _provider_group(row.get("source_provider")) == "blind")
+    selected_directory_rows = sum(1 for row in selected if _provider_group(row.get("source_provider")) == "directory")
+    selected_direct_rows = sum(1 for row in selected if _provider_group(row.get("source_provider")) == "direct")
+    selected_by_provider_group = {
+        "blind": selected_blind_rows,
+        "directory": selected_directory_rows,
+        "direct": selected_direct_rows,
+    }
+    search_service_summary = build_search_service_summary(blind_diagnostics, selected, blocked_rows)
     summary = {
         "discovery_mode": config.discovery_mode.value,
         "sources_file": sources_file,
@@ -56,10 +65,11 @@ def build_source_rows_summary(
         "selected_rows_before_budget": len(selected_before_budget),
         "selected_rows": len(selected),
         "selected_by_provider": selected_by_provider,
+        "selected_by_provider_group": selected_by_provider_group,
         "selected_by_kind": count_rows_by_key(selected, "source_kind"),
-        "selected_directory_rows": selected_by_provider.get("directory", 0),
-        "selected_blind_rows": selected_by_provider.get("blind", 0),
-        "selected_direct_rows": selected_by_provider.get("direct", 0),
+        "selected_directory_rows": selected_directory_rows,
+        "selected_blind_rows": selected_blind_rows,
+        "selected_direct_rows": selected_direct_rows,
         "blocked_source_rows": len(blocked_rows),
         "blocked_source_rows_by_provider": count_rows_by_key(blocked_rows, "source_provider"),
         "blind_search_queries": [item.get("query") for item in blind_diagnostics if item.get("query")],
@@ -67,6 +77,9 @@ def build_source_rows_summary(
         "blind_search_parsed_rows": sum(int(item.get("parsed_rows") or 0) for item in blind_diagnostics),
         "blind_search_errors": sum(1 for item in blind_diagnostics if item.get("error")),
         "blind_search_results_by_query": {str(item.get("query") or ""): int(item.get("parsed_rows") or 0) for item in blind_diagnostics if item.get("query")},
+        "search_service_summary": search_service_summary,
+        "duplicate_source_rows": max(0, len(selected_before_budget) + len(blocked_rows) - len({str(row.get("url") or "").split("#", 1)[0] for row in [*directory_rows, *blind_rows, *direct_rows] if row.get("url")})),
+        "media_filter_rejected_rows": 0,
         "max_source_rows": config.max_source_rows,
         "max_source_rows_applied": max_source_rows_applied,
     }
@@ -138,3 +151,80 @@ def write_csv(path: Path, records: list[HarvestedUrlRecord]) -> None:
             if isinstance(data.get("metadata"), dict):
                 data["metadata"] = json.dumps(data["metadata"], ensure_ascii=False, sort_keys=True)
             writer.writerow({field: data.get(field) for field in fields})
+
+
+def _provider_group(value: Any) -> str:
+    text = str(value or "unknown").casefold()
+    if text == "directory" or text.startswith("directory:"):
+        return "directory"
+    if text == "direct" or text.startswith("direct:"):
+        return "direct"
+    if text == "blind" or text.startswith("blind:"):
+        return "blind"
+    return text
+
+
+def _row_matches_service(row: dict[str, Any], service: str) -> bool:
+    if service == "google_dork":
+        return str(row.get("discovery_query_kind") or "").casefold() == "google_dork"
+    engine = str(row.get("search_engine") or "").casefold()
+    if engine == service:
+        return True
+    engines = row.get("search_engines")
+    return isinstance(engines, list) and service in {str(item).casefold() for item in engines}
+
+
+def build_search_service_summary(
+    diagnostics: list[dict[str, Any]] | None,
+    selected_rows: list[dict[str, Any]],
+    blocked_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    diagnostics = diagnostics or []
+    services = {
+        service: {
+            "configured": service != "searxng",
+            "attempted": False,
+            "status": "not_configured" if service == "searxng" else "skipped",
+            "queries_attempted": 0,
+            "results_seen": 0,
+            "parsed_rows": 0,
+            "selected_rows": 0,
+            "blocked_rows": 0,
+            "duplicate_rows": 0,
+            "error_count": 0,
+            "skip_reason": "searxng_base_url_not_configured" if service == "searxng" else "",
+            "diagnostics_path": "logs/search_engine_diagnostics.jsonl",
+        }
+        for service in ("ddg", "bing", "searxng", "google_dork")
+    }
+    for diag in diagnostics:
+        engine = str(diag.get("engine") or "").casefold()
+        query = str(diag.get("query") or "")
+        service_names = []
+        if engine in {"ddg", "bing", "searxng"}:
+            service_names.append(engine)
+        if query and any(op in query.casefold() for op in ("site:", "filetype:", "intitle:", "inurl:")):
+            service_names.append("google_dork")
+        for service in service_names:
+            entry = services[service]
+            entry["configured"] = not bool(diag.get("skipped"))
+            if diag.get("skipped"):
+                entry["status"] = "not_configured"
+                entry["skip_reason"] = str(diag.get("reason") or "skipped")
+                continue
+            entry["attempted"] = True
+            entry["status"] = "error" if diag.get("error") else "ran"
+            entry["queries_attempted"] += 1
+            parsed = int(diag.get("parsed_rows") or diag.get("results_seen") or 0)
+            entry["results_seen"] += int(diag.get("results_seen") or parsed)
+            entry["parsed_rows"] += parsed
+            if diag.get("error"):
+                entry["error_count"] += 1
+                entry["skip_reason"] = str(diag.get("error"))[:300]
+    for service, entry in services.items():
+        entry["selected_rows"] = sum(1 for row in selected_rows if _row_matches_service(row, service))
+        entry["blocked_rows"] = sum(1 for row in blocked_rows if _row_matches_service(row, service))
+        entry["duplicate_rows"] = max(0, int(entry["parsed_rows"]) - int(entry["selected_rows"]) - int(entry["blocked_rows"]))
+        if service != "searxng" and not entry["attempted"] and entry["status"] == "skipped":
+            entry["skip_reason"] = "no_queries_for_service"
+    return services

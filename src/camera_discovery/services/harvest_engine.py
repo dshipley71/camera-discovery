@@ -157,6 +157,7 @@ class CameraUrlHarvestEngine:
         rows = self._source_rows()
         write_jsonl(self.output_dir / "source_rows.jsonl", rows)
         write_json(self.logs_dir / "source_rows_summary.json", self._source_rows_summary)
+        write_json(self.logs_dir / "search_service_summary.json", self._source_rows_summary.get("search_service_summary", {}))
         self._emit("harvest_source_rows_ready", rows=len(rows), source_rows_summary=self._source_rows_summary)
 
         raw_records: list[HarvestedUrlRecord] = []
@@ -987,6 +988,8 @@ class CameraUrlHarvestEngine:
             "records_missing_media_url": sum(1 for record in camera_records if not record.media_assets),
             "blocked_or_filtered_urls": blocked_or_filtered,
             "source_rows": self._source_rows_summary,
+            "search_service_summary": self._source_rows_summary.get("search_service_summary", {}),
+            "search_service_summary_path": str(self.logs_dir / "search_service_summary.json"),
             "source_rows_total": self._source_rows_summary.get("selected_rows", 0),
             "source_rows_by_provider": self._source_rows_summary.get("selected_by_provider", {}),
             "source_rows_by_kind": self._source_rows_summary.get("selected_by_kind", {}),
@@ -996,7 +999,7 @@ class CameraUrlHarvestEngine:
             "directory_sources_configured": self._source_rows_summary.get("directory_sources_configured", 0),
             "directory_sources_enabled": self._source_rows_summary.get("directory_sources_enabled", 0),
             "directory_source_rows_selected": self._source_rows_summary.get("selected_by_provider", {}).get("directory", 0),
-            "blind_source_rows_selected": self._source_rows_summary.get("selected_by_provider", {}).get("blind", 0),
+            "blind_source_rows_selected": self._source_rows_summary.get("selected_blind_rows", 0),
             "direct_source_rows_selected": self._source_rows_summary.get("selected_by_provider", {}).get("direct", 0),
             "intermediate_records_written": self.config.write_intermediate_records,
             "intermediate_record_counts": {

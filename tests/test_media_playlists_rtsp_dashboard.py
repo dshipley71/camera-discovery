@@ -215,3 +215,91 @@ def test_private_and_blocked_urls_are_excluded_from_playlist_helpers(tmp_path):
     assert dashboard["dead"] == 1
     assert dashboard["restricted"] == 1
     assert dashboard["not_validated"] == 1
+
+
+def test_candidate_table_includes_all_dispositions_and_metadata(tmp_path, monkeypatch):
+    import csv
+
+    target = _target("California traffic cameras")
+    target.intent.camera_type_intent = "traffic"
+    candidates = [
+        CameraCandidate("https://media.example/trusted.m3u8", lat=38, lon=-77, scope_status="in_scope", target_id=target.target_id, target_label=target.target_label, validation_status="active_live_verified", trust_level="trusted", source_metadata={"media_type": "hls", "currentImageURL": "https://media.example/trusted.jpg"}),
+        CameraCandidate("https://media.example/review.m3u8", lat=38, lon=-77, scope_status="review", target_id=target.target_id, target_label=target.target_label, validation_status="active_live_unknown", trust_level="untrusted", source_metadata={"media_type": "hls"}),
+        CameraCandidate("https://media.example/dead.m3u8", lat=38, lon=-77, scope_status="review", target_id=target.target_id, target_label=target.target_label, validation_status="dead", trust_level="rejected", source_metadata={"media_type": "hls"}),
+        CameraCandidate("https://media.example/out.m3u8", lat=1, lon=1, scope_status="out_of_scope", target_id=target.target_id, target_label=target.target_label, validation_status="not_validated", trust_level="rejected", source_metadata={"media_type": "hls"}),
+        CameraCandidate("https://media.example/unknown.m3u8", scope_status="unknown", target_id=target.target_id, target_label=target.target_label, validation_status="not_validated", trust_level="untrusted", source_metadata={"media_type": "hls"}),
+    ]
+    cs = CandidateSet(unique=candidates, review=candidates, rejected=[candidates[3]])
+    pipeline = ReviewAndValidationPipeline(_cfg(tmp_path, profile=RuntimeProfile.FAST))
+    _, outputs = pipeline.run([target], cs)
+
+    rows = list(csv.DictReader((tmp_path / "camera_candidates_table.csv").open(encoding="utf-8", newline="")))
+    assert outputs.camera_candidates_table_rows == len(candidates)
+    assert len(rows) == len(candidates)
+    assert {row["candidate_disposition"] for row in rows} >= {"trusted", "untrusted_review", "dead", "out_of_scope", "not_validated"}
+    assert all(row["camera_type"] == "traffic" for row in rows)
+    assert all(row["raw_camera_type"] == "" for row in rows)
+    trusted = next(row for row in rows if row["stream_url"].endswith("trusted.m3u8"))
+    assert trusted["snapshot_url"] == "https://media.example/trusted.jpg"
+    assert trusted["thumbnail_url"] == "https://media.example/trusted.jpg"
+    status = json.loads((tmp_path / "logs" / "camera_candidates_table_status.json").read_text(encoding="utf-8"))
+    assert status["rows"] == len(candidates)
+    assert status["includes_rejected_candidates"] is True
+
+
+def test_run_summary_is_summary_only(tmp_path):
+    state = __import__("camera_discovery.core.models", fromlist=["RunState"]).RunState(config=_cfg(tmp_path))
+    state.candidates = CandidateSet(unique=[CameraCandidate(stream_url=f"https://media.example/{idx}.m3u8", source_metadata={"blob": "x" * 1000}) for idx in range(200)])
+    data = state.to_dict()
+    text = json.dumps(data)
+    assert data["summary_only"] is True
+    assert "blob" not in text
+    assert len(text) < 50000
+
+
+def test_full_hls_validation_checks_media_and_variant_playlists(tmp_path):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b""
+            status = 200
+            if self.path == "/media.m3u8":
+                body = b"#EXTM3U\n#EXTINF:2,\nseg.ts\n"
+            elif self.path == "/variant.m3u8":
+                body = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nmedia.m3u8\n"
+            elif self.path == "/dead.m3u8":
+                body = b"#EXTM3U\n#EXTINF:2,\nmissing.ts\n"
+            elif self.path == "/seg.ts":
+                body = b"segment"
+            else:
+                status = 404
+                body = b"not found"
+            self.send_response(status)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_HEAD(self):
+            if self.path == "/seg.ts":
+                self.send_response(200)
+            else:
+                self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        full = ReviewAndValidationPipeline(_cfg(tmp_path / "full", profile=RuntimeProfile.FULL))
+        balanced = ReviewAndValidationPipeline(_cfg(tmp_path / "balanced", profile=RuntimeProfile.BALANCED))
+        assert full._validate_hls(f"{base}/media.m3u8") == "active_live_verified"
+        assert full._validate_hls(f"{base}/variant.m3u8") == "active_live_verified"
+        assert full._validate_hls(f"{base}/dead.m3u8") == "active_playlist_dead_segments"
+        assert balanced._validate_hls(f"{base}/media.m3u8") == "active_live_unknown"
+    finally:
+        server.shutdown()
