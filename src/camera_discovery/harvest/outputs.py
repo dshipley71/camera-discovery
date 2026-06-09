@@ -182,7 +182,13 @@ def _empty_query_type_counts() -> dict[str, dict[str, int]]:
 
 def _search_engine_entry(engine: str) -> dict[str, Any]:
     configured = engine in {"ddg", "bing"}
-    default_skip_reason = "" if configured else ("google_backend_not_configured" if engine == "google" else "searxng_base_url_not_configured")
+    default_skip_reason = ""
+    if not configured:
+        default_skip_reason = {
+            "searxng": "searxng_base_url_not_configured",
+            "github": "github_token_not_configured",
+            "google": "google_backend_not_configured",
+        }.get(engine, "backend_not_configured")
     return {
         "configured": configured,
         "attempted": False,
@@ -209,7 +215,7 @@ def build_search_service_summary(
     blocked_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     diagnostics = diagnostics or []
-    services = {engine: _search_engine_entry(engine) for engine in ("ddg", "bing", "searxng", "google")}
+    services = {engine: _search_engine_entry(engine) for engine in ("ddg", "bing", "searxng", "github", "google")}
     query_attempts = [diag for diag in diagnostics if diag.get("query_key")]
     for diag in query_attempts:
         engine = str(diag.get("engine") or "").casefold()
@@ -250,6 +256,9 @@ def build_search_service_summary(
         if service == "searxng" and not entry["attempted"] and not entry["configured"]:
             entry["status"] = "not_configured"
             entry["skip_reason"] = "searxng_base_url_not_configured"
+        if service == "github" and not entry["attempted"] and not entry["configured"]:
+            entry["status"] = "not_configured"
+            entry["skip_reason"] = "github_token_not_configured"
         if service == "google":
             entry["configured"] = False
             entry["attempted"] = False

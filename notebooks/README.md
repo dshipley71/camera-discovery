@@ -53,6 +53,8 @@ The notebooks include a passive intelligence summary cell that reads source-code
 - `camera_discovery_harvest_all_media_handoff_balanced_validation_test.ipynb` — all-media harvest handoff into balanced validation.
 - `camera_discovery_harvest_first_hls_balanced_validation_test.ipynb` — one-command harvest-first HLS orchestration into balanced validation.
 
-Notebook harvest-first HLS inspection cells display `harvest/logs/search_service_summary.json` as a compact DDG/Bing/SearXNG/Google dork table, verify candidate CSV/dashboard row-count consistency, and flag missing full-validation configuration.
+Notebook harvest-first HLS inspection cells display `harvest/logs/search_service_summary.json` as a compact DDG/Bing/SearXNG/GitHub/Google provider table, verify candidate CSV/dashboard row-count consistency, and flag missing full-validation configuration.
 
 Every `*_full_validation_test.ipynb` notebook sets `RUN_PROFILE = "full"`, prints `Effective RUN_PROFILE: full`, and must not pass `--profile balanced` in hidden shell arguments.
+
+GitHub provider experiments can be enabled from notebooks with `CAMERA_DISCOVERY_HARVEST_SEARCH_ENGINES=ddg,bing,searxng,github` and an optional token from Colab userdata/environment (`CAMERA_DISCOVERY_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN`). Notebook helpers should display generated provider summaries rather than embedding source-code patches.

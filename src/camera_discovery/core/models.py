@@ -67,6 +67,9 @@ class RunConfig:
     searxng_categories: str = "general"
     searxng_max_results: int = 10
     ddg_delay_seconds: float = 1.0
+    github_max_results: int = 5
+    github_max_queries: int = 4
+    github_web_dork_max_queries: int = 8
     enable_google_dorking: bool = True
     max_dork_queries: int = 8
     max_pages: int = 25
@@ -336,6 +339,9 @@ class HarvestConfig:
     searxng_categories: str = "general"
     searxng_max_results: int = 50
     ddg_delay_seconds: float = 1.0
+    github_max_results: int = 50
+    github_max_queries: int = 40
+    github_web_dork_max_queries: int = 8
     max_source_rows: int = 5000
     max_pages_per_source: int = 25
     max_structured_endpoints_per_page: int = 500

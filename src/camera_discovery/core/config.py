@@ -98,10 +98,10 @@ def _stage_model(stage_var: str, llm_model: str | None, default: str = "gemma3:2
 def _split_search_engines(value: str | None) -> list[str]:
     raw = value or "ddg,bing,searxng"
     engines = [part.strip().lower() for part in raw.split(",") if part.strip()]
-    allowed = {"ddg", "bing", "searxng"}
+    allowed = {"ddg", "bing", "searxng", "github"}
     invalid = [engine for engine in engines if engine not in allowed]
     if invalid:
-        raise ValueError(f"Invalid search engine(s): {', '.join(invalid)}; expected any of: ddg,bing,searxng")
+        raise ValueError(f"Invalid search engine(s): {', '.join(invalid)}; expected any of: ddg,bing,searxng,github")
     return engines or ["ddg", "bing", "searxng"]
 
 
@@ -210,6 +210,9 @@ def load_run_config(
         max_search_queries=_int_env("CAMERA_DISCOVERY_MAX_SEARCH_QUERIES", 4),
         max_search_results_per_query=_int_env("CAMERA_DISCOVERY_MAX_SEARCH_RESULTS_PER_QUERY", 5),
         search_engines=_split_search_engines(os.getenv("CAMERA_DISCOVERY_SEARCH_ENGINES")),
+        github_max_results=max(0, _int_env("CAMERA_DISCOVERY_GITHUB_MAX_RESULTS", _int_env("CAMERA_DISCOVERY_MAX_SEARCH_RESULTS_PER_QUERY", 5))),
+        github_max_queries=max(0, _int_env("CAMERA_DISCOVERY_GITHUB_MAX_QUERIES", _int_env("CAMERA_DISCOVERY_MAX_SEARCH_QUERIES", 4))),
+        github_web_dork_max_queries=max(0, _int_env("CAMERA_DISCOVERY_GITHUB_WEB_DORK_MAX_QUERIES", _int_env("CAMERA_DISCOVERY_MAX_DORK_QUERIES", 8))),
         searxng_base_url=os.getenv("CAMERA_DISCOVERY_SEARXNG_BASE_URL", ""),
         searxng_categories=os.getenv("CAMERA_DISCOVERY_SEARXNG_CATEGORIES", "general"),
         searxng_max_results=max(0, _int_env("CAMERA_DISCOVERY_SEARXNG_MAX_RESULTS", 10)),
@@ -315,6 +318,9 @@ def load_harvest_config(
         searxng_categories=os.getenv("CAMERA_DISCOVERY_HARVEST_SEARXNG_CATEGORIES", os.getenv("CAMERA_DISCOVERY_SEARXNG_CATEGORIES", "general")),
         searxng_max_results=max(0, _int_env("CAMERA_DISCOVERY_HARVEST_SEARXNG_MAX_RESULTS", _int_env("CAMERA_DISCOVERY_SEARXNG_MAX_RESULTS", 50))),
         ddg_delay_seconds=max(0.0, _float_env("CAMERA_DISCOVERY_HARVEST_DDG_DELAY_SECONDS", _float_env("CAMERA_DISCOVERY_DDG_DELAY_SECONDS", 1.0))),
+        github_max_results=max(0, _int_env("CAMERA_DISCOVERY_HARVEST_GITHUB_MAX_RESULTS", _int_env("CAMERA_DISCOVERY_GITHUB_MAX_RESULTS", _int_env("CAMERA_DISCOVERY_HARVEST_MAX_SEARCH_RESULTS_PER_QUERY", _int_env("CAMERA_DISCOVERY_MAX_SEARCH_RESULTS_PER_QUERY", 50))))),
+        github_max_queries=max(0, _int_env("CAMERA_DISCOVERY_HARVEST_GITHUB_MAX_QUERIES", _int_env("CAMERA_DISCOVERY_GITHUB_MAX_QUERIES", _int_env("CAMERA_DISCOVERY_HARVEST_MAX_SEARCH_QUERIES", _int_env("CAMERA_DISCOVERY_MAX_SEARCH_QUERIES", 40))))),
+        github_web_dork_max_queries=max(0, _int_env("CAMERA_DISCOVERY_HARVEST_GITHUB_WEB_DORK_MAX_QUERIES", _int_env("CAMERA_DISCOVERY_GITHUB_WEB_DORK_MAX_QUERIES", _int_env("CAMERA_DISCOVERY_MAX_DORK_QUERIES", 8)))),
         max_source_rows=max(0, int(max_source_rows if max_source_rows is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_SOURCE_ROWS", 5000))),
         max_pages_per_source=max(1, int(max_pages_per_source if max_pages_per_source is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_PAGES_PER_SOURCE", _int_env("CAMERA_DISCOVERY_MAX_DIRECTORY_PAGES", 25)))),
         max_structured_endpoints_per_page=max(0, int(max_structured_endpoints_per_page if max_structured_endpoints_per_page is not None else _int_env("CAMERA_DISCOVERY_HARVEST_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", _int_env("CAMERA_DISCOVERY_MAX_STRUCTURED_ENDPOINTS_PER_PAGE", 500)))),

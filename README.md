@@ -120,6 +120,11 @@ Validation behavior:
 - Plain and event progress report validation candidate counts, for example `validating streams 500/2287`.
 - There is no validation candidate cap; every selected validation candidate is attempted unless existing profile/scope/trust logic excludes it.
 
+
+### GitHub passive source provider
+
+GitHub can be selected as a passive source provider with `CAMERA_DISCOVERY_SEARCH_ENGINES` or `CAMERA_DISCOVERY_HARVEST_SEARCH_ENGINES` (for example, `CAMERA_DISCOVERY_HARVEST_SEARCH_ENGINES=ddg,bing,searxng,github`). It uses public GitHub code search when `CAMERA_DISCOVERY_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` is configured, normalizes GitHub blob URLs to raw files, and records GitHub rows in the same source-row/search diagnostics artifacts as other blind providers. GitHub query templates live in `src/camera_discovery/search_queries/github.py`, not `SOURCES.md`; see `docs/github_source_provider.md`.
+
 ## Harvest mode
 
 HLS-only harvest:
@@ -294,7 +299,7 @@ RTSP support is limited to explicit `rtsp://` or `rtsps://` URLs supplied by the
 
 Harvest mode can filter RTSP with `--media rtsp` or include it with `--media stream`; it remains extraction-only and writes harvest playlist summaries when playable media records are present.
 
-Dork query patterns are guarded public-source discovery only and are enabled by default. Disable them with `CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false` or cap them with `CAMERA_DISCOVERY_MAX_DORK_QUERIES`. Generated operator queries are bounded, target-aware, camera-intent-aware, prefer `site:` restrictions to allowed `SOURCES.md` domains, and are submitted as `query_type=dork` to each configured supported search backend (DDG, Bing, SearXNG when configured; Google only if a real supported backend exists). Missing `searxng_base_url` skips only SearXNG attempts. The code forbids dorks for device admin/login pages, default credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset indexes.
+Dork query patterns are guarded public-source discovery only and are enabled by default. Disable them with `CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false` or cap them with `CAMERA_DISCOVERY_MAX_DORK_QUERIES`. Generated operator queries are bounded, target-aware, camera-intent-aware, prefer `site:` restrictions to allowed `SOURCES.md` domains, and are submitted as `query_type=dork` to each configured supported search backend (DDG, Bing, SearXNG when configured; GitHub-targeted web dorks when the GitHub provider is selected; Google only if a real supported backend exists). Missing `searxng_base_url` skips only SearXNG attempts, and missing GitHub tokens skip only GitHub attempts. The code forbids dorks for device admin/login pages, default credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset indexes.
 
 
 ## Passive camera intelligence
@@ -311,7 +316,7 @@ camera-discovery now includes country/language-aware official-source query expan
 
 `camera_candidates_table.csv` contains all unique candidates considered by the run, not only trusted or non-rejected rows. Use `candidate_disposition`, `validation_status`, `trust_level`, and `scope_status` to distinguish trusted inventory, untrusted review, dead, restricted, out-of-scope, unknown-location, and not-validated candidates. `run/logs/run_summary.json` is summary-only; detailed candidate data lives in the candidate CSV, `logs/validation_results.jsonl`, `logs/candidate_evidence_summary.jsonl`, and per-target candidate JSONL files.
 
-Harvest mode writes `harvest/logs/search_service_summary.json` with real backend rows for `ddg`, `bing`, `searxng`, and `google` plus a global summary. Dorks are query patterns (`query_type=dork`), not a backend; the summary includes normal/dork query counts per engine, accurate engine-specific skip reasons, and duplicate-query suppression counts.
+Harvest mode writes `harvest/logs/search_service_summary.json` with real backend rows for `ddg`, `bing`, `searxng`, `github`, and `google` plus a global summary. Dorks are query patterns (`query_type=dork`), not a backend; the summary includes normal/dork query counts per engine, accurate engine-specific skip reasons, and duplicate-query suppression counts.
 
 For efficient harvest-first HLS full validation, run `camera-discovery run --harvest-first --harvest-media .m3u8 --harvest-input-mode handoff-only --profile full --http-timeout 10` and keep browser capture disabled unless dynamic extraction is required.
 

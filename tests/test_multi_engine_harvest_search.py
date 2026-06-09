@@ -225,7 +225,7 @@ def test_search_service_summary_keeps_zero_and_skipped_services():
     ]
     selected = [{"url": "https://example.gov/cameras", "source_provider": "blind:ddg", "search_engine": "ddg"}]
     summary = build_search_service_summary(diagnostics, selected, [])
-    assert {"ddg", "bing", "searxng", "google", "global"}.issubset(summary)
+    assert {"ddg", "bing", "searxng", "github", "google", "global"}.issubset(summary)
     assert "google_dork" not in summary
     assert summary["ddg"]["selected_rows"] == 1
     assert summary["ddg"]["normal_queries_attempted"] == 1
@@ -233,6 +233,8 @@ def test_search_service_summary_keeps_zero_and_skipped_services():
     assert summary["bing"]["dork_queries_attempted"] == 1
     assert summary["searxng"]["status"] == "not_configured"
     assert summary["searxng"]["skip_reason"] == "searxng_base_url_not_configured"
+    assert summary["github"]["status"] == "not_configured"
+    assert summary["github"]["skip_reason"] == "github_token_not_configured"
     assert summary["google"]["status"] == "unsupported_backend"
     assert summary["google"]["skip_reason"] == "google_backend_not_configured"
     assert summary["global"]["dork_queries_attempted"] == 1
@@ -268,3 +270,137 @@ def test_endpoint_noise_filter_keeps_camera_json_and_drops_analytics():
     urls = extract_endpoint_urls_from_text(js, "https://agency.example.gov/app.js")
     assert "https://agency.example.gov/api/cameras.json" in urls
     assert not any("google-analytics" in url for url in urls)
+
+
+def test_github_provider_missing_token_is_reported_without_network(monkeypatch, tmp_path):
+    monkeypatch.delenv("CAMERA_DISCOVERY_GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    policy = load_source_policy(None, [])
+    cfg = SimpleNamespace(
+        max_search_results_per_query=10,
+        search_engines=["github"],
+        github_max_queries=2,
+        github_max_results=10,
+        github_web_dork_max_queries=0,
+        user_agent="test",
+        http_timeout=1.0,
+    )
+    dispatcher = SearchDispatcher(cfg, policy, tmp_path)
+    monkeypatch.setattr(dispatcher, "_github_search", lambda query: (_ for _ in ()).throw(AssertionError("GitHub search should not run without a token")))
+
+    rows, diagnostics = dispatcher.search_all(["public traffic cameras"])
+
+    assert rows == []
+    attempts = [diag for diag in diagnostics if diag.get("engine") == "github" and diag.get("query_key")]
+    assert attempts
+    assert all(diag["status"] == "not_configured" for diag in attempts)
+    assert all(diag["skip_reason"] == "github_token_not_configured" for diag in attempts)
+
+
+def test_github_blob_raw_normalization_and_deduplication():
+    from camera_discovery.discovery.search.github import parse_github_file_url
+
+    blob = "https://github.com/example/cameras/blob/feature/raw-data/data/cameras.geojson"
+    ref = parse_github_file_url(blob, known_path="data/cameras.geojson")
+    assert ref.raw_url == "https://raw.githubusercontent.com/example/cameras/feature/raw-data/data/cameras.geojson"
+    rows = SearchDispatcher._dedupe_rows(
+        [
+            {"url": blob, "search_engine": "ddg", "source_provider": "blind:ddg"},
+            {
+                "url": "https://raw.githubusercontent.com/example/cameras/feature/raw-data/data/cameras.geojson",
+                "search_engine": "github",
+                "source_provider": "blind:github",
+                "github_path": "data/cameras.geojson",
+            },
+        ]
+    )
+    assert len(rows) == 1
+    assert rows[0]["url"] == "https://raw.githubusercontent.com/example/cameras/feature/raw-data/data/cameras.geojson"
+    assert set(rows[0]["search_engines"]) == {"ddg", "github"}
+
+
+def test_github_code_items_normalize_to_source_rows():
+    from camera_discovery.discovery.search.github import rows_from_github_code_items
+
+    rows = rows_from_github_code_items(
+        [
+            {
+                "name": "cameras.geojson",
+                "path": "data/cameras.geojson",
+                "html_url": "https://github.com/example/cameras/blob/main/data/cameras.geojson",
+                "repository": {"full_name": "example/cameras", "default_branch": "main"},
+            },
+            {
+                "name": "ignore.py",
+                "path": "scripts/ignore.py",
+                "html_url": "https://github.com/example/cameras/blob/main/scripts/ignore.py",
+                "repository": {"full_name": "example/cameras", "default_branch": "main"},
+            },
+        ],
+        query='".m3u8" camera NOT is:fork',
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["url"] == "https://raw.githubusercontent.com/example/cameras/main/data/cameras.geojson"
+    assert row["source_provider"] == "blind:github"
+    assert row["search_engine"] == "github"
+    assert row["github_repository"] == "example/cameras"
+    assert row["github_content_type_hint"] == "geojson"
+
+
+def test_github_search_can_be_selected_and_summarized(monkeypatch, tmp_path):
+    from camera_discovery.harvest.outputs import build_search_service_summary
+
+    policy = load_source_policy(None, [])
+    cfg = SimpleNamespace(
+        max_search_results_per_query=10,
+        search_engines=["github"],
+        github_max_queries=1,
+        github_max_results=10,
+        github_web_dork_max_queries=0,
+        user_agent="test",
+        http_timeout=1.0,
+    )
+    dispatcher = SearchDispatcher(cfg, policy, tmp_path)
+    monkeypatch.setattr("camera_discovery.discovery.search.dispatcher.github_configured", lambda: True)
+    monkeypatch.setattr(
+        dispatcher,
+        "_github_search",
+        lambda query: [
+            {
+                "url": "https://raw.githubusercontent.com/example/cameras/main/data/cameras.json",
+                "query": query,
+                "source_provider": "blind:github",
+                "search_engine": "github",
+            }
+        ],
+    )
+
+    rows, diagnostics = dispatcher.search_all(["public cameras"])
+    assert [row["search_engine"] for row in rows] == ["github"]
+    summary = build_search_service_summary(diagnostics, rows, [])
+    assert summary["github"]["configured"] is True
+    assert summary["github"]["attempted"] is True
+    assert summary["github"]["status"] == "ran"
+    assert summary["github"]["selected_rows"] == 1
+
+
+def test_github_query_libraries_produce_native_and_web_dork_queries():
+    from camera_discovery.discovery.search.github import github_code_queries_for_terms, github_web_dork_queries_for_terms
+
+    native = github_code_queries_for_terms(["weather camera"], max_queries=3)
+    web = github_web_dork_queries_for_terms(["weather camera"], max_queries=3)
+    assert native
+    assert web
+    assert all("weather camera" in query for query in native)
+    assert all("site:github.com" in query or "site:raw.githubusercontent.com" in query for query in web)
+
+
+def test_search_engine_config_accepts_github(monkeypatch, tmp_path):
+    from camera_discovery.core.config import load_harvest_config
+
+    monkeypatch.setenv("CAMERA_DISCOVERY_HARVEST_SEARCH_ENGINES", "github,ddg")
+    cfg = load_harvest_config("public cameras", output_dir=tmp_path)
+    assert cfg.search_engines == ["github", "ddg"]
