@@ -10,6 +10,7 @@ Active source-aligned documentation:
 | `project_structure.md` | More detailed architecture and module responsibilities. |
 | `runtime_configuration.md` | CLI options and environment variables. |
 | `output_artifacts.md` | Normal-run and harvest artifact contracts. |
+| `github_source_provider.md` | GitHub passive source-provider configuration, query libraries, safety rules, and artifacts. |
 | `acceptance.md` | Verification commands and acceptance expectations. |
 | `sources_blueprint.md` | `SOURCES.md` format and source-policy rules. |
 | `../agents/*.md` | Role-specific coding-agent instructions. |

@@ -297,7 +297,7 @@ class SearchDispatchMixin:
         dork_rows = [row for row in rows if _is_google_dork_query(str(row.get("query") or ""))]
         if dork_rows:
             for row in dork_rows:
-                row["discovery_query_kind"] = "google_dork"
+                row["discovery_query_kind"] = "dork"
                 row["source_kind"] = row.get("source_kind") or "search_result"
             summary = getattr(self, "_google_dorking_summary", {}) or {}
             summary["results_seen"] = int(summary.get("results_seen") or 0) + len(dork_rows)
@@ -319,7 +319,7 @@ class SearchDispatchMixin:
                     resp.raise_for_status()
                     parsed = self._parse_ddg(query, resp.text)
                     for row in parsed:
-                        row["discovery_query_kind"] = "google_dork"
+                        row["discovery_query_kind"] = "dork"
                         row["source_kind"] = row.get("source_kind") or "search_result"
                         row.setdefault("search_engine", "ddg")
                         row.setdefault("source_provider", "blind:ddg")
@@ -375,7 +375,7 @@ class SearchDispatchMixin:
         write_jsonl(self.logs_dir / "source_row_evidence_summary.jsonl", [source_row_evidence_record(row) for row in selected + blocked_rows])
         summary = getattr(self, "_google_dorking_summary", None)
         if isinstance(summary, dict) and summary.get("enabled"):
-            dork_selected = [row for row in selected if row.get("discovery_query_kind") == "google_dork"]
+            dork_selected = [row for row in selected if row.get("discovery_query_kind") in {"dork", "google_dork"}]
             summary["results_after_block_policy"] = len(dork_selected)
             summary["promoted_source_leads"] = len(dork_selected)
             write_json(self.logs_dir / "google_dorking_summary.json", summary)

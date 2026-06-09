@@ -108,7 +108,7 @@ Profiles:
 |---|---|
 | `fast` | Resolves targets and writes review artifacts, but validation is disabled and trusted output is blocked. |
 | `balanced` | Enables deterministic validation of HLS playlists and image snapshots. Validation runs in a bounded worker pool and reuses HTTP clients. |
-| `full` | Balanced validation plus deeper HLS segment/variant checks through the current full-profile validation path. |
+| `full` | Balanced validation plus bounded HLS variant/media playlist and segment checks. Successful HTTP segment checks produce `active_live_verified`; reachable playlists without full/inconclusive segment checks remain `active_live_unknown`. |
 
 Trusted output requires verified target geometry, in-scope coordinates, successful validation, and target `trust_policy=trusted_allowed`. Review artifacts may contain untrusted, unknown, or out-of-scope candidates for audit.
 
@@ -119,6 +119,11 @@ Validation behavior:
 - Validation reuses HTTP clients per worker instead of creating a new client per candidate.
 - Plain and event progress report validation candidate counts, for example `validating streams 500/2287`.
 - There is no validation candidate cap; every selected validation candidate is attempted unless existing profile/scope/trust logic excludes it.
+
+
+### GitHub passive source provider
+
+GitHub can be selected as a passive source provider with `CAMERA_DISCOVERY_SEARCH_ENGINES` or `CAMERA_DISCOVERY_HARVEST_SEARCH_ENGINES` (for example, `CAMERA_DISCOVERY_HARVEST_SEARCH_ENGINES=ddg,bing,searxng,github`). It uses public GitHub code search when `CAMERA_DISCOVERY_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` is configured, normalizes GitHub blob URLs to raw files, and records GitHub rows in the same source-row/search diagnostics artifacts as other blind providers. GitHub query templates live in `src/camera_discovery/search_queries/github.py`, not `SOURCES.md`; see `docs/github_source_provider.md`.
 
 ## Harvest mode
 
@@ -268,7 +273,7 @@ End-to-end Colab notebooks live under `notebooks/`:
 |---|---|
 | `camera_discovery_harvest_hls_only_test.ipynb` | HLS-only harvest workflow using routine `.m3u8` extraction settings. |
 | `camera_discovery_harvest_first_hls_balanced_validation_test.ipynb` | One-command `run --harvest-first --harvest-media .m3u8` workflow through balanced validation, with separate `harvest/` and `run/` artifacts. |
-| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | HLS harvest followed by visible `run --profile balanced --http-timeout 10 --harvest-input --harvest-input-mode handoff-only ...` for practical interactive validation. |
+| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | HLS harvest followed by visible `run --profile full --http-timeout 10 --harvest-input --harvest-input-mode handoff-only ...` for full media validation. |
 | `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | All-media harvest followed by visible bounded handoff validation/review with `--http-timeout 10`. |
 | `camera_discovery_pipeline_only_profiles_test.ipynb` | Pipeline-only comparison for `fast`, `balanced`, and `full` profiles. |
 
@@ -290,11 +295,11 @@ GitHub Actions in `.github/workflows/tests.yml` runs compile, Ruff, pytest, and 
 
 Normal `camera-discovery run` outputs now include deterministic playlist convenience views under `playlists/` and a top-level `media_validation_dashboard.json`. Playlist files are derived from the current candidate/trust/validation state; they do not promote a camera to trusted inventory and they still respect `SOURCES.md`, block patterns, and private/local URL rejection. Typical playlist files include `trusted_media.m3u`, `trusted_media.txt`, `untrusted_review_media.m3u`, `hls_candidates.m3u`, `rtsp_candidates.m3u`, `live_or_reachable_media.m3u`, `dead_or_restricted_media.txt`, and `image_snapshots.txt`.
 
-RTSP support is limited to explicit `rtsp://` or `rtsps://` URLs supplied by the user or extracted verbatim from allowed public source pages/endpoints. The application does not synthesize RTSP URLs, probe common paths, enumerate ports, or test credentials. RTSP candidates are classified as `media_type=rtsp`; validation uses `ffprobe` when available and returns statuses such as `active_rtsp_verified`, `auth_required_rtsp`, `offline_rtsp`, `dead_rtsp`, or `rtsp_validation_unavailable`. Browser maps show RTSP as an external-player URL rather than attempting hls.js playback.
+RTSP support is limited to explicit `rtsp://` or `rtsps://` URLs supplied by the user or extracted verbatim from allowed public source pages/endpoints. The application does not synthesize RTSP URLs, probe common paths, enumerate ports, or test credentials. RTSP candidates are classified as `media_type=rtsp`; validation uses bounded `ffprobe` only when the selected profile/config enables ffprobe validation (currently the `full` profile) and `ffprobe` is available on the host. If ffprobe is disabled by profile/config, RTSP returns `rtsp_validation_disabled`; if it is enabled but missing, RTSP returns `rtsp_validation_unavailable`. Attempted RTSP validation may return `active_rtsp_verified`, `auth_required_rtsp`, `offline_rtsp`, or `dead_rtsp`. Browser maps show RTSP as an external-player URL rather than attempting hls.js playback.
 
 Harvest mode can filter RTSP with `--media rtsp` or include it with `--media stream`; it remains extraction-only and writes harvest playlist summaries when playable media records are present.
 
-Google dorking is guarded public-source discovery only and is enabled by default. Disable it with `CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false` or cap it with `CAMERA_DISCOVERY_MAX_DORK_QUERIES`. Generated operator queries are bounded, target-aware, camera-intent-aware, prefer `site:` restrictions to allowed `SOURCES.md` domains, and are rechecked by deterministic block policy after search results return. The code forbids dorks for device admin/login pages, default credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset indexes.
+Dork query patterns are guarded public-source discovery only and are enabled by default. Disable them with `CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false` or cap them with `CAMERA_DISCOVERY_MAX_DORK_QUERIES`. Generated operator queries are bounded, target-aware, camera-intent-aware, prefer `site:` restrictions to allowed `SOURCES.md` domains, and are submitted as `query_type=dork` to each configured supported search backend (DDG, Bing, SearXNG when configured; GitHub-targeted web dorks when the GitHub provider is selected; Google only if a real supported backend exists). Missing `searxng_base_url` skips only SearXNG attempts, and missing GitHub tokens skip only GitHub attempts. The code forbids dorks for device admin/login pages, default credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset indexes.
 
 
 ## Passive camera intelligence
@@ -305,3 +310,17 @@ The discovery and validation pipeline now includes a passive intelligence layer.
 
 camera-discovery now includes country/language-aware official-source query expansion for public camera source discovery. Mexico and Ukraine are covered by regression tests, and unknown countries use ISO alpha-2 ccTLD hints where available. Unsafe direct device-interface dorks are intentionally excluded. See `docs/international_official_source_discovery.md`.
 
+
+
+### Candidate table and diagnostics updates
+
+`camera_candidates_table.csv` contains all unique candidates considered by the run, not only trusted or non-rejected rows. Use `candidate_disposition`, `validation_status`, `trust_level`, and `scope_status` to distinguish trusted inventory, untrusted review, dead, restricted, out-of-scope, unknown-location, and not-validated candidates. `run/logs/run_summary.json` is summary-only; detailed candidate data lives in the candidate CSV, `logs/validation_results.jsonl`, `logs/candidate_evidence_summary.jsonl`, and per-target candidate JSONL files.
+
+Harvest mode writes `harvest/logs/search_service_summary.json` with real backend rows for `ddg`, `bing`, `searxng`, `github`, and `google` plus a global summary. Dorks are query patterns (`query_type=dork`), not a backend; the summary includes normal/dork query counts per engine, accurate engine-specific skip reasons, and duplicate-query suppression counts.
+
+For efficient harvest-first HLS full validation, run `camera-discovery run --harvest-first --harvest-media .m3u8 --harvest-input-mode handoff-only --profile full --http-timeout 10` and keep browser capture disabled unless dynamic extraction is required.
+
+
+### Media validation dispatcher
+
+The run pipeline dispatches validation by normalized media/protocol evidence, not camera category. HLS, image snapshots, RTSP, MJPEG, direct video files, and unknown media each have explicit validator paths. Unknown media performs bounded classification and delegates once only when URL/header/content evidence proves a supported type. Direct MP4/MOV/WEBM/M4V files are reported as reachable video files, not automatically as live streams; `active_live_verified` is reserved for validators that prove live/segment/stream evidence.

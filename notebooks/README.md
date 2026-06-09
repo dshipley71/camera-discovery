@@ -5,8 +5,8 @@ These notebooks exercise the current public CLI workflows without moving noteboo
 | Notebook | Purpose | Typical use |
 |---|---|---|
 | `camera_discovery_harvest_hls_only_test.ipynb` | Harvest `.m3u8` HLS URLs only. | Fastest way to test HLS extraction, source-row diagnostics, and harvest summaries. |
-| `camera_discovery_harvest_first_hls_balanced_validation_test.ipynb` | Run the new one-command `run --harvest-first --harvest-media .m3u8` orchestration through balanced validation. | Test combined harvest/run artifact layout, handoff schema, source-policy flags, and validation outputs. |
-| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | Harvest HLS URLs and feed `harvest_handoff.json` into visible `camera-discovery run --profile balanced --http-timeout 10 --harvest-input-mode handoff-only`. | End-to-end HLS harvest-to-validation workflow. |
+| `camera_discovery_harvest_first_hls_balanced_validation_test.ipynb` | Run one-command `run --harvest-first --harvest-media .m3u8` orchestration through the efficient full-validation HLS preset. | Test combined harvest/run artifact layout, handoff schema, source-policy flags, and validation outputs. |
+| `camera_discovery_harvest_hls_handoff_full_validation_test.ipynb` | Harvest HLS URLs and feed `harvest_handoff.json` into visible `camera-discovery run --profile full --http-timeout 10 --harvest-input-mode handoff-only`. | End-to-end HLS harvest-to-validation workflow. |
 | `camera_discovery_harvest_all_media_handoff_full_validation_test.ipynb` | Harvest all supported media types and feed the handoff into full pipeline validation with `--harvest-input-mode handoff-only`. | Inspect how broader media types are represented and handled downstream. |
 | `camera_discovery_pipeline_only_profiles_test.ipynb` | Run `camera-discovery run` without harvest input for `fast`, `balanced`, and `full` profiles. | Compare normal pipeline behavior across profiles. |
 
@@ -52,3 +52,9 @@ The notebooks include a passive intelligence summary cell that reads source-code
 
 - `camera_discovery_harvest_all_media_handoff_balanced_validation_test.ipynb` — all-media harvest handoff into balanced validation.
 - `camera_discovery_harvest_first_hls_balanced_validation_test.ipynb` — one-command harvest-first HLS orchestration into balanced validation.
+
+Notebook harvest-first HLS inspection cells display `harvest/logs/search_service_summary.json` as a compact DDG/Bing/SearXNG/GitHub/Google provider table, verify candidate CSV/dashboard row-count consistency, and flag missing full-validation configuration.
+
+Every `*_full_validation_test.ipynb` notebook sets `RUN_PROFILE = "full"`, prints `Effective RUN_PROFILE: full`, and must not pass `--profile balanced` in hidden shell arguments.
+
+GitHub provider experiments can be enabled from notebooks with `CAMERA_DISCOVERY_HARVEST_SEARCH_ENGINES=ddg,bing,searxng,github` and an optional token from Colab userdata/environment (`CAMERA_DISCOVERY_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN`). Notebook helpers should display generated provider summaries rather than embedding source-code patches.

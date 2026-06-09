@@ -126,7 +126,7 @@ def linked_script_urls_from_html(html: str, base_url: str, *, max_scripts: int =
     urls: list[str] = []
     for match in re.finditer(r"<script\b[^>]*\bsrc\s*=\s*([\"'])(.*?)\1", html or "", re.I | re.S):
         absolute = canonical_media_url(urljoin(base_url, _clean_js_url(match.group(2))))
-        if _is_http_url(absolute) and _JS_BUNDLE_RE.search(absolute):
+        if _is_http_url(absolute) and _JS_BUNDLE_RE.search(absolute) and not is_noisy_structured_endpoint_url(absolute):
             urls.append(absolute)
     return _dedupe_strings(urls)[:max_scripts]
 
@@ -180,7 +180,7 @@ def _metadata_children(ref: StructuredEndpointRef, fetch_json: Callable[[str], A
         metadata_url = _with_query(parsed._replace(query="").geturl(), {"f": "pjson"})
         metadata = fetch_json(metadata_url)
         return _arcgis_layer_query_refs(ref.url, metadata)
-    if _OGC_COLLECTIONS_RE.search(path) or _endpoint_type_for_url(ref.url) == "ogc_api_features":
+    if _OGC_COLLECTIONS_RE.search(path):
         metadata = fetch_json(_with_query(ref.url, {"f": "json"}) if not parsed.query else ref.url)
         return _ogc_feature_refs(ref.url, metadata)
     data = None
@@ -303,6 +303,8 @@ def _dedupe_endpoint_refs(refs: Iterable[StructuredEndpointRef]) -> list[Structu
         key = _canonical_endpoint_key(ref.url)
         if key in seen:
             continue
+        if is_noisy_structured_endpoint_url(ref.url):
+            continue
         seen.add(key)
         out.append(ref)
     return out
@@ -328,6 +330,57 @@ def _endpoint_type_for_url(url: str) -> str:
     if "/api/" in path:
         return "api"
     return "structured_endpoint"
+
+
+
+
+def is_noisy_structured_endpoint_url(url: str) -> bool:
+    """Return True for obvious ad/analytics/tag-manager endpoints.
+
+    This conservative filter is limited to well-known non-camera collection and
+    JavaScript infrastructure. It does not block generic CDN hosts or government
+    media/API hosts simply because they use a CDN.
+    """
+    parsed = urlparse(str(url or ""))
+    host = parsed.netloc.casefold()
+    path = parsed.path.casefold()
+    noisy_hosts = (
+        "google-analytics.com",
+        "googletagmanager.com",
+        "googlesyndication.com",
+        "doubleclick.net",
+        "facebook.net",
+        "facebook.com/tr/",
+        "hotjar.com",
+        "hotjar.io",
+        "fullstory.com",
+        "segment.io",
+        "segment.com",
+        "mixpanel.com",
+        "newrelic.com",
+        "nr-data.net",
+        "adservice.google.com",
+        "adsystem.com",
+    )
+    if any(token in host for token in noisy_hosts):
+        return True
+    noisy_path_tokens = (
+        "/analytics",
+        "/gtag/js",
+        "/gtm.js",
+        "/collect?",
+        "/beacon",
+        "/pixel",
+        "/ads/",
+        "/advert",
+        "/tagmanager",
+        "/hotjar",
+        "/fullstory",
+    )
+    if any(token in path for token in noisy_path_tokens):
+        return True
+    generic_js_assets = ("/jquery", "/bootstrap", "/popper", "/react", "/vue", "/angular", "/lodash", "/moment")
+    return path.endswith(('.js', '.mjs')) and any(token in path for token in generic_js_assets)
 
 
 def _clean_js_url(value: str) -> str:

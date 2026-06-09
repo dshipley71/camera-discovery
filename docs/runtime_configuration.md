@@ -222,7 +222,7 @@ camera-discovery harvest-urls "Example City cameras" --media rtsp,hls
 camera-discovery harvest-urls "Example City cameras" --media stream
 ```
 
-The `stream` category includes generic streams and RTSP records. RTSP validation uses `ffprobe` when available. If `ffprobe` is unavailable, the candidate receives `rtsp_validation_unavailable` and remains review/unknown rather than trusted.
+The `stream` category includes generic streams and RTSP records. RTSP validation uses bounded `ffprobe` only when the effective profile/config enables ffprobe validation (currently the `full` profile) and the binary is available. If ffprobe is disabled by profile/config, the candidate receives `rtsp_validation_disabled`; if ffprobe is enabled but unavailable, it receives `rtsp_validation_unavailable`. Both cases remain review/unknown rather than trusted, and RTSP validation never probes beyond the discovered URL.
 
 Playlist export and `media_validation_dashboard.json` are normal output artifacts and do not require a separate CLI flag. They inherit the active source policy and block/private-network checks.
 
@@ -234,7 +234,7 @@ CAMERA_DISCOVERY_MAX_DORK_QUERIES=8
 # Set CAMERA_DISCOVERY_ENABLE_GOOGLE_DORKING=false to disable it for a run.
 ```
 
-When enabled, SearchAgent adds a bounded number of operator-enhanced public-source discovery queries. Queries must include a target/location term and a public-camera or camera-type term. `site:`-scoped queries prefer allowed `SOURCES.md` domains. Results from unknown domains, where supported, are only source leads and still pass through source-policy, extraction, scope, validation, and trust gates. Dorking never targets device UIs, admin/login pages, credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset search engines.
+When enabled, SearchAgent adds a bounded number of operator-enhanced public-source discovery query patterns. Dorks are query patterns, not a search backend: each generated `query_type=dork` string is submitted to configured supported engines such as DDG, Bing, SearXNG when its base URL is configured, and GitHub-targeted web dorks when the GitHub provider is selected; Google appears only if a real supported/configured Google backend exists. Queries must include a target/location term and a public-camera or camera-type term. `site:`-scoped queries prefer allowed `SOURCES.md` domains. Results from unknown domains, where supported, are only source leads and still pass through source-policy, extraction, scope, validation, and trust gates. Dorking never targets device UIs, admin/login pages, credentials, vendor fingerprints, common RTSP paths, private networks, or blocked internet-asset search engines.
 
 
 ## Passive intelligence runtime behavior
@@ -245,3 +245,34 @@ Passive intelligence is part of the normal source/candidate processing flow and 
 ## Metadata-driven structured endpoint discovery
 
 `max_structured_endpoints_per_page` bounds the number of structured endpoints selected from each source page. Structured endpoints include explicit JSON/GeoJSON/API links, endpoint literals in page or script text, advertised ArcGIS REST layers/tables, OGC API Features links, and explicit WFS links. ArcGIS service roots are expanded from fetched public service metadata only; fixed layer-ID guessing is intentionally not used.
+
+## Efficient harvest-first HLS full-validation preset
+
+For harvest-first HLS validation runs, use harvest-first with an HLS media filter, handoff-only ingestion, browser capture disabled unless intentionally needed, bounded timeouts, and the `full` runtime profile:
+
+```bash
+CAMERA_DISCOVERY_ENABLE_BROWSER_CAPTURE=false \
+camera-discovery run "California traffic cameras" \
+  --harvest-first \
+  --harvest-media .m3u8 \
+  --harvest-input-mode handoff-only \
+  --profile full \
+  --http-timeout 10 \
+  --discovery-mode both \
+  --progress-style plain
+```
+
+This preset harvests HLS media evidence first, feeds only the generated handoff into the normal target-aware run, scope-gates before expensive validation, and validates each normalized stream URL once with result reuse for duplicate candidate rows. It does not bypass source policy, target resolution, deterministic scope checks, media validation, or trust gates.
+
+Search-service diagnostics for harvest mode are summarized in `logs/search_service_summary.json` with rows for real backends (`ddg`, `bing`, `searxng`, `github`, `google`) and a global query-plan summary. Query attempts are deduplicated before execution by `engine + query_type + normalized_query`; the same query text across different engines is intentional and remains separately attributed. Missing SearXNG configuration appears only on SearXNG attempts, missing GitHub authentication appears only on GitHub attempts, Google is shown as unsupported/not configured unless a real backend exists, and zero-result services remain visible instead of being hidden. Detailed query attempts live in `logs/search_engine_diagnostics.jsonl` and source-row summaries include `blind_search_query_attempts` plus nested `blind_search_results_by_query`.
+
+
+## Media validation modes and ffprobe availability
+
+The existing runtime profile controls media-validation depth. `--profile balanced` performs lightweight validation: HLS playlist reachability/structure, image snapshot checks, and bounded media-specific checks that do not require proving live segments. `--profile full` enables full media validation behavior, including HLS segment/variant checks and full MJPEG/video-file validators. No extra CLI flag is required.
+
+The validation dispatcher chooses among HLS, image snapshot, RTSP, MJPEG, video-file, and unknown-media validators using URL scheme, extension, declared media type, response headers, and bounded content sniffing. It does not use camera category (`traffic`, `weather`, `beach`, etc.) as the media type.
+
+When RTSP ffprobe validation is disabled by profile/config, RTSP validation reports `rtsp_validation_disabled` without checking for or invoking `ffprobe`. When ffprobe validation is enabled but the binary is unavailable, RTSP validation reports `rtsp_validation_unavailable` rather than success. HLS, MJPEG, image snapshot, video-file, and unknown-media HTTP validators continue to run with configured HTTP timeouts and safe bounded reads. Validation summaries and run explanations include the media validation mode, full-segment setting, HTTP fallback availability, enabled validators, worker count, and timeout.
+
+Full-validation notebooks are expected to set `RUN_PROFILE = "full"`, print `Effective RUN_PROFILE: full`, and pass the CLI profile through visibly rather than hiding a balanced profile in shell arguments.

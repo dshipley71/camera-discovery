@@ -8,31 +8,49 @@ from typing import Any, Iterable
 from camera_discovery.utils.url_safety import is_private_or_local_media_url, redact_url_userinfo
 from camera_discovery.passive_intelligence import passive_intelligence_summary
 
-LIVE_STATUSES = {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing", "active_rtsp_verified"}
+LIVE_STATUSES = {"active_live_unknown", "active_live_verified", "active_image_snapshot_refreshing", "active_rtsp_verified", "active_mjpeg_verified"}
 RESTRICTED_STATUS_FRAGMENTS = ("restricted", "auth_required", "private_network", "not_allowed", "forbidden", "401", "403")
-DEAD_STATUS_FRAGMENTS = ("dead", "offline", "invalid", "decode_failed", "static_image_asset", "not_image", "dead_segments")
-NOT_VALIDATED_STATUSES = {"not_validated", "validation_disabled", "not_validated_media_type", "rtsp_validation_unavailable"}
+DEAD_STATUS_FRAGMENTS = ("dead", "offline", "invalid", "decode_failed", "static_image_asset", "not_image", "dead_segments", "not_live")
+NOT_VALIDATED_STATUSES = {"not_validated", "validation_disabled", "not_validated_media_type", "rtsp_validation_disabled", "rtsp_validation_unavailable", "unsupported_media_type", "unknown_media_unclassified"}
 
 
 def media_type_for_row(row: Any) -> str:
     metadata = _metadata(row)
-    explicit = str(metadata.get("media_type") or _get(row, "media_type", "") or "").casefold()
+    explicit = str(metadata.get("normalized_media_type") or metadata.get("media_type") or _get(row, "media_type", "") or "").casefold().strip()
     url = media_url_for_row(row).casefold()
+    classified = _media_type_from_url(url, content_type=str(metadata.get("content_type") or metadata.get("http_content_type") or ""))
     if explicit in {"hls", "hls_stream"}:
         return "hls"
     if explicit in {"rtsp", "rtsps", "rtsp_stream"}:
         return "rtsp"
+    if explicit in {"mjpeg", "mjpg"}:
+        return "mjpeg"
+    if explicit in {"mp4", "video", "video_file", "mov", "webm", "m4v"}:
+        return "video_file"
     if explicit in {"image", "snapshot", "image_snapshot"}:
         return "image_snapshot"
+    if explicit in {"unknown", "unknown_media", "stream", "unknown_media"}:
+        return classified or "unknown_media"
     if explicit:
-        return explicit
-    if url.startswith(("rtsp://", "rtsps://")):
+        return classified or explicit
+    return classified or "unknown_media"
+
+
+def _media_type_from_url(url: str, *, content_type: str = "") -> str | None:
+    lowered = str(url or "").casefold()
+    ctype = str(content_type or "").casefold()
+    path = lowered.split("?", 1)[0]
+    if lowered.startswith(("rtsp://", "rtsps://")):
         return "rtsp"
-    if ".m3u8" in url:
+    if ".m3u8" in lowered or "mpegurl" in ctype:
         return "hls"
-    if url.split("?", 1)[0].endswith((".jpg", ".jpeg", ".png", ".webp")):
+    if path.endswith((".mjpg", ".mjpeg")) or "multipart/x-mixed-replace" in ctype or "mjpeg" in ctype:
+        return "mjpeg"
+    if path.endswith((".mp4", ".webm", ".mov", ".m4v")) or ctype.startswith("video/"):
+        return "video_file"
+    if path.endswith((".jpg", ".jpeg", ".png", ".webp")) or ctype.startswith("image/"):
         return "image_snapshot"
-    return "unknown_media"
+    return None
 
 
 def media_url_for_row(row: Any) -> str:
@@ -134,6 +152,7 @@ def build_media_validation_dashboard(
     attempted = validation_attempted
     if attempted is None:
         attempted = sum(1 for row in rows if status_bucket(validation_status_for_row(row)) != "not_validated")
+    by_validator = Counter(str(_metadata(row).get("validator_name") or "not_validated") for row in rows)
     return {
         "total_candidates": len(rows),
         "validated": int(attempted or 0),
@@ -144,6 +163,7 @@ def build_media_validation_dashboard(
         "not_validated": buckets.get("not_validated", 0),
         "by_media_type": dict(sorted(by_media_type.items())),
         "by_validation_status": dict(sorted(by_status.items())),
+        "by_validator_name": dict(sorted(by_validator.items())),
         "passive_intelligence": passive_intelligence_summary(rows),
     }
 
