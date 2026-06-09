@@ -323,14 +323,16 @@ class CameraUrlHarvestEngine:
         if diagnostics:
             write_jsonl(self.logs_dir / "harvest_blind_search_diagnostics.jsonl", diagnostics)
         dork_queries = [query for query in queries if _is_harvest_dork_query(query)]
-        dork_rows = [row for row in rows if _is_harvest_dork_query(str(row.get("query") or ""))]
+        dork_attempts = [diag for diag in diagnostics if diag.get("query_type") == "dork" and diag.get("query_key")]
+        dork_rows = [row for row in rows if row.get("query_type") == "dork" or _is_harvest_dork_query(str(row.get("query") or ""))]
         write_json(
             self.logs_dir / "google_dorking_summary.json",
             {
                 "enabled": bool(dork_queries),
                 "queries_generated": len(dork_queries),
-                "results_seen": sum(int(diag.get("results_seen") or 0) for diag in diagnostics if _is_harvest_dork_query(str(diag.get("query") or ""))),
-                "results_after_block_policy": sum(int(diag.get("results_after_block_policy") or 0) for diag in diagnostics if _is_harvest_dork_query(str(diag.get("query") or ""))),
+                "query_pattern_type": "dork",
+                "results_seen": sum(int(diag.get("results_seen") or 0) for diag in dork_attempts),
+                "results_after_block_policy": sum(int(diag.get("selected_rows") or 0) for diag in dork_attempts),
                 "promoted_source_leads": len(dork_rows),
                 "candidates_extracted": 0,
                 "query_sample": dork_queries[:10],

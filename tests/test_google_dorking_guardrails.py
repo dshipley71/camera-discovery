@@ -119,7 +119,7 @@ def test_dorked_results_are_tagged_and_blocked_after_search(tmp_path, monkeypatc
         ],
     )
     rows = engine._blind_search(queries, engine._make_client())
-    assert all(row.get("discovery_query_kind") == "google_dork" for row in rows)
+    assert all(row.get("discovery_query_kind") == "dork" for row in rows)
     selected = engine._select_rows(rows)
     assert [row["url"] for row in selected] == ["https://public.example/cameras/list"]
     summary = json.loads((tmp_path / "logs" / "google_dorking_summary.json").read_text(encoding="utf-8"))

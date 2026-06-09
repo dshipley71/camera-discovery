@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import math
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ _DDG_URL = "https://duckduckgo.com/html/"
 _BING_URL = "https://www.bing.com/search"
 _DDG_PAGE_SIZE = 30
 _BING_PAGE_SIZE = 10
+_DORK_OPERATORS = ("site:", "filetype:", "intitle:", "inurl:")
 
 
 class SearchDispatcher:
@@ -43,23 +45,124 @@ class SearchDispatcher:
     def search_all(self, queries: list[str]) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
         rows: list[dict[str, str]] = []
         diagnostics: list[dict[str, Any]] = []
-        for query in queries:
-            query_rows, query_diags = self._search_one_query(query)
-            filtered = [r for r in query_rows if not self.source_policy.block_reason(str(r.get("url") or ""))]
-            diagnostics.extend(query_diags)
+        planned_keys: set[str] = set()
+        duplicate_suppressed: dict[str, int] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(3, len(self.search_engines)))) as pool:
+            tasks: dict[concurrent.futures.Future[list[dict[str, Any]]], dict[str, Any]] = {}
+            for query in queries:
+                query_type = query_type_for_search_query(query)
+                normalized_query = normalize_search_query(query)
+                if not normalized_query:
+                    continue
+                for engine in self.search_engines:
+                    base = _query_attempt_base(engine, query_type, query, normalized_query)
+                    query_key = str(base["query_key"])
+                    if query_key in planned_keys:
+                        duplicate_suppressed[engine] = duplicate_suppressed.get(engine, 0) + 1
+                        diagnostics.append(
+                            {
+                                **base,
+                                "configured": True,
+                                "attempted": False,
+                                "status": "duplicate_suppressed",
+                                "results_seen": 0,
+                                "parsed_rows": 0,
+                                "selected_rows": 0,
+                                "blocked_rows": 0,
+                                "duplicate_rows": 0,
+                                "error_count": 0,
+                                "skip_reason": "duplicate_query_attempt",
+                                "diagnostics_path": "logs/search_engine_diagnostics.jsonl",
+                            }
+                        )
+                        continue
+                    planned_keys.add(query_key)
+                    if engine == "searxng" and not searxng_enabled(self.searxng_base_url):
+                        diagnostics.append(
+                            {
+                                **base,
+                                "configured": False,
+                                "attempted": False,
+                                "status": "not_configured",
+                                "skipped": True,
+                                "reason": "searxng_base_url_not_configured",
+                                "results_seen": 0,
+                                "parsed_rows": 0,
+                                "selected_rows": 0,
+                                "blocked_rows": 0,
+                                "duplicate_rows": 0,
+                                "error_count": 0,
+                                "skip_reason": "searxng_base_url_not_configured",
+                                "diagnostics_path": "logs/search_engine_diagnostics.jsonl",
+                            }
+                        )
+                        continue
+                    if engine == "ddg":
+                        tasks[pool.submit(self._ddg_search, query)] = base
+                    elif engine == "bing":
+                        tasks[pool.submit(self._bing_search, query)] = base
+                    elif engine == "searxng":
+                        tasks[pool.submit(self._searxng_search, query)] = base
+            for future in concurrent.futures.as_completed(tasks):
+                base = tasks[future]
+                engine = str(base["engine"])
+                try:
+                    engine_rows = future.result()
+                    filtered = [r for r in engine_rows if not self.source_policy.block_reason(str(r.get("url") or ""))]
+                    for row in filtered:
+                        row["query_type"] = base["query_type"]
+                        row["normalized_query"] = base["normalized_query"]
+                        row["query_key"] = base["query_key"]
+                        if base["query_type"] == "dork":
+                            row["discovery_query_kind"] = "dork"
+                    diagnostics.append(
+                        {
+                            **base,
+                            "configured": True,
+                            "attempted": True,
+                            "status": "ran",
+                            "results_seen": len(engine_rows),
+                            "parsed_rows": len(engine_rows),
+                            "selected_rows": len(filtered),
+                            "blocked_rows": max(0, len(engine_rows) - len(filtered)),
+                            "duplicate_rows": max(0, len(engine_rows) - len(self._dedupe_rows(engine_rows))),
+                            "error_count": 0,
+                            "skip_reason": None,
+                            "diagnostics_path": "logs/search_engine_diagnostics.jsonl",
+                        }
+                    )
+                    rows.extend(filtered)  # type: ignore[arg-type]
+                except Exception as exc:
+                    diagnostics.append(
+                        {
+                            **base,
+                            "configured": True,
+                            "attempted": True,
+                            "status": "error",
+                            "error": repr(exc),
+                            "results_seen": 0,
+                            "parsed_rows": 0,
+                            "selected_rows": 0,
+                            "blocked_rows": 0,
+                            "duplicate_rows": 0,
+                            "error_count": 1,
+                            "skip_reason": repr(exc)[:300],
+                            "diagnostics_path": "logs/search_engine_diagnostics.jsonl",
+                        }
+                    )
+        if diagnostics:
             diagnostics.append(
                 {
-                    "query": query,
-                    "engines": self.search_engines,
-                    "results_seen": len(query_rows),
-                    "results_after_block_policy": len(filtered),
-                    "ddg_count": sum(1 for r in filtered if _row_has_engine(r, "ddg")),
-                    "bing_count": sum(1 for r in filtered if _row_has_engine(r, "bing")),
-                    "searxng_count": sum(1 for r in filtered if _row_has_engine(r, "searxng")),
+                    "record_type": "query_plan_summary",
+                    "total_query_attempts": len([d for d in diagnostics if d.get("query_key")]),
+                    "unique_query_attempts": len(planned_keys),
+                    "duplicate_query_attempts_suppressed": sum(duplicate_suppressed.values()),
+                    "duplicate_query_attempts_suppressed_by_engine": dict(sorted(duplicate_suppressed.items())),
+                    "unique_query_texts": len({str(d.get("normalized_query") or "") for d in diagnostics if d.get("normalized_query")}),
+                    "dork_queries_enabled": any(d.get("query_type") == "dork" for d in diagnostics),
+                    "diagnostics_path": "logs/search_engine_diagnostics.jsonl",
                 }
             )
-            rows.extend(filtered)
-        if diagnostics:
             write_jsonl(self.logs_dir / "search_engine_diagnostics.jsonl", diagnostics)
         return self._dedupe_rows(rows), diagnostics
 
@@ -72,32 +175,7 @@ class SearchDispatcher:
         valid = [e for e in engines if e in {"ddg", "bing", "searxng"}]
         if "ddg" not in valid and "bing" not in valid:
             valid = ["ddg", "bing", *(["searxng"] if "searxng" in valid else [])]
-        return valid
-
-    def _search_one_query(self, query: str) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
-        tasks: dict[concurrent.futures.Future[list[dict[str, Any]]], str] = {}
-        rows: list[dict[str, str]] = []
-        diagnostics: list[dict[str, Any]] = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(3, len(self.search_engines)))) as pool:
-            for engine in self.search_engines:
-                if engine == "searxng" and not searxng_enabled(self.searxng_base_url):
-                    diagnostics.append({"query": query, "engine": "searxng", "skipped": True, "reason": "searxng_base_url_not_configured"})
-                    continue
-                if engine == "ddg":
-                    tasks[pool.submit(self._ddg_search, query)] = engine
-                elif engine == "bing":
-                    tasks[pool.submit(self._bing_search, query)] = engine
-                elif engine == "searxng":
-                    tasks[pool.submit(self._searxng_search, query)] = engine
-            for future in concurrent.futures.as_completed(tasks):
-                engine = tasks[future]
-                try:
-                    engine_rows = future.result()
-                    diagnostics.append({"query": query, "engine": engine, "parsed_rows": len(engine_rows)})
-                    rows.extend(engine_rows)  # type: ignore[arg-type]
-                except Exception as exc:
-                    diagnostics.append({"query": query, "engine": engine, "error": repr(exc), "parsed_rows": 0})
-        return self._dedupe_rows(rows), diagnostics
+        return list(dict.fromkeys(valid))
 
     def _ddg_search(self, query: str) -> list[dict[str, Any]]:
         max_results = int(getattr(self.config, "max_search_results_per_query", 50) or 0)
@@ -170,13 +248,31 @@ class SearchDispatcher:
             engines = existing.setdefault("search_engines", [])
             if engine and engine not in engines:
                 engines.append(engine)
-            existing["source_provider"] = "blind:multi" if len(engines) > 1 else existing.get("source_provider", "blind")
-            for key in ("title", "snippet", "query", "source_name"):
-                if not existing.get(key) and row.get(key):
-                    existing[key] = row[key]
-        return [{str(k): str(v) if not isinstance(v, (list, dict)) else v for k, v in merged[url].items()} for url in order]
+                existing["source_provider"] = "blind:multi"
+            if row.get("query_type") == "dork" or existing.get("query_type") == "dork":
+                existing["query_type"] = "dork"
+                existing["discovery_query_kind"] = "dork"
+        return [{str(k): v for k, v in merged[url].items()} for url in order]
 
 
-def _row_has_engine(row: dict[str, Any], engine: str) -> bool:
-    engines = row.get("search_engines")
-    return row.get("search_engine") == engine or (isinstance(engines, list) and engine in engines)
+def normalize_search_query(query: str) -> str:
+    text = str(query or "").strip()
+    text = text.translate(str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"}))
+    text = re.sub(r"\s+", " ", text)
+    return text.casefold()
+
+
+def query_type_for_search_query(query: str) -> str:
+    lowered = str(query or "").casefold()
+    return "dork" if any(op in lowered for op in _DORK_OPERATORS) else "normal"
+
+
+def _query_attempt_base(engine: str, query_type: str, query: str, normalized_query: str) -> dict[str, Any]:
+    query_key = f"{engine}|{query_type}|{normalized_query}"
+    return {
+        "engine": engine,
+        "query_type": query_type,
+        "query": query,
+        "normalized_query": normalized_query,
+        "query_key": query_key,
+    }

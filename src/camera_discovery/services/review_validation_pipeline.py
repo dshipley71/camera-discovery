@@ -780,7 +780,7 @@ class ReviewAndValidationPipeline:
         search_services = explanation.get("search_service_summary") or {}
         if search_services:
             lines.append("## Search service summary")
-            for key in ("ddg", "bing", "searxng", "google_dork"):
+            for key in ("ddg", "bing", "searxng", "google"):
                 item = search_services.get(key) or {}
                 lines.append(f"- `{key}`: status={item.get('status')} parsed={item.get('parsed_rows', 0)} selected={item.get('selected_rows', 0)} errors={item.get('error_count', 0)} skip={item.get('skip_reason', '')}")
             lines.append("")

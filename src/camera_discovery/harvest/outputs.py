@@ -72,11 +72,12 @@ def build_source_rows_summary(
         "selected_direct_rows": selected_direct_rows,
         "blocked_source_rows": len(blocked_rows),
         "blocked_source_rows_by_provider": count_rows_by_key(blocked_rows, "source_provider"),
-        "blind_search_queries": [item.get("query") for item in blind_diagnostics if item.get("query")],
-        "blind_search_query_count": len(blind_diagnostics),
-        "blind_search_parsed_rows": sum(int(item.get("parsed_rows") or 0) for item in blind_diagnostics),
-        "blind_search_errors": sum(1 for item in blind_diagnostics if item.get("error")),
-        "blind_search_results_by_query": {str(item.get("query") or ""): int(item.get("parsed_rows") or 0) for item in blind_diagnostics if item.get("query")},
+        "blind_search_queries": _unique_blind_query_texts(blind_diagnostics),
+        "blind_search_query_count": sum(1 for item in blind_diagnostics if item.get("query_key") and item.get("status") != "duplicate_suppressed"),
+        "blind_search_query_attempts": _blind_query_attempts(blind_diagnostics),
+        "blind_search_parsed_rows": sum(int(item.get("parsed_rows") or 0) for item in blind_diagnostics if item.get("query_key")),
+        "blind_search_errors": sum(int(item.get("error_count") or (1 if item.get("error") else 0)) for item in blind_diagnostics if item.get("query_key")),
+        "blind_search_results_by_query": _blind_results_by_query(blind_diagnostics),
         "search_service_summary": search_service_summary,
         "duplicate_source_rows": max(0, len(selected_before_budget) + len(blocked_rows) - len({str(row.get("url") or "").split("#", 1)[0] for row in [*directory_rows, *blind_rows, *direct_rows] if row.get("url")})),
         "media_filter_rejected_rows": 0,
@@ -165,13 +166,41 @@ def _provider_group(value: Any) -> str:
 
 
 def _row_matches_service(row: dict[str, Any], service: str) -> bool:
-    if service == "google_dork":
-        return str(row.get("discovery_query_kind") or "").casefold() == "google_dork"
     engine = str(row.get("search_engine") or "").casefold()
     if engine == service:
         return True
     engines = row.get("search_engines")
     return isinstance(engines, list) and service in {str(item).casefold() for item in engines}
+
+
+def _empty_query_type_counts() -> dict[str, dict[str, int]]:
+    return {
+        "normal": {"queries_attempted": 0, "results_seen": 0, "parsed_rows": 0, "selected_rows": 0, "blocked_rows": 0, "duplicate_rows": 0, "error_count": 0},
+        "dork": {"queries_attempted": 0, "results_seen": 0, "parsed_rows": 0, "selected_rows": 0, "blocked_rows": 0, "duplicate_rows": 0, "error_count": 0},
+    }
+
+
+def _search_engine_entry(engine: str) -> dict[str, Any]:
+    configured = engine in {"ddg", "bing"}
+    default_skip_reason = "" if configured else ("google_backend_not_configured" if engine == "google" else "searxng_base_url_not_configured")
+    return {
+        "configured": configured,
+        "attempted": False,
+        "status": "skipped" if configured else "not_configured",
+        "queries_attempted": 0,
+        "normal_queries_attempted": 0,
+        "dork_queries_attempted": 0,
+        "results_seen": 0,
+        "parsed_rows": 0,
+        "selected_rows": 0,
+        "blocked_rows": 0,
+        "duplicate_rows": 0,
+        "duplicate_query_attempts_suppressed": 0,
+        "error_count": 0,
+        "skip_reason": default_skip_reason,
+        "diagnostics_path": "logs/search_engine_diagnostics.jsonl",
+        "by_query_type": _empty_query_type_counts(),
+    }
 
 
 def build_search_service_summary(
@@ -180,51 +209,122 @@ def build_search_service_summary(
     blocked_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     diagnostics = diagnostics or []
-    services = {
-        service: {
-            "configured": service != "searxng",
-            "attempted": False,
-            "status": "not_configured" if service == "searxng" else "skipped",
-            "queries_attempted": 0,
-            "results_seen": 0,
-            "parsed_rows": 0,
-            "selected_rows": 0,
-            "blocked_rows": 0,
-            "duplicate_rows": 0,
-            "error_count": 0,
-            "skip_reason": "searxng_base_url_not_configured" if service == "searxng" else "",
-            "diagnostics_path": "logs/search_engine_diagnostics.jsonl",
-        }
-        for service in ("ddg", "bing", "searxng", "google_dork")
-    }
-    for diag in diagnostics:
+    services = {engine: _search_engine_entry(engine) for engine in ("ddg", "bing", "searxng", "google")}
+    query_attempts = [diag for diag in diagnostics if diag.get("query_key")]
+    for diag in query_attempts:
         engine = str(diag.get("engine") or "").casefold()
-        query = str(diag.get("query") or "")
-        service_names = []
-        if engine in {"ddg", "bing", "searxng"}:
-            service_names.append(engine)
-        if query and any(op in query.casefold() for op in ("site:", "filetype:", "intitle:", "inurl:")):
-            service_names.append("google_dork")
-        for service in service_names:
-            entry = services[service]
-            entry["configured"] = not bool(diag.get("skipped"))
-            if diag.get("skipped"):
-                entry["status"] = "not_configured"
-                entry["skip_reason"] = str(diag.get("reason") or "skipped")
-                continue
-            entry["attempted"] = True
-            entry["status"] = "error" if diag.get("error") else "ran"
-            entry["queries_attempted"] += 1
-            parsed = int(diag.get("parsed_rows") or diag.get("results_seen") or 0)
-            entry["results_seen"] += int(diag.get("results_seen") or parsed)
-            entry["parsed_rows"] += parsed
-            if diag.get("error"):
-                entry["error_count"] += 1
-                entry["skip_reason"] = str(diag.get("error"))[:300]
+        if engine not in services:
+            continue
+        query_type = str(diag.get("query_type") or "normal").casefold()
+        if query_type not in {"normal", "dork"}:
+            query_type = "normal"
+        entry = services[engine]
+        entry["configured"] = bool(diag.get("configured", entry["configured"]))
+        qtype_entry = entry["by_query_type"][query_type]
+        if diag.get("status") == "duplicate_suppressed":
+            entry["duplicate_query_attempts_suppressed"] += 1
+            entry["duplicate_rows"] += 1
+            qtype_entry["duplicate_rows"] += 1
+            continue
+        if not diag.get("attempted"):
+            entry["status"] = str(diag.get("status") or "skipped")
+            entry["skip_reason"] = str(diag.get("skip_reason") or diag.get("reason") or "skipped")
+            continue
+        entry["attempted"] = True
+        entry["status"] = "error" if diag.get("error") or int(diag.get("error_count") or 0) else "ran"
+        entry["queries_attempted"] += 1
+        if query_type == "dork":
+            entry["dork_queries_attempted"] += 1
+        else:
+            entry["normal_queries_attempted"] += 1
+        qtype_entry["queries_attempted"] += 1
+        for key in ("results_seen", "parsed_rows", "selected_rows", "blocked_rows", "duplicate_rows", "error_count"):
+            value = int(diag.get(key) or 0)
+            entry[key] += value
+            qtype_entry[key] += value
+        if diag.get("error") or int(diag.get("error_count") or 0):
+            entry["skip_reason"] = str(diag.get("skip_reason") or diag.get("error") or "error")[:300]
     for service, entry in services.items():
-        entry["selected_rows"] = sum(1 for row in selected_rows if _row_matches_service(row, service))
-        entry["blocked_rows"] = sum(1 for row in blocked_rows if _row_matches_service(row, service))
-        entry["duplicate_rows"] = max(0, int(entry["parsed_rows"]) - int(entry["selected_rows"]) - int(entry["blocked_rows"]))
-        if service != "searxng" and not entry["attempted"] and entry["status"] == "skipped":
+        entry["selected_rows"] = max(int(entry["selected_rows"]), sum(1 for row in selected_rows if _row_matches_service(row, service)))
+        entry["blocked_rows"] = max(int(entry["blocked_rows"]), sum(1 for row in blocked_rows if _row_matches_service(row, service)))
+        if service == "searxng" and not entry["attempted"] and not entry["configured"]:
+            entry["status"] = "not_configured"
+            entry["skip_reason"] = "searxng_base_url_not_configured"
+        if service == "google":
+            entry["configured"] = False
+            entry["attempted"] = False
+            entry["status"] = "unsupported_backend"
+            entry["skip_reason"] = "google_backend_not_configured"
+        elif not entry["attempted"] and entry["configured"] and not entry["skip_reason"]:
             entry["skip_reason"] = "no_queries_for_service"
-    return services
+    global_summary = _search_global_summary(query_attempts, services)
+    return {**services, "global": global_summary}
+
+
+def _search_global_summary(query_attempts: list[dict[str, Any]], services: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    duplicate_suppressed = sum(1 for diag in query_attempts if diag.get("status") == "duplicate_suppressed")
+    unique_attempts = [diag for diag in query_attempts if diag.get("status") != "duplicate_suppressed"]
+    attempted = [diag for diag in unique_attempts if diag.get("attempted")]
+    return {
+        "total_query_attempts": len(query_attempts),
+        "unique_query_attempts": len(unique_attempts),
+        "duplicate_query_attempts_suppressed": duplicate_suppressed,
+        "unique_query_texts": len({str(diag.get("normalized_query") or "") for diag in query_attempts if diag.get("normalized_query")}),
+        "engines_attempted": sorted({str(diag.get("engine") or "") for diag in attempted if diag.get("engine")}),
+        "engines_skipped": sorted(engine for engine, entry in services.items() if not entry.get("attempted")),
+        "dork_queries_enabled": any(diag.get("query_type") == "dork" for diag in query_attempts),
+        "dork_queries_attempted": sum(1 for diag in attempted if diag.get("query_type") == "dork"),
+        "normal_queries_attempted": sum(1 for diag in attempted if diag.get("query_type") != "dork"),
+    }
+
+
+def _blind_query_attempts(diagnostics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fields = (
+        "engine",
+        "query_type",
+        "query",
+        "normalized_query",
+        "query_key",
+        "configured",
+        "attempted",
+        "status",
+        "results_seen",
+        "parsed_rows",
+        "selected_rows",
+        "blocked_rows",
+        "duplicate_rows",
+        "error_count",
+        "skip_reason",
+        "diagnostics_path",
+    )
+    return [{field: diag.get(field) for field in fields if field in diag} for diag in diagnostics if diag.get("query_key")]
+
+
+def _unique_blind_query_texts(diagnostics: list[dict[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for diag in diagnostics:
+        query = str(diag.get("query") or "")
+        normalized = str(diag.get("normalized_query") or query.casefold())
+        if not query or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(query)
+    return out
+
+
+def _blind_results_by_query(diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
+    out: dict[str, dict[str, dict[str, dict[str, int]]]] = {}
+    for diag in diagnostics:
+        if not diag.get("query_key") or diag.get("status") == "duplicate_suppressed":
+            continue
+        engine = str(diag.get("engine") or "unknown")
+        query_type = str(diag.get("query_type") or "normal")
+        query = str(diag.get("query") or "")
+        out.setdefault(engine, {}).setdefault(query_type, {})[query] = {
+            "results_seen": int(diag.get("results_seen") or 0),
+            "parsed_rows": int(diag.get("parsed_rows") or 0),
+            "selected_rows": int(diag.get("selected_rows") or 0),
+            "blocked_rows": int(diag.get("blocked_rows") or 0),
+        }
+    return out

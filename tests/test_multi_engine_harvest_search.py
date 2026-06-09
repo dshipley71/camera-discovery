@@ -57,7 +57,97 @@ def test_search_dispatcher_merges_engines_without_network(monkeypatch, tmp_path)
     merged = next(row for row in rows if row["url"] == "https://example.gov/cameras")
     assert merged["source_provider"] == "blind:multi"
     assert set(merged["search_engines"]) == {"ddg", "bing"}
-    assert any(diag.get("ddg_count") == 1 and diag.get("bing_count") == 1 for diag in diagnostics)
+    attempts = [diag for diag in diagnostics if diag.get("query_key")]
+    assert {(diag["engine"], diag["query_type"], diag["query"]) for diag in attempts if diag.get("attempted")} == {
+        ("ddg", "normal", "public cameras"),
+        ("bing", "normal", "public cameras"),
+        ("searxng", "normal", "public cameras"),
+    }
+    assert all(diag["query_key"].startswith(f"{diag['engine']}|{diag['query_type']}|") for diag in attempts)
+
+
+def test_dork_queries_run_through_ddg_and_bing_without_searxng(monkeypatch, tmp_path):
+    policy = load_source_policy(None, [])
+    cfg = SimpleNamespace(
+        max_search_results_per_query=10,
+        search_engines=["ddg", "bing", "searxng"],
+        searxng_base_url="",
+        searxng_categories="general",
+        searxng_max_results=10,
+        user_agent="test",
+        http_timeout=1.0,
+        ddg_delay_seconds=0.0,
+    )
+    dispatcher = SearchDispatcher(cfg, policy, tmp_path)
+    seen = {"ddg": [], "bing": []}
+
+    def ddg(query):
+        seen["ddg"].append(query)
+        return [{"query": query, "url": "https://example.gov/ddg", "title": "DDG", "source_provider": "blind:ddg", "search_engine": "ddg"}]
+
+    def bing(query):
+        seen["bing"].append(query)
+        return [{"query": query, "url": "https://example.gov/bing", "title": "Bing", "source_provider": "blind:bing", "search_engine": "bing"}]
+
+    monkeypatch.setattr(dispatcher, "_ddg_search", ddg)
+    monkeypatch.setattr(dispatcher, "_bing_search", bing)
+    monkeypatch.setattr(dispatcher, "_searxng_search", lambda query: (_ for _ in ()).throw(AssertionError("SearXNG should be skipped when base URL is missing")))
+
+    rows, diagnostics = dispatcher.search_all(["site:.gov public cameras"])
+
+    assert seen == {"ddg": ["site:.gov public cameras"], "bing": ["site:.gov public cameras"]}
+    assert {row["search_engine"] for row in rows} == {"ddg", "bing"}
+    dork_attempts = [diag for diag in diagnostics if diag.get("query_type") == "dork"]
+    assert {diag["engine"] for diag in dork_attempts} == {"ddg", "bing", "searxng"}
+    assert all(diag.get("skip_reason") != "searxng_base_url_not_configured" for diag in dork_attempts if diag["engine"] in {"ddg", "bing"})
+    searxng = next(diag for diag in dork_attempts if diag["engine"] == "searxng")
+    assert searxng["status"] == "not_configured"
+    assert searxng["skip_reason"] == "searxng_base_url_not_configured"
+
+
+def test_query_attempt_deduplication_is_engine_and_type_aware(monkeypatch, tmp_path):
+    policy = load_source_policy(None, [])
+    cfg = SimpleNamespace(
+        max_search_results_per_query=10,
+        search_engines=["ddg", "bing"],
+        searxng_base_url="",
+        searxng_categories="general",
+        searxng_max_results=10,
+        user_agent="test",
+        http_timeout=1.0,
+        ddg_delay_seconds=0.0,
+    )
+    dispatcher = SearchDispatcher(cfg, policy, tmp_path)
+    calls = []
+
+    def engine_rows(engine):
+        def inner(query):
+            calls.append((engine, query))
+            return [{"query": query, "url": f"https://example.gov/{engine}/{len(calls)}", "title": engine, "source_provider": f"blind:{engine}", "search_engine": engine}]
+        return inner
+
+    monkeypatch.setattr(dispatcher, "_ddg_search", engine_rows("ddg"))
+    monkeypatch.setattr(dispatcher, "_bing_search", engine_rows("bing"))
+
+    _, diagnostics = dispatcher.search_all(["public cameras", "  public   cameras  ", "site:.gov public cameras", "site:.gov  public   cameras"])
+
+    assert sorted(calls) == sorted([
+        ("ddg", "public cameras"),
+        ("bing", "public cameras"),
+        ("ddg", "site:.gov public cameras"),
+        ("bing", "site:.gov public cameras"),
+    ])
+    duplicates = [diag for diag in diagnostics if diag.get("status") == "duplicate_suppressed"]
+    assert len(duplicates) == 4
+    summary = next(diag for diag in diagnostics if diag.get("record_type") == "query_plan_summary")
+    assert summary["duplicate_query_attempts_suppressed"] == 4
+    attempted = [diag for diag in diagnostics if diag.get("attempted")]
+    assert {(diag["engine"], diag["query_type"], diag["normalized_query"]) for diag in attempted} == {
+        ("ddg", "normal", "public cameras"),
+        ("bing", "normal", "public cameras"),
+        ("ddg", "dork", "site:.gov public cameras"),
+        ("bing", "dork", "site:.gov public cameras"),
+    }
 
 
 def test_xhr_fetch_endpoint_extraction_covers_common_javascript_forms():
@@ -83,20 +173,69 @@ def test_search_service_summary_keeps_zero_and_skipped_services():
     from camera_discovery.core.models import DiscoveryMode, HarvestConfig
 
     diagnostics = [
-        {"query": "q", "engine": "ddg", "parsed_rows": 2},
-        {"query": "q", "engine": "bing", "parsed_rows": 0},
-        {"query": "q", "engine": "searxng", "skipped": True, "reason": "searxng_base_url_not_configured"},
-        {"query": "site:.gov q", "engine": "ddg", "parsed_rows": 0},
+        {
+            "engine": "ddg",
+            "query_type": "normal",
+            "query": "q",
+            "normalized_query": "q",
+            "query_key": "ddg|normal|q",
+            "configured": True,
+            "attempted": True,
+            "status": "ran",
+            "results_seen": 2,
+            "parsed_rows": 2,
+            "selected_rows": 1,
+            "blocked_rows": 0,
+            "duplicate_rows": 1,
+            "error_count": 0,
+        },
+        {
+            "engine": "bing",
+            "query_type": "dork",
+            "query": "site:.gov q",
+            "normalized_query": "site:.gov q",
+            "query_key": "bing|dork|site:.gov q",
+            "configured": True,
+            "attempted": True,
+            "status": "ran",
+            "results_seen": 0,
+            "parsed_rows": 0,
+            "selected_rows": 0,
+            "blocked_rows": 0,
+            "duplicate_rows": 0,
+            "error_count": 0,
+        },
+        {
+            "engine": "searxng",
+            "query_type": "dork",
+            "query": "site:.gov q",
+            "normalized_query": "site:.gov q",
+            "query_key": "searxng|dork|site:.gov q",
+            "configured": False,
+            "attempted": False,
+            "status": "not_configured",
+            "skip_reason": "searxng_base_url_not_configured",
+            "results_seen": 0,
+            "parsed_rows": 0,
+            "selected_rows": 0,
+            "blocked_rows": 0,
+            "duplicate_rows": 0,
+            "error_count": 0,
+        },
     ]
     selected = [{"url": "https://example.gov/cameras", "source_provider": "blind:ddg", "search_engine": "ddg"}]
     summary = build_search_service_summary(diagnostics, selected, [])
-    assert set(summary) == {"ddg", "bing", "searxng", "google_dork"}
+    assert {"ddg", "bing", "searxng", "google", "global"}.issubset(summary)
+    assert "google_dork" not in summary
     assert summary["ddg"]["selected_rows"] == 1
+    assert summary["ddg"]["normal_queries_attempted"] == 1
     assert summary["bing"]["attempted"] is True
-    assert summary["bing"]["parsed_rows"] == 0
+    assert summary["bing"]["dork_queries_attempted"] == 1
     assert summary["searxng"]["status"] == "not_configured"
-    assert summary["google_dork"]["attempted"] is True
-    assert summary["google_dork"]["parsed_rows"] == 0
+    assert summary["searxng"]["skip_reason"] == "searxng_base_url_not_configured"
+    assert summary["google"]["status"] == "unsupported_backend"
+    assert summary["google"]["skip_reason"] == "google_backend_not_configured"
+    assert summary["global"]["dork_queries_attempted"] == 1
 
     cfg = HarvestConfig(query="q", output_dir=Path("/tmp/out"), discovery_mode=DiscoveryMode.BOTH)
     source_summary = build_source_rows_summary(
@@ -113,6 +252,9 @@ def test_search_service_summary_keeps_zero_and_skipped_services():
     )
     assert source_summary["selected_blind_rows"] == 1
     assert source_summary["selected_by_provider"]["blind:ddg"] == 1
+    assert source_summary["blind_search_queries"] == ["q", "site:.gov q"]
+    assert source_summary["blind_search_results_by_query"]["ddg"]["normal"]["q"]["parsed_rows"] == 2
+    assert source_summary["blind_search_results_by_query"]["bing"]["dork"]["site:.gov q"]["parsed_rows"] == 0
 
 
 def test_endpoint_noise_filter_keeps_camera_json_and_drops_analytics():
