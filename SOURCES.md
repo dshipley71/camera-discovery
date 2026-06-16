@@ -8,16 +8,14 @@ Blocked sources are a global deny policy and are respected by `blind`, `director
 
 | name | url | type | scope_hint | enabled | notes |
 |---|---|---|---|---|---|
-| OpenCCTV | http://www.opencctv.org | site | global | true | User-approved public CCTV directory source. |
-| Windy Webcams | https://www.windy.com/webcams | site | global | true |  |
-| Skyline Webcams | https://www.skylinewebcams.com | site | global | true |  |
-| EarthCam | https://www.earthcam.com | site | global | true |  |
-| WorldViewStream | https://worldviewstream.com | site | global | true |  |
-| WorldCams.tv | https://worldcams.tv | site | global | true |  |
-| LiveBeaches | https://livebeaches.com | site | global | true |  |
-| EarthTV | https://earthtv.com | site | global | true |  |
-| GeoWebcams | https://www.geowebcams.com | site | global | true |  |
-| CamStreamer | https://camstreamer.com/live | site | global | true |  |
+| Capufe | https://www.gob.mx/capufe | site | global | true | official_road |
+| Mexico | https://www.gob.mx/sict | site | global | true | official_transport |
+| Mexico | https://www.gob.mx/sct | site | global | true | official_transport |
+| Open CCTV | https://opencctv.org/cameras/mexico | site | global | true | camera_directory |
+| Skyline | https://www.skylinewebcams.com/en/webcam/mexico.html | site | global | true | camera_directory |
+| Webcamtxi | https://www.webcamtaxi.com/en/mexico.html | site | global | true | camera_directory |
+| Mexico | https://www.gob.mx/sectur | site | global | true | official_tourism |
+
 
 ## Blocked Sources
 
